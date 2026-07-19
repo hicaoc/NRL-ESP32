@@ -30,11 +30,11 @@ import (
 var validName = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$`)
 
 type server struct {
-	db                                                *sql.DB
-	firmwareDir, packagesDir, adminToken, deviceToken, publicPrefix string
-	adminUser, adminPassword                          string
-	sessionSecret                                     []byte
-	sessionTTL                                        time.Duration
+	db                                                                              *sql.DB
+	firmwareDir, packagesDir, boardImagesDir, adminToken, deviceToken, publicPrefix string
+	adminUser, adminPassword                                                        string
+	sessionSecret                                                                   []byte
+	sessionTTL                                                                      time.Duration
 }
 
 // A flash package is one build's complete flash image set. The server stores it
@@ -91,13 +91,15 @@ func main() {
 	if err := os.MkdirAll(filepath.Join(dataDir, "packages"), 0750); err != nil {
 		log.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "board-images"), 0750); err != nil {
+		log.Fatal(err)
+	}
 	db, err := sql.Open("sqlite", filepath.Join(dataDir, "ota.sqlite3"))
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
-	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS releases (id INTEGER PRIMARY KEY, board_type TEXT NOT NULL, version TEXT NOT NULL, channel TEXT NOT NULL, filename TEXT NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL, notes TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(board_type,version,channel));
-CREATE TABLE IF NOT EXISTS devices (device_id TEXT PRIMARY KEY, board_type TEXT NOT NULL, firmware_version TEXT NOT NULL, ip_address TEXT NOT NULL, metadata_json TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL);`); err != nil {
+	if err = initDB(db); err != nil {
 		log.Fatal(err)
 	}
 	// Migration: the download URL used to be derived as "/firmware/"+filename.
@@ -113,16 +115,17 @@ CREATE TABLE IF NOT EXISTS devices (device_id TEXT PRIMARY KEY, board_type TEXT 
 		log.Fatal(err)
 	}
 	s := &server{
-		db:            db,
-		firmwareDir:   filepath.Join(dataDir, "firmware"),
-		packagesDir:   filepath.Join(dataDir, "packages"),
-		publicPrefix:  publicPrefix,
-		adminToken:    admin,
-		deviceToken:   os.Getenv("OTA_DEVICE_TOKEN"),
-		adminUser:     adminUser,
-		adminPassword: os.Getenv("OTA_ADMIN_PASSWORD"),
-		sessionSecret: secret,
-		sessionTTL:    12 * time.Hour,
+		db:             db,
+		firmwareDir:    filepath.Join(dataDir, "firmware"),
+		packagesDir:    filepath.Join(dataDir, "packages"),
+		boardImagesDir: filepath.Join(dataDir, "board-images"),
+		publicPrefix:   publicPrefix,
+		adminToken:     admin,
+		deviceToken:    os.Getenv("OTA_DEVICE_TOKEN"),
+		adminUser:      adminUser,
+		adminPassword:  os.Getenv("OTA_ADMIN_PASSWORD"),
+		sessionSecret:  secret,
+		sessionTTL:     12 * time.Hour,
 	}
 	mux := http.NewServeMux()
 	s.routes(mux)
@@ -135,11 +138,23 @@ func (s *server) routes(m *http.ServeMux) {
 	m.HandleFunc("POST /api/v1/admin/releases", s.uploadRelease)
 	m.HandleFunc("POST /api/v1/admin/flash-package", s.uploadPackage)
 	m.HandleFunc("GET /api/v1/admin/devices", s.listDevices)
+	m.HandleFunc("GET /api/v1/admin/catalog", s.adminCatalog)
+	m.HandleFunc("GET /api/v1/admin/audit", s.listAudit)
+	m.HandleFunc("POST /api/v1/admin/boards", s.createBoard)
+	m.HandleFunc("POST /api/v1/admin/catalog/import", s.importCatalog)
+	m.HandleFunc("PUT /api/v1/admin/boards/{id}", s.updateBoard)
+	m.HandleFunc("PUT /api/v1/admin/boards/{id}/features", s.updateBoardFeatures)
+	m.HandleFunc("POST /api/v1/admin/boards/{id}/image", s.uploadBoardImage)
+	m.HandleFunc("POST /api/v1/admin/features", s.createFeature)
+	m.HandleFunc("PUT /api/v1/admin/features/{key}", s.updateFeature)
 	m.HandleFunc("POST /api/v1/devices/check", s.checkDevice)
+	m.HandleFunc("GET /api/v1/catalog", s.publicCatalog)
 	m.HandleFunc("GET /api/v1/releases", s.listReleases)
 	m.HandleFunc("GET /firmware/", s.serveFirmware)
 	m.HandleFunc("GET /packages/", s.servePackage)
 	m.HandleFunc("GET /flasher/", s.serveFlasher)
+	m.HandleFunc("GET /board-images/", s.serveBoardImage)
+	m.Handle("/mcp", s.mcpHandler())
 }
 
 // admin authorizes admin API calls. It accepts either the long-lived admin
@@ -147,6 +162,14 @@ func (s *server) routes(m *http.ServeMux) {
 // session token minted by /api/v1/admin/login (sent by the web UI, either as a
 // Bearer token or X-OTA-Token).
 func (s *server) admin(w http.ResponseWriter, r *http.Request) bool {
+	if s.isAdminRequest(r) {
+		return true
+	}
+	writeError(w, http.StatusUnauthorized, "admin authorization required")
+	return false
+}
+
+func (s *server) isAdminRequest(r *http.Request) bool {
 	presented := r.Header.Get("X-OTA-Token")
 	if presented == "" {
 		presented = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -157,7 +180,6 @@ func (s *server) admin(w http.ResponseWriter, r *http.Request) bool {
 	if s.validSession(presented) {
 		return true
 	}
-	writeError(w, http.StatusUnauthorized, "admin authorization required")
 	return false
 }
 
@@ -234,6 +256,10 @@ func (s *server) uploadRelease(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid board, version or channel")
 		return
 	}
+	if !s.boardExists(board) {
+		writeError(w, 400, "board is not registered")
+		return
+	}
 	file, err := os.CreateTemp(s.firmwareDir, ".upload-*")
 	if err != nil {
 		writeError(w, 500, err.Error())
@@ -286,7 +312,10 @@ func (s *server) checkDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
-	releases, err := s.releases(d.BoardType, d.Channel)
+	var releases []release
+	if s.boardPublished(d.BoardType) {
+		releases, err = s.releases(d.BoardType, d.Channel)
+	}
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
@@ -302,6 +331,10 @@ func (s *server) listReleases(w http.ResponseWriter, r *http.Request) {
 	board := r.URL.Query().Get("board")
 	if !validName.MatchString(board) {
 		writeError(w, 400, "valid board is required")
+		return
+	}
+	if !s.boardPublished(board) {
+		writeError(w, 404, "published board not found")
 		return
 	}
 	rows, err := s.releases(board, "")
@@ -399,6 +432,10 @@ func (s *server) serveFlasher(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "not found")
 		return
 	}
+	if !s.boardPublished(board) {
+		writeError(w, 404, "published board not found")
+		return
+	}
 	releases, err := s.releases(board, "")
 	if err != nil || len(releases) == 0 {
 		writeError(w, 404, "no firmware for this board")
@@ -462,6 +499,14 @@ func (s *server) uploadPackage(w http.ResponseWriter, r *http.Request) {
 	if !validName.MatchString(meta.Board) || !validName.MatchString(meta.Version) ||
 		(meta.Channel != "stable" && meta.Channel != "beta") || len(meta.Parts) == 0 {
 		writeError(w, 400, "invalid board, version, channel or parts")
+		return
+	}
+	if !s.boardExists(meta.Board) {
+		writeError(w, 400, "board is not registered")
+		return
+	}
+	if expected, ok := s.boardChipFamily(meta.Board); ok && meta.ChipFamily != expected {
+		writeError(w, 400, "chip_family does not match the registered board")
 		return
 	}
 	// An app-only release may already exist when an administrator later uploads

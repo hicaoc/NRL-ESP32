@@ -1,10 +1,11 @@
 # NRL OTA Server (Go + SQLite API + separate Vue frontend)
 
-The Go executable serves the OTA API and data only. Deploy `frontend/dist`
+The Go executable serves the OTA API, dynamic board catalog, and MCP endpoint. Deploy `frontend/dist`
 separately on the same origin (or use the frontend container); the supplied
-Caddy example routes API requests to Go and serves the SPA. The API is shared
-by all four board identifiers:
-`gezipai`, `bh4tdv`, `s31_korvo`, and `s31_function_coreboard`.
+Caddy example routes API requests to Go and serves the SPA. The initial migration
+preserves and seeds `gezipai`, `bh4tdv`, `s31_korvo`, and
+`s31_function_coreboard`; administrators can create additional board types in
+the site without changing frontend source code.
 
 Build and publish the Vue admin site separately, then build Go:
 
@@ -87,16 +88,40 @@ are not encrypted or server-authenticated. Put Caddy/nginx in front of the
 process and use HTTPS for any other deployment. `OTA_DEVICE_TOKEN` is optional
 for a private LAN but strongly recommended for an Internet-facing instance.
 
-The site is a menu-based SPA: **Home** (board introductions), **Firmware**
+The site is a menu-based SPA: **Home** (searchable board introductions and a
+dynamic feature comparison), **Firmware**
 (per-board version history and changelogs), **USB Flash**, and — after admin
 login — a **Devices** management dashboard showing each device's online status,
 board, firmware version (with an update-available badge), NRL callsign, SSID,
-IP, and last-seen time. Admins sign in from the top-right with
+IP, and last-seen time. The admin-only **Boards** page creates board drafts,
+uploads JPEG/PNG/WebP images, edits bilingual descriptions, selects existing
+features or creates new ones, and publishes complete board definitions. The
+**Publish** page selects from that dynamic catalog. Draft boards may receive
+firmware in advance, but devices only see updates for published boards. Admins
+sign in from the top-right with
 `OTA_ADMIN_USER` / `OTA_ADMIN_PASSWORD`; login returns a signed session token
 (12 h) that authorizes the admin API. The long-lived `OTA_ADMIN_TOKEN` is still
 accepted directly and is what the machine publish pipeline uses. Password login
 is disabled (HTTP 503) until `OTA_ADMIN_PASSWORD` is set. Session tokens are
 signed with a per-process secret, so restarting the server logs admins out.
+
+## AI / MCP board management
+
+The server exposes MCP Streamable HTTP at `/mcp`, or
+`https://<host>/nrlota/api/mcp` through the example reverse proxy. Every request
+must send `Authorization: Bearer <OTA_ADMIN_TOKEN-or-admin-session>`. Available
+tools are `catalog.list`, `board.save_draft`, `feature.save`,
+`board.set_features`, `board.upload_image`, and `board.publish`.
+`audit.list` returns recent board-catalog changes made through the admin API or MCP.
+
+AI submissions land as drafts by default. Public publication is a separate,
+explicitly confirmed tool and requires bilingual names, an image, and at least
+one feature assignment. The admin page also has an **AI / JSON import** form for
+submitting board metadata, new feature definitions, and assignments in one
+transaction; images continue through the separately validated upload path.
+Expose MCP only behind HTTPS and prefer short-lived administrator sessions for
+interactive remote clients; the long-lived machine token is intended for
+controlled automation.
 
 To publish automatically after a successful native firmware build, set these in
 the build environment (the upload is deliberately disabled unless both values

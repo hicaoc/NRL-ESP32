@@ -21,12 +21,26 @@ const boards = [
     zh: {
       name: "格子派 gezipai",
       tagline: "ESP32-S3 彩色显示终端",
-      features: ["ES7210 麦克风 ADC + ES8311 DAC 音频链路", "240×240 ST7789 彩色屏与 LVGL 图形界面", "屏幕菜单管理 MDC1200、DTMF、CTCSS/PL 与 APRS", "音量+/音量-/PTT 三按键、电池电压检测", "三色状态灯、SCI 串口透明传输", "BLE 配网、Wi-Fi 配置门户、远程 AT 与 OTA 升级"],
+      features: [
+        "ES7210 麦克风 ADC + ES8311 DAC 音频链路",
+        "240×240 ST7789 彩色屏与 LVGL 图形界面",
+        "屏幕菜单管理 MDC1200、DTMF、CTCSS/PL 与 APRS",
+        "音量+/音量-/PTT 三按键、电池电压检测",
+        "三色状态灯、SCI 串口透明传输",
+        "BLE 配网、Wi-Fi 配置门户、远程 AT 与 OTA 升级",
+      ],
     },
     en: {
       name: "Gezipai",
       tagline: "ESP32-S3 color display terminal",
-      features: ["ES7210 microphone ADC and ES8311 DAC audio path", "240×240 ST7789 color display with LVGL UI", "On-screen MDC1200, DTMF, CTCSS/PL, and APRS controls", "Volume up/down/PTT buttons and battery-voltage sensing", "Three-color status LED and SCI serial passthrough", "BLE provisioning, Wi-Fi portal, remote AT, and OTA updates"],
+      features: [
+        "ES7210 microphone ADC and ES8311 DAC audio path",
+        "240×240 ST7789 color display with LVGL UI",
+        "On-screen MDC1200, DTMF, CTCSS/PL, and APRS controls",
+        "Volume up/down/PTT buttons and battery-voltage sensing",
+        "Three-color status LED and SCI serial passthrough",
+        "BLE provisioning, Wi-Fi portal, remote AT, and OTA updates",
+      ],
     },
   },
   {
@@ -37,12 +51,24 @@ const boards = [
     zh: {
       name: "BH4TDV ESP32 3188",
       tagline: "ESP32-S3 无屏电台接口",
-      features: ["ES8311 全双工音频，连接 Moto3188 / NRL 电台", "PTT 输出、SQL 检测与三色状态灯", "三位频道选择输出，支持 0–7 共 8 个频道", "SCI 串口透明传输；无板载屏幕", "BLE 配网、Wi-Fi 配置门户、远程 AT 与 OTA 升级"],
+      features: [
+        "ES8311 全双工音频，连接 Moto3188 / NRL 电台",
+        "PTT 输出、SQL 检测与三色状态灯",
+        "三位频道选择输出，支持 0–7 共 8 个频道",
+        "SCI 串口透明传输；无板载屏幕",
+        "BLE 配网、Wi-Fi 配置门户、远程 AT 与 OTA 升级",
+      ],
     },
     en: {
       name: "BH4TDV ESP32 3188",
       tagline: "ESP32-S3 headless radio interface",
-      features: ["ES8311 full-duplex audio for Moto3188 / NRL radios", "PTT output, squelch detection, and three-color status LEDs", "Three-bit channel selection for channels 0–7", "SCI serial passthrough; no onboard display", "BLE provisioning, Wi-Fi portal, remote AT, and OTA updates"],
+      features: [
+        "ES8311 full-duplex audio for Moto3188 / NRL radios",
+        "PTT output, squelch detection, and three-color status LEDs",
+        "Three-bit channel selection for channels 0–7",
+        "SCI serial passthrough; no onboard display",
+        "BLE provisioning, Wi-Fi portal, remote AT, and OTA updates",
+      ],
     },
   },
   {
@@ -53,12 +79,24 @@ const boards = [
     zh: {
       name: "S31 Korvo",
       tagline: "ESP32-S31 全功能开发板",
-      features: ["ES8389 音频、800×480 RGB 电容触摸屏与 LVGL 界面", "ADC 按键：音量、模式和 PTT；板载 RGB 状态灯", "TF 卡、USB-OTG 主机、本地音乐与网络收音机", "蓝牙 HFP 耳机 / A2DP、ESP-NOW 脱网对讲、AI 语音", "UART1/SCI 与 UART2/GPS 可由 Web/AT 配置，默认关闭并与 DVP 摄像头互斥"],
+      features: [
+        "ES8389 音频、800×480 RGB 电容触摸屏与 LVGL 界面",
+        "ADC 按键：音量、模式和 PTT；板载 RGB 状态灯",
+        "TF 卡、USB-OTG 主机、本地音乐与网络收音机",
+        "蓝牙 HFP 耳机 / A2DP、ESP-NOW 脱网对讲、AI 语音",
+        "UART1/SCI 与 UART2/GPS 可由 Web/AT 配置，默认关闭并与 DVP 摄像头互斥",
+      ],
     },
     en: {
       name: "S31 Korvo",
       tagline: "ESP32-S31 full-featured dev board",
-      features: ["ES8389 audio, 800×480 RGB capacitive touch display, and LVGL UI", "ADC volume/mode/PTT buttons and onboard RGB status LED", "TF card, USB-OTG host, local music, and Internet radio", "Bluetooth HFP headset / A2DP, ESP-NOW intercom, and AI voice", "Web/AT configurable UART1/SCI and UART2/GPS; off by default and mutually exclusive with DVP cameras"],
+      features: [
+        "ES8389 audio, 800×480 RGB capacitive touch display, and LVGL UI",
+        "ADC volume/mode/PTT buttons and onboard RGB status LED",
+        "TF card, USB-OTG host, local music, and Internet radio",
+        "Bluetooth HFP headset / A2DP, ESP-NOW intercom, and AI voice",
+        "Web/AT configurable UART1/SCI and UART2/GPS; off by default and mutually exclusive with DVP cameras",
+      ],
     },
   },
   {
@@ -69,12 +107,24 @@ const boards = [
     zh: {
       name: "S31 功能核心板",
       tagline: "ESP32-S31 精简核心板",
-      features: ["ES8311 音频编解码，适合网络语音与电台桥接", "YT8531 千兆以太网，Wi-Fi 可作为回退连接", "USB-A 主机、WS2812 RGB 状态灯与 SCI 串口", "紧凑无屏、无实体音量/PTT 按键的核心板方案", "Wi-Fi 配置门户、远程 AT 与 OTA 升级"],
+      features: [
+        "ES8311 音频编解码，适合网络语音与电台桥接",
+        "YT8531 千兆以太网，Wi-Fi 可作为回退连接",
+        "USB-A 主机、WS2812 RGB 状态灯与 SCI 串口",
+        "紧凑无屏、无实体音量/PTT 按键的核心板方案",
+        "Wi-Fi 配置门户、远程 AT 与 OTA 升级",
+      ],
     },
     en: {
       name: "S31 Function Coreboard",
       tagline: "ESP32-S31 compact core board",
-      features: ["ES8311 audio codec for network voice and radio bridging", "YT8531 Gigabit Ethernet with Wi-Fi fallback", "USB-A host, WS2812 RGB status LED, and SCI serial port", "Compact screenless core board without volume/PTT buttons", "Wi-Fi configuration portal, remote AT, and OTA updates"],
+      features: [
+        "ES8311 audio codec for network voice and radio bridging",
+        "YT8531 Gigabit Ethernet with Wi-Fi fallback",
+        "USB-A host, WS2812 RGB status LED, and SCI serial port",
+        "Compact screenless core board without volume/PTT buttons",
+        "Wi-Fi configuration portal, remote AT, and OTA updates",
+      ],
     },
   },
 ];
@@ -83,40 +133,224 @@ const boards = [
 // Keep this matrix aligned with README.md and board_pins.h so the home page is
 // a practical selection guide instead of four isolated marketing cards.
 const featureMatrix = [
-  { zh: "NRL UDP 网络语音桥接（G.711 / Opus）", en: "NRL UDP voice bridge (G.711 / Opus)", all: "yes" },
-  { zh: "Wi-Fi 配置门户 / SoftAP 配网", en: "Wi-Fi configuration portal / SoftAP provisioning", all: "yes" },
+  {
+    zh: "NRL UDP 网络语音桥接（G.711 / Opus）",
+    en: "NRL UDP voice bridge (G.711 / Opus)",
+    all: "yes",
+  },
+  {
+    zh: "Wi-Fi 配置门户 / SoftAP 配网",
+    en: "Wi-Fi configuration portal / SoftAP provisioning",
+    all: "yes",
+  },
   { zh: "远程 AT 配置与设备 OTA 升级", en: "Remote AT configuration and device OTA", all: "yes" },
-  { zh: "APRS-IS 网络与无线电 AFSK 收发", en: "APRS-IS networking and radio AFSK TX/RX", all: "yes" },
+  {
+    zh: "APRS-IS 网络与无线电 AFSK 收发",
+    en: "APRS-IS networking and radio AFSK TX/RX",
+    all: "yes",
+  },
   { zh: "MDC1200 信令编码与解码", en: "MDC1200 signaling encode/decode", all: "yes" },
   { zh: "DTMF 信令编码与解码", en: "DTMF signaling encode/decode", all: "yes" },
   { zh: "CTCSS/PL 亚音频率识别", en: "CTCSS/PL tone-frequency detection", all: "yes" },
-  { zh: "屏幕信令与 APRS 设置菜单", en: "On-screen signaling and APRS settings", gezipai: "yes", bh4tdv: "no", s31_korvo: "partial", s31_function_coreboard: "no" },
-  { zh: "网页 USB 首次全量刷机（Chrome / Edge）", en: "Browser USB full flashing (Chrome / Edge)", gezipai: "yes", bh4tdv: "yes", s31_korvo: "no", s31_function_coreboard: "no" },
-  { zh: "BLE 蓝牙配网", en: "BLE provisioning", gezipai: "yes", bh4tdv: "yes", s31_korvo: "no", s31_function_coreboard: "no" },
-  { zh: "ES7210 专用麦克风 ADC", en: "Dedicated ES7210 microphone ADC", gezipai: "yes", bh4tdv: "no", s31_korvo: "no", s31_function_coreboard: "no" },
-  { zh: "ES8311 音频编解码", en: "ES8311 audio codec", gezipai: "yes", bh4tdv: "yes", s31_korvo: "no", s31_function_coreboard: "yes" },
-  { zh: "ES8389 音频编解码", en: "ES8389 audio codec", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "no" },
-  { zh: "AEC、降噪、高通、尾音抑制与编解码器增益", en: "AEC, noise reduction, high-pass, tail suppression, and codec gain", all: "yes" },
-  { zh: "电台 PTT / SQL 控制", en: "Radio PTT / squelch control", gezipai: "yes", bh4tdv: "yes", s31_korvo: "partial", s31_function_coreboard: "partial" },
-  { zh: "三位频道选择（0–7）", en: "Three-bit channel selection (0–7)", gezipai: "no", bh4tdv: "yes", s31_korvo: "no", s31_function_coreboard: "no" },
-  { zh: "SCI 串口透明传输", en: "SCI serial passthrough", gezipai: "yes", bh4tdv: "yes", s31_korvo: "partial", s31_function_coreboard: "yes" },
+  {
+    zh: "屏幕信令与 APRS 设置菜单",
+    en: "On-screen signaling and APRS settings",
+    gezipai: "yes",
+    bh4tdv: "no",
+    s31_korvo: "partial",
+    s31_function_coreboard: "no",
+  },
+  {
+    zh: "网页 USB 首次全量刷机（Chrome / Edge）",
+    en: "Browser USB full flashing (Chrome / Edge)",
+    gezipai: "yes",
+    bh4tdv: "yes",
+    s31_korvo: "no",
+    s31_function_coreboard: "no",
+  },
+  {
+    zh: "BLE 蓝牙配网",
+    en: "BLE provisioning",
+    gezipai: "yes",
+    bh4tdv: "yes",
+    s31_korvo: "no",
+    s31_function_coreboard: "no",
+  },
+  {
+    zh: "ES7210 专用麦克风 ADC",
+    en: "Dedicated ES7210 microphone ADC",
+    gezipai: "yes",
+    bh4tdv: "no",
+    s31_korvo: "no",
+    s31_function_coreboard: "no",
+  },
+  {
+    zh: "ES8311 音频编解码",
+    en: "ES8311 audio codec",
+    gezipai: "yes",
+    bh4tdv: "yes",
+    s31_korvo: "no",
+    s31_function_coreboard: "yes",
+  },
+  {
+    zh: "ES8389 音频编解码",
+    en: "ES8389 audio codec",
+    gezipai: "no",
+    bh4tdv: "no",
+    s31_korvo: "yes",
+    s31_function_coreboard: "no",
+  },
+  {
+    zh: "AEC、降噪、高通、尾音抑制与编解码器增益",
+    en: "AEC, noise reduction, high-pass, tail suppression, and codec gain",
+    all: "yes",
+  },
+  {
+    zh: "电台 PTT / SQL 控制",
+    en: "Radio PTT / squelch control",
+    gezipai: "yes",
+    bh4tdv: "yes",
+    s31_korvo: "partial",
+    s31_function_coreboard: "partial",
+  },
+  {
+    zh: "三位频道选择（0–7）",
+    en: "Three-bit channel selection (0–7)",
+    gezipai: "no",
+    bh4tdv: "yes",
+    s31_korvo: "no",
+    s31_function_coreboard: "no",
+  },
+  {
+    zh: "SCI 串口透明传输",
+    en: "SCI serial passthrough",
+    gezipai: "yes",
+    bh4tdv: "yes",
+    s31_korvo: "partial",
+    s31_function_coreboard: "yes",
+  },
   { zh: "状态灯", en: "Status indicator", all: "yes" },
-  { zh: "彩色显示屏", en: "Color display", gezipai: "yes", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "no" },
-  { zh: "触摸界面", en: "Touch interface", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "no" },
-  { zh: "触控俄罗斯方块小游戏", en: "Touch Tetris mini-game", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "no" },
-  { zh: "本地实体按键 / PTT", en: "Physical buttons / PTT", gezipai: "yes", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "no" },
-  { zh: "电池电压检测", en: "Battery-voltage sensing", gezipai: "yes", bh4tdv: "no", s31_korvo: "no", s31_function_coreboard: "no" },
-  { zh: "TF 卡本地媒体", en: "TF-card local media", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "no" },
-  { zh: "USB 主机 / U 盘存储", en: "USB host / flash storage", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "yes" },
-  { zh: "SMB 网络共享媒体", en: "SMB network-share media", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "yes" },
-  { zh: "千兆以太网", en: "Gigabit Ethernet", gezipai: "no", bh4tdv: "no", s31_korvo: "no", s31_function_coreboard: "yes" },
-  { zh: "蓝牙耳机 / 外接蓝牙音箱麦克风（HFP / A2DP）", en: "Bluetooth headset / external speaker-mic (HFP / A2DP)", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "yes" },
-  { zh: "蓝牙 HFP 双向语音通话", en: "Bluetooth HFP two-way voice calls", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "yes" },
-  { zh: "蓝牙耳机按键 PTT", en: "Bluetooth headset-button PTT", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "yes" },
+  {
+    zh: "彩色显示屏",
+    en: "Color display",
+    gezipai: "yes",
+    bh4tdv: "no",
+    s31_korvo: "yes",
+    s31_function_coreboard: "no",
+  },
+  {
+    zh: "触摸界面",
+    en: "Touch interface",
+    gezipai: "no",
+    bh4tdv: "no",
+    s31_korvo: "yes",
+    s31_function_coreboard: "no",
+  },
+  {
+    zh: "触控俄罗斯方块小游戏",
+    en: "Touch Tetris mini-game",
+    gezipai: "no",
+    bh4tdv: "no",
+    s31_korvo: "yes",
+    s31_function_coreboard: "no",
+  },
+  {
+    zh: "本地实体按键 / PTT",
+    en: "Physical buttons / PTT",
+    gezipai: "yes",
+    bh4tdv: "no",
+    s31_korvo: "yes",
+    s31_function_coreboard: "no",
+  },
+  {
+    zh: "电池电压检测",
+    en: "Battery-voltage sensing",
+    gezipai: "yes",
+    bh4tdv: "no",
+    s31_korvo: "no",
+    s31_function_coreboard: "no",
+  },
+  {
+    zh: "TF 卡本地媒体",
+    en: "TF-card local media",
+    gezipai: "no",
+    bh4tdv: "no",
+    s31_korvo: "yes",
+    s31_function_coreboard: "no",
+  },
+  {
+    zh: "USB 主机 / U 盘存储",
+    en: "USB host / flash storage",
+    gezipai: "no",
+    bh4tdv: "no",
+    s31_korvo: "yes",
+    s31_function_coreboard: "yes",
+  },
+  {
+    zh: "SMB 网络共享媒体",
+    en: "SMB network-share media",
+    gezipai: "no",
+    bh4tdv: "no",
+    s31_korvo: "yes",
+    s31_function_coreboard: "yes",
+  },
+  {
+    zh: "千兆以太网",
+    en: "Gigabit Ethernet",
+    gezipai: "no",
+    bh4tdv: "no",
+    s31_korvo: "no",
+    s31_function_coreboard: "yes",
+  },
+  {
+    zh: "蓝牙耳机 / 外接蓝牙音箱麦克风（HFP / A2DP）",
+    en: "Bluetooth headset / external speaker-mic (HFP / A2DP)",
+    gezipai: "no",
+    bh4tdv: "no",
+    s31_korvo: "yes",
+    s31_function_coreboard: "yes",
+  },
+  {
+    zh: "蓝牙 HFP 双向语音通话",
+    en: "Bluetooth HFP two-way voice calls",
+    gezipai: "no",
+    bh4tdv: "no",
+    s31_korvo: "yes",
+    s31_function_coreboard: "yes",
+  },
+  {
+    zh: "蓝牙耳机按键 PTT",
+    en: "Bluetooth headset-button PTT",
+    gezipai: "no",
+    bh4tdv: "no",
+    s31_korvo: "yes",
+    s31_function_coreboard: "yes",
+  },
   { zh: "ESP-NOW 脱网对讲", en: "ESP-NOW offline intercom", all: "yes" },
-  { zh: "本地音乐、网络收音机与定时播报", en: "Local music, Internet radio, and timed playback", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "yes" },
-  { zh: "小智 AI 语音助手", en: "Xiaozhi AI voice assistant", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "yes" },
-  { zh: "NRL 视频通话（DVP 摄像头）", en: "NRL video calls (DVP camera)", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "no" },
+  {
+    zh: "本地音乐、网络收音机与定时播报",
+    en: "Local music, Internet radio, and timed playback",
+    gezipai: "no",
+    bh4tdv: "no",
+    s31_korvo: "yes",
+    s31_function_coreboard: "yes",
+  },
+  {
+    zh: "小智 AI 语音助手",
+    en: "Xiaozhi AI voice assistant",
+    gezipai: "no",
+    bh4tdv: "no",
+    s31_korvo: "yes",
+    s31_function_coreboard: "yes",
+  },
+  {
+    zh: "NRL 视频通话（DVP 摄像头）",
+    en: "NRL video calls (DVP camera)",
+    gezipai: "no",
+    bh4tdv: "no",
+    s31_korvo: "yes",
+    s31_function_coreboard: "no",
+  },
 ];
 
 const messages = {
@@ -132,12 +366,15 @@ const messages = {
     navFlash: "网页刷机",
     navDevices: "设备管理",
     navPublish: "发布固件",
+    navBoards: "板卡管理",
     adminLogin: "管理登录",
     loginTitle: "管理员登录",
     username: "用户名",
     password: "密码",
     welcome: "{user}",
     boardsHeading: "支持的板卡",
+    boardSearch: "搜索板卡名称、型号或主控…",
+    boardCount: "共 {count} 个板卡类型",
     chip: "主控",
     features: "特性",
     featureMatrixHeading: "功能支持对照",
@@ -156,7 +393,8 @@ const messages = {
     download: "下载",
     noReleases: "该板卡暂无已发布固件。",
     flashHeading: "USB 网页刷机",
-    flashIntro: "用 USB 数据线连接设备，在 Chrome 或 Edge 浏览器里刷写完整固件（含引导程序与分区表）。需要 HTTPS 或本机访问。仅支持 ESP32-S3 板卡。",
+    flashIntro:
+      "用 USB 数据线连接设备，在 Chrome 或 Edge 浏览器里刷写完整固件（含引导程序与分区表）。需要 HTTPS 或本机访问。仅支持 ESP32-S3 板卡。",
     flashReady: "支持 USB 网页刷机",
     flashButton: "USB 刷机",
     flashUnsupported: "当前浏览器不支持 Web Serial，请使用 Chrome 或 Edge。",
@@ -169,7 +407,8 @@ const messages = {
     flashTip: "若无法识别设备，请按住 BOOT 再插入 USB 后重试。",
     navSerial: "串口调试",
     serialHeading: "串口调试终端",
-    serialIntro: "连接已运行的板卡后，可直接查看调试输出并输入 AT 指令。日志显示区与命令输入行独立，输出不会打断正在编辑的命令。",
+    serialIntro:
+      "连接已运行的板卡后，可直接查看调试输出并输入 AT 指令。日志显示区与命令输入行独立，输出不会打断正在编辑的命令。",
     serialBoard: "板卡型号",
     serialConnect: "连接串口",
     serialDisconnect: "断开连接",
@@ -221,6 +460,54 @@ const messages = {
     publishing: "正在上传固件…",
     published: "已发布 {version}（{size} 字节）",
     uploadFailed: "发布失败：{error}",
+    boardManagerTitle: "板卡类型与功能管理",
+    boardManagerHint:
+      "创建板卡、上传图片、编辑中英文介绍，并配置功能对照。草稿不会出现在公开页面。",
+    newBoard: "新建板卡",
+    boardId: "板卡 ID（保存后不可修改）",
+    nameZH: "中文名称",
+    nameEN: "英文名称",
+    taglineZH: "中文短介绍",
+    taglineEN: "英文短介绍",
+    descriptionZH: "中文详细说明",
+    descriptionEN: "英文详细说明",
+    chipLabel: "主控显示名称",
+    webFlashFamily: "网页刷机芯片类型（不支持则留空）",
+    displayOrder: "显示顺序",
+    boardStatus: "发布状态",
+    draft: "草稿",
+    publishedStatus: "已发布",
+    archived: "已归档",
+    highlightsZH: "中文板卡要点（每行一项）",
+    highlightsEN: "英文板卡要点（每行一项）",
+    saveBoard: "保存板卡资料",
+    boardSaved: "板卡资料已保存",
+    boardImage: "板卡图片（JPEG / PNG / WebP，最大 5 MB）",
+    uploadImage: "上传图片",
+    imageUploaded: "图片已上传",
+    featureAssignments: "板卡功能对照",
+    saveFeatures: "保存功能配置",
+    featuresSaved: "功能配置已保存",
+    featureYes: "支持",
+    featurePartial: "部分支持",
+    featureNo: "不支持",
+    addFeature: "添加功能项",
+    featureKey: "功能键（小写英文）",
+    featureLabelZH: "功能中文名称",
+    featureLabelEN: "功能英文名称",
+    featureDescriptionZH: "功能中文说明",
+    featureDescriptionEN: "功能英文说明",
+    editFeature: "编辑功能项",
+    newFeature: "新功能项",
+    partialNoteZH: "中文限制说明",
+    partialNoteEN: "英文限制说明",
+    featureAdded: "功能项已添加",
+    aiImport: "AI / JSON 导入",
+    aiImportHint:
+      "粘贴符合管理 API 格式的 JSON，一次提交板卡、功能定义和功能状态。图片需保存后单独上传。",
+    importCatalog: "导入并保存",
+    catalogImported: "目录资料已导入",
+    manageFailed: "保存失败：{error}",
     unknownError: "请求失败",
   },
   en: {
@@ -236,12 +523,15 @@ const messages = {
     navFlash: "USB Flash",
     navDevices: "Devices",
     navPublish: "Publish",
+    navBoards: "Boards",
     adminLogin: "Admin login",
     loginTitle: "Administrator login",
     username: "Username",
     password: "Password",
     welcome: "{user}",
     boardsHeading: "Supported boards",
+    boardSearch: "Search board name, ID, or SoC…",
+    boardCount: "{count} board types",
     chip: "SoC",
     features: "Features",
     featureMatrixHeading: "Feature comparison",
@@ -286,7 +576,8 @@ const messages = {
     serialWriteFailed: "Command send failed: {error}",
     loadFailed: "Load failed: {error}",
     adminArea: "Administrator",
-    adminHint: "Sign in with the administrator username and password to view device status and publish firmware.",
+    adminHint:
+      "Sign in with the administrator username and password to view device status and publish firmware.",
     login: "Log in",
     logout: "Log out",
     loginFailed: "Login failed: {error}",
@@ -328,6 +619,54 @@ const messages = {
     publishing: "Uploading firmware…",
     published: "Published {version} ({size} bytes)",
     uploadFailed: "Publish failed: {error}",
+    boardManagerTitle: "Board types and features",
+    boardManagerHint:
+      "Create boards, upload images, edit bilingual descriptions, and configure the comparison matrix. Drafts stay private.",
+    newBoard: "New board",
+    boardId: "Board ID (immutable after save)",
+    nameZH: "Chinese name",
+    nameEN: "English name",
+    taglineZH: "Chinese tagline",
+    taglineEN: "English tagline",
+    descriptionZH: "Chinese description",
+    descriptionEN: "English description",
+    chipLabel: "SoC display label",
+    webFlashFamily: "Web-flash chip family (blank if unsupported)",
+    displayOrder: "Display order",
+    boardStatus: "Status",
+    draft: "Draft",
+    publishedStatus: "Published",
+    archived: "Archived",
+    highlightsZH: "Chinese highlights (one per line)",
+    highlightsEN: "English highlights (one per line)",
+    saveBoard: "Save board",
+    boardSaved: "Board saved",
+    boardImage: "Board image (JPEG / PNG / WebP, max 5 MB)",
+    uploadImage: "Upload image",
+    imageUploaded: "Image uploaded",
+    featureAssignments: "Board feature comparison",
+    saveFeatures: "Save features",
+    featuresSaved: "Feature assignments saved",
+    featureYes: "Supported",
+    featurePartial: "Partial",
+    featureNo: "Unavailable",
+    addFeature: "Add feature",
+    featureKey: "Feature key (lowercase)",
+    featureLabelZH: "Chinese feature label",
+    featureLabelEN: "English feature label",
+    featureDescriptionZH: "Chinese feature description",
+    featureDescriptionEN: "English feature description",
+    editFeature: "Edit feature",
+    newFeature: "New feature",
+    partialNoteZH: "Chinese limitation note",
+    partialNoteEN: "English limitation note",
+    featureAdded: "Feature added",
+    aiImport: "AI / JSON import",
+    aiImportHint:
+      "Paste management API JSON to submit a board, feature definitions, and assignments together. Upload the image separately after saving.",
+    importCatalog: "Import and save",
+    catalogImported: "Catalog imported",
+    manageFailed: "Save failed: {error}",
     unknownError: "Request failed",
   },
 };
@@ -348,8 +687,11 @@ const app = createApp({
     const username = ref("");
     const password = ref("");
     const history = ref({}); // board id -> release[]
+    const catalogBoards = ref(boards);
+    const catalogFeatures = ref([]);
     const devices = ref([]);
     const loadError = ref("");
+    const boardSearch = ref("");
     const loginError = ref("");
     const secureContext = window.isSecureContext;
     const webSerialAvailable = "serial" in navigator;
@@ -471,33 +813,96 @@ const app = createApp({
     const firmware = ref();
     const publishMessage = ref("");
 
+    // Board catalog manager. The same API is intentionally usable by an AI
+    // client with an administrator token; the page provides a JSON import box
+    // for reviewing and submitting that structured result.
+    const emptyBoard = () => ({
+      id: "",
+      name_zh: "",
+      name_en: "",
+      tagline_zh: "",
+      tagline_en: "",
+      description_zh: "",
+      description_en: "",
+      chip_label: "",
+      web_flash_chip_family: "",
+      display_order: 100,
+      status: "draft",
+      highlights_zh_text: "",
+      highlights_en_text: "",
+      features: {},
+      feature_notes: {},
+    });
+    const boardEditor = ref(emptyBoard());
+    const boardIsNew = ref(true);
+    const boardImage = ref();
+    const boardMessage = ref("");
+    const featureDraft = ref({
+      key: "",
+      label_zh: "",
+      label_en: "",
+      description_zh: "",
+      description_en: "",
+      group: "general",
+      display_order: 100,
+      active: true,
+    });
+    const featureIsNew = ref(true);
+    const aiImportJSON = ref("");
+
     const t = (key, values = {}) => {
       let text = messages[language.value][key] || messages.en[key] || key;
-      for (const [name, value] of Object.entries(values)) text = text.replace(`{${name}}`, String(value));
+      for (const [name, value] of Object.entries(values))
+        text = text.replace(`{${name}}`, String(value));
       return text;
     };
     const setLanguage = (value) => {
       language.value = value;
     };
     const boardName = (id) => {
-      const entry = boards.find((b) => b.id === id);
-      return entry ? entry[language.value].name : id;
+      const entry = catalogBoards.value.find((b) => b.id === id);
+      if (!entry) return id;
+      return entry.name_zh
+        ? language.value === "zh"
+          ? entry.name_zh
+          : entry.name_en
+        : entry[language.value].name;
     };
     const requestError = async (response) => {
       const body = await response.json().catch(() => ({}));
       return body.error || t("unknownError");
     };
 
+    async function loadCatalog(admin = false) {
+      const path = admin ? "/api/v1/admin/catalog" : "/api/v1/catalog";
+      const response = await fetch(
+        apiURL(path),
+        admin ? { headers: { "X-OTA-Token": session.value } } : undefined,
+      );
+      if (!response.ok) throw new Error(await requestError(response));
+      const body = await response.json();
+      catalogBoards.value = body.boards || [];
+      catalogFeatures.value = body.features || [];
+      if (!catalogBoards.value.some((b) => b.id === board.value))
+        board.value = catalogBoards.value[0]?.id || "";
+      if (!catalogBoards.value.some((b) => b.id === serialBoard.value))
+        serialBoard.value = catalogBoards.value[0]?.id || "";
+    }
+
     async function loadHistory() {
       loadError.value = "";
       const next = {};
       try {
         await Promise.all(
-          boards.map(async (b) => {
-            const response = await fetch(apiURL(`/api/v1/releases?board=${encodeURIComponent(b.id)}`));
-            if (!response.ok) throw new Error(await requestError(response));
-            next[b.id] = (await response.json()).releases || [];
-          }),
+          catalogBoards.value
+            .filter((b) => (b.status || "published") === "published")
+            .map(async (b) => {
+              const response = await fetch(
+                apiURL(`/api/v1/releases?board=${encodeURIComponent(b.id)}`),
+              );
+              if (!response.ok) throw new Error(await requestError(response));
+              next[b.id] = (await response.json()).releases || [];
+            }),
         );
         history.value = next;
       } catch (error) {
@@ -506,7 +911,9 @@ const app = createApp({
     }
 
     async function loadDevices() {
-      const response = await fetch(apiURL("/api/v1/admin/devices"), { headers: { "X-OTA-Token": session.value } });
+      const response = await fetch(apiURL("/api/v1/admin/devices"), {
+        headers: { "X-OTA-Token": session.value },
+      });
       if (!response.ok) throw new Error(await requestError(response));
       devices.value = (await response.json()).devices || [];
     }
@@ -527,7 +934,7 @@ const app = createApp({
         localStorage.otaUser = body.username;
         authed.value = true;
         password.value = "";
-        await loadDevices();
+        await Promise.all([loadDevices(), loadCatalog(true)]);
         setView("devices");
       } catch (error) {
         authed.value = false;
@@ -541,11 +948,14 @@ const app = createApp({
       sessionUser.value = "";
       localStorage.removeItem("otaSession");
       localStorage.removeItem("otaUser");
+      loadCatalog(false)
+        .then(loadHistory)
+        .catch(() => {});
       setView("home");
     }
     async function refreshDevices() {
       try {
-        await loadDevices();
+        await Promise.all([loadDevices(), loadCatalog(true)]);
       } catch (error) {
         loginError.value = t("loginFailed", { error: error.message });
         authed.value = false;
@@ -588,6 +998,201 @@ const app = createApp({
       await Promise.all([loadHistory(), refreshDevices()]);
     }
 
+    function editBoard(entry) {
+      boardIsNew.value = false;
+      boardEditor.value = {
+        ...entry,
+        highlights_zh_text: (entry.highlights_zh || []).join("\n"),
+        highlights_en_text: (entry.highlights_en || []).join("\n"),
+        features: { ...entry.features },
+        feature_notes: structuredClone(entry.feature_notes || {}),
+      };
+      for (const f of catalogFeatures.value) {
+        boardEditor.value.feature_notes[f.key] ||= { zh: "", en: "" };
+      }
+      boardMessage.value = "";
+    }
+
+    function newBoard() {
+      boardIsNew.value = true;
+      boardEditor.value = emptyBoard();
+      for (const f of catalogFeatures.value) {
+        boardEditor.value.features[f.key] = "no";
+        boardEditor.value.feature_notes[f.key] = { zh: "", en: "" };
+      }
+      boardMessage.value = "";
+    }
+
+    function boardPayload() {
+      const b = boardEditor.value;
+      return {
+        id: b.id.trim(),
+        name_zh: b.name_zh.trim(),
+        name_en: b.name_en.trim(),
+        tagline_zh: b.tagline_zh.trim(),
+        tagline_en: b.tagline_en.trim(),
+        description_zh: b.description_zh.trim(),
+        description_en: b.description_en.trim(),
+        chip_label: b.chip_label.trim(),
+        web_flash_chip_family: b.web_flash_chip_family.trim(),
+        display_order: Number(b.display_order) || 0,
+        status: b.status,
+        highlights_zh: b.highlights_zh_text
+          .split("\n")
+          .map((x) => x.trim())
+          .filter(Boolean),
+        highlights_en: b.highlights_en_text
+          .split("\n")
+          .map((x) => x.trim())
+          .filter(Boolean),
+      };
+    }
+
+    async function saveBoard() {
+      boardMessage.value = "";
+      try {
+        const payload = boardPayload();
+        const response = await fetch(
+          apiURL(
+            boardIsNew.value
+              ? "/api/v1/admin/boards"
+              : `/api/v1/admin/boards/${encodeURIComponent(payload.id)}`,
+          ),
+          {
+            method: boardIsNew.value ? "POST" : "PUT",
+            headers: { "Content-Type": "application/json", "X-OTA-Token": session.value },
+            body: JSON.stringify(payload),
+          },
+        );
+        if (!response.ok) throw new Error(await requestError(response));
+        await loadCatalog(true);
+        const saved = catalogBoards.value.find((b) => b.id === payload.id);
+        if (saved) editBoard(saved);
+        boardMessage.value = t("boardSaved");
+      } catch (error) {
+        boardMessage.value = t("manageFailed", { error: error.message });
+      }
+    }
+
+    async function uploadBoardImage() {
+      const file = boardImage.value?.files?.[0];
+      if (!file || boardIsNew.value) return;
+      try {
+        const response = await fetch(
+          apiURL(`/api/v1/admin/boards/${encodeURIComponent(boardEditor.value.id)}/image`),
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": file.type || "application/octet-stream",
+              "X-OTA-Token": session.value,
+            },
+            body: file,
+          },
+        );
+        if (!response.ok) throw new Error(await requestError(response));
+        await loadCatalog(true);
+        const saved = catalogBoards.value.find((b) => b.id === boardEditor.value.id);
+        if (saved) editBoard(saved);
+        boardMessage.value = t("imageUploaded");
+      } catch (error) {
+        boardMessage.value = t("manageFailed", { error: error.message });
+      }
+    }
+
+    async function saveBoardFeatures() {
+      if (boardIsNew.value) return;
+      try {
+        const assignments = {};
+        for (const f of catalogFeatures.value) {
+          const note = boardEditor.value.feature_notes[f.key] || {};
+          assignments[f.key] = {
+            state: boardEditor.value.features[f.key] || "no",
+            note_zh: note.zh || "",
+            note_en: note.en || "",
+          };
+        }
+        const response = await fetch(
+          apiURL(`/api/v1/admin/boards/${encodeURIComponent(boardEditor.value.id)}/features`),
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json", "X-OTA-Token": session.value },
+            body: JSON.stringify({ features: assignments }),
+          },
+        );
+        if (!response.ok) throw new Error(await requestError(response));
+        await loadCatalog(true);
+        const saved = catalogBoards.value.find((b) => b.id === boardEditor.value.id);
+        if (saved) editBoard(saved);
+        boardMessage.value = t("featuresSaved");
+      } catch (error) {
+        boardMessage.value = t("manageFailed", { error: error.message });
+      }
+    }
+
+    async function addFeature() {
+      try {
+        const key = featureDraft.value.key;
+        const response = await fetch(
+          apiURL(
+            featureIsNew.value
+              ? "/api/v1/admin/features"
+              : `/api/v1/admin/features/${encodeURIComponent(key)}`,
+          ),
+          {
+            method: featureIsNew.value ? "POST" : "PUT",
+            headers: { "Content-Type": "application/json", "X-OTA-Token": session.value },
+            body: JSON.stringify(featureDraft.value),
+          },
+        );
+        if (!response.ok) throw new Error(await requestError(response));
+        await loadCatalog(true);
+        boardEditor.value.features[key] ||= "no";
+        boardEditor.value.feature_notes[key] ||= { zh: "", en: "" };
+        newFeatureDraft();
+        boardMessage.value = t("featureAdded");
+      } catch (error) {
+        boardMessage.value = t("manageFailed", { error: error.message });
+      }
+    }
+
+    function newFeatureDraft() {
+      featureIsNew.value = true;
+      featureDraft.value = {
+        key: "",
+        label_zh: "",
+        label_en: "",
+        description_zh: "",
+        description_en: "",
+        group: "general",
+        display_order: 100,
+        active: true,
+      };
+    }
+
+    function editFeature(feature) {
+      featureIsNew.value = false;
+      featureDraft.value = { ...feature };
+    }
+
+    async function importCatalog() {
+      try {
+        const payload = JSON.parse(aiImportJSON.value);
+        const response = await fetch(apiURL("/api/v1/admin/catalog/import"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-OTA-Token": session.value },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) throw new Error(await requestError(response));
+        const result = await response.json();
+        await loadCatalog(true);
+        const saved = catalogBoards.value.find((b) => b.id === result.id);
+        if (saved) editBoard(saved);
+        boardMessage.value = t("catalogImported");
+      } catch (error) {
+        boardMessage.value = t("manageFailed", { error: error.message });
+      }
+    }
+
     const formatTime = (timestamp) =>
       new Date(timestamp * 1000).toLocaleString(language.value === "zh" ? "zh-CN" : "en-US");
     const formatSize = (bytes) => {
@@ -596,12 +1201,56 @@ const app = createApp({
       return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
     };
     const localizedBoards = computed(() =>
-      boards.map((b) => ({ id: b.id, chip: b.chip, flashable: b.flashable, image: b.image, ...b[language.value] })),
+      catalogBoards.value.map((b) => {
+        if (!b.name_zh)
+          return {
+            id: b.id,
+            chip: b.chip,
+            flashable: b.flashable,
+            image: b.image,
+            ...b[language.value],
+          };
+        return {
+          id: b.id,
+          chip: b.chip_label,
+          flashable: Boolean(b.web_flash_chip_family),
+          image: b.image_url,
+          name: language.value === "zh" ? b.name_zh : b.name_en,
+          tagline: language.value === "zh" ? b.tagline_zh : b.tagline_en,
+          description: language.value === "zh" ? b.description_zh : b.description_en,
+          features: language.value === "zh" ? b.highlights_zh : b.highlights_en,
+          status: b.status,
+        };
+      }),
     );
-    const localizedFeatureMatrix = computed(() =>
-      featureMatrix.map((row) => ({ ...row, label: row[language.value] })),
+    const localizedFeatureMatrix = computed(() => {
+      if (!catalogFeatures.value.length)
+        return featureMatrix.map((row) => ({ ...row, label: row[language.value] }));
+      return catalogFeatures.value
+        .filter((f) => f.active)
+        .map((f) => {
+          const row = { key: f.key, label: language.value === "zh" ? f.label_zh : f.label_en };
+          for (const b of catalogBoards.value) {
+            row[b.id] = b.features?.[f.key] || "no";
+            row[`${b.id}_note`] = b.feature_notes?.[f.key]?.[language.value] || "";
+          }
+          return row;
+        });
+    });
+    const publicBoards = computed(() =>
+      localizedBoards.value.filter((b) => !b.status || b.status === "published"),
     );
-    const featureMark = (state) => ({ yes: "✓", partial: "△", no: "—" }[state] || "—");
+    const uploadBoards = computed(() =>
+      localizedBoards.value.filter((b) => b.status !== "archived"),
+    );
+    const visibleBoards = computed(() => {
+      const q = boardSearch.value.trim().toLowerCase();
+      if (!q) return publicBoards.value;
+      return publicBoards.value.filter((b) =>
+        [b.id, b.name, b.tagline, b.chip].filter(Boolean).join(" ").toLowerCase().includes(q),
+      );
+    });
+    const featureMark = (state) => ({ yes: "✓", partial: "△", no: "—" })[state] || "—";
 
     // A board is only web-flashable if its full-flash manifest has been staged
     // into the server's data-dir. Probe so boards without a staged package show
@@ -610,11 +1259,13 @@ const app = createApp({
     async function loadFlasher() {
       const next = {};
       await Promise.all(
-        boards
-          .filter((b) => b.flashable)
+        catalogBoards.value
+          .filter((b) => b.web_flash_chip_family || b.flashable)
           .map(async (b) => {
             try {
-              const response = await fetch(apiURL(`/flasher/manifest-${b.id}.json`), { cache: "no-store" });
+              const response = await fetch(apiURL(`/flasher/manifest-${b.id}.json`), {
+                cache: "no-store",
+              });
               next[b.id] = response.ok;
             } catch {
               next[b.id] = false;
@@ -628,8 +1279,8 @@ const app = createApp({
     // and publish views are gated behind a valid session; navigating to them
     // while logged out sends the user to login. Keep the URL hash in sync for
     // refresh/back support.
-    const views = ["home", "firmware", "flash", "serial", "login", "devices", "publish"];
-    const adminViews = ["devices", "publish"];
+    const views = ["home", "firmware", "flash", "serial", "login", "devices", "publish", "boards"];
+    const adminViews = ["devices", "publish", "boards"];
     function setView(next) {
       if (adminViews.includes(next) && !authed.value) next = "login";
       if (next === "login" && authed.value) next = "devices";
@@ -647,7 +1298,7 @@ const app = createApp({
     const isOnline = (device) => nowSeconds() - device.last_seen < 300; // 5 min
     const latestByBoard = computed(() => {
       const map = {};
-      for (const b of boards) {
+      for (const b of catalogBoards.value) {
         const list = history.value[b.id] || [];
         if (list.length) map[b.id] = list[0].version;
       }
@@ -711,7 +1362,9 @@ const app = createApp({
       const start = (page.value - 1) * pageSize;
       return filteredRows.value.slice(start, start + pageSize);
     });
-    const pageFrom = computed(() => (filteredRows.value.length ? (page.value - 1) * pageSize + 1 : 0));
+    const pageFrom = computed(() =>
+      filteredRows.value.length ? (page.value - 1) * pageSize + 1 : 0,
+    );
     const pageTo = computed(() => Math.min(page.value * pageSize, filteredRows.value.length));
     const goPage = (delta) => {
       page.value = Math.min(pageCount.value, Math.max(1, page.value + delta));
@@ -730,9 +1383,18 @@ const app = createApp({
       { immediate: true },
     );
 
-    loadHistory();
-    loadFlasher();
-    restoreSession().finally(syncFromHash);
+    async function bootstrap() {
+      try {
+        await loadCatalog(false);
+      } catch (error) {
+        loadError.value = t("loadFailed", { error: error.message });
+      }
+      await Promise.all([loadHistory(), loadFlasher()]);
+      await restoreSession();
+      if (authed.value) await Promise.all([loadHistory(), loadFlasher()]);
+      syncFromHash();
+    }
+    void bootstrap();
 
     return {
       language,
@@ -757,6 +1419,10 @@ const app = createApp({
       pageTo,
       goPage,
       loadError,
+      boardSearch,
+      visibleBoards,
+      publicBoards,
+      uploadBoards,
       loginError,
       flasherReady,
       secureContext,
@@ -778,6 +1444,15 @@ const app = createApp({
       notes,
       firmware,
       publishMessage,
+      catalogBoards,
+      catalogFeatures,
+      boardEditor,
+      boardIsNew,
+      boardImage,
+      boardMessage,
+      featureDraft,
+      featureIsNew,
+      aiImportJSON,
       apiURL,
       t,
       setLanguage,
@@ -786,10 +1461,20 @@ const app = createApp({
       localizedFeatureMatrix,
       featureMark,
       loadHistory,
+      loadCatalog,
       login,
       logout,
       refreshDevices,
       upload,
+      editBoard,
+      newBoard,
+      saveBoard,
+      uploadBoardImage,
+      saveBoardFeatures,
+      addFeature,
+      newFeatureDraft,
+      editFeature,
+      importCatalog,
       formatTime,
       formatSize,
     };
@@ -806,6 +1491,7 @@ const app = createApp({
           <button :class="{ active: view === 'flash' }" @click="setView('flash')">{{ t('navFlash') }}</button>
           <button :class="{ active: view === 'serial' }" @click="setView('serial')">{{ t('navSerial') }}</button>
           <button v-if="authed" :class="{ active: view === 'devices' }" @click="setView('devices')">{{ t('navDevices') }}</button>
+					<button v-if="authed" :class="{ active: view === 'boards' }" @click="setView('boards')">{{ t('navBoards') }}</button>
           <button v-if="authed" :class="{ active: view === 'publish' }" @click="setView('publish')">{{ t('navPublish') }}</button>
         </nav>
         <div class="nav-right">
@@ -828,15 +1514,19 @@ const app = createApp({
             <h1>{{ t('title') }}</h1>
             <p class="subtitle">{{ t('subtitle') }}</p>
           </div>
-          <h2 class="section-h">{{ t('boardsHeading') }}</h2>
+						<div class="catalog-home-toolbar">
+							<div><h2 class="section-h">{{ t('boardsHeading') }}</h2><span class="muted-sm">{{ t('boardCount', { count: visibleBoards.length }) }}</span></div>
+							<input v-model="boardSearch" class="search" type="search" :placeholder="t('boardSearch')">
+						</div>
           <div class="board-grid board-intro-grid">
-            <article v-for="b in localizedBoards" :key="b.id" class="board-card">
+							<article v-for="b in visibleBoards" :key="b.id" class="board-card">
               <img class="board-image" :src="b.image" :alt="b.name" />
               <div class="board-card-head">
                 <h3>{{ b.name }}</h3>
                 <span class="chip">{{ b.chip }}</span>
               </div>
               <p class="tagline">{{ b.tagline }}</p>
+							<p v-if="b.description" class="board-description">{{ b.description }}</p>
               <ul class="features">
                 <li v-for="feature in b.features" :key="feature">{{ feature }}</li>
               </ul>
@@ -853,13 +1543,13 @@ const app = createApp({
             <div class="table-scroll">
               <table class="feature-matrix">
                 <thead>
-                  <tr><th>{{ t('function') }}</th><th v-for="b in localizedBoards" :key="b.id">{{ b.name }}</th></tr>
+									<tr><th>{{ t('function') }}</th><th v-for="b in visibleBoards" :key="b.id">{{ b.name }}</th></tr>
                 </thead>
                 <tbody>
                   <tr v-for="row in localizedFeatureMatrix" :key="row.label">
                     <th>{{ row.label }}</th>
-                    <td v-for="b in localizedBoards" :key="b.id">
-                      <span :class="['feature-mark', 'feature-' + (row[b.id] || row.all)]">{{ featureMark(row[b.id] || row.all) }}</span>
+									<td v-for="b in visibleBoards" :key="b.id">
+										<span :title="row[b.id + '_note'] || ''" :class="['feature-mark', 'feature-' + (row[b.id] || row.all)]">{{ featureMark(row[b.id] || row.all) }}</span>
                     </td>
                   </tr>
                 </tbody>
@@ -875,7 +1565,7 @@ const app = createApp({
             <button class="ghost" @click="loadHistory">{{ t('refresh') }}</button>
           </div>
           <p v-if="loadError" class="error">{{ loadError }}</p>
-          <div v-for="b in localizedBoards" :key="b.id" class="panel board-history">
+						<div v-for="b in publicBoards" :key="b.id" class="panel board-history">
             <div class="board-history-head"><h3>{{ b.name }}</h3><code class="board-id">{{ b.id }}</code></div>
             <div class="table-scroll" v-if="(history[b.id] || []).length">
               <table>
@@ -905,7 +1595,7 @@ const app = createApp({
             <p class="subtitle">{{ t('flashIntro') }}</p>
           </div>
           <div class="board-grid">
-            <article v-for="b in localizedBoards" :key="b.id" class="board-card flash-card">
+							<article v-for="b in publicBoards" :key="b.id" class="board-card flash-card">
               <div class="board-card-head">
                 <h3>{{ b.name }}</h3>
                 <span class="chip">{{ b.chip }}</span>
@@ -944,7 +1634,7 @@ const app = createApp({
             <div class="serial-toolbar">
               <label>{{ t('serialBoard') }}
                 <select v-model="serialBoard" :disabled="serialConnected">
-                  <option v-for="b in localizedBoards" :key="b.id" :value="b.id">{{ b.name }}</option>
+									<option v-for="b in publicBoards" :key="b.id" :value="b.id">{{ b.name }}</option>
                 </select>
               </label>
               <button v-if="!serialConnected" class="primary" :disabled="!webSerialAvailable" @click="connectSerial">{{ t('serialConnect') }}</button>
@@ -1033,12 +1723,95 @@ const app = createApp({
           </div>
         </section>
 
+				<!-- Board type, image and feature catalog management -->
+				<section v-else-if="view === 'boards'" class="view">
+					<div class="view-head row">
+						<div><h1>{{ t('boardManagerTitle') }}</h1><p class="subtitle">{{ t('boardManagerHint') }}</p></div>
+						<button class="primary" @click="newBoard">{{ t('newBoard') }}</button>
+					</div>
+					<div class="catalog-layout">
+						<aside class="panel board-list">
+							<button v-for="b in catalogBoards" :key="b.id" :class="{ active: !boardIsNew && boardEditor.id === b.id }" @click="editBoard(b)">
+								<strong>{{ language === 'zh' ? b.name_zh : b.name_en }}</strong>
+								<code>{{ b.id }}</code><span class="badge" :class="b.status === 'published' ? 'stable' : 'beta'">{{ b.status }}</span>
+							</button>
+						</aside>
+						<div>
+							<div class="panel publish-grid">
+								<label>{{ t('boardId') }}<input v-model.trim="boardEditor.id" :disabled="!boardIsNew" pattern="[a-z0-9][a-z0-9_-]*"></label>
+								<label>{{ t('boardStatus') }}<select v-model="boardEditor.status"><option value="draft">{{ t('draft') }}</option><option value="published">{{ t('publishedStatus') }}</option><option value="archived">{{ t('archived') }}</option></select></label>
+								<label>{{ t('nameZH') }}<input v-model="boardEditor.name_zh"></label>
+								<label>{{ t('nameEN') }}<input v-model="boardEditor.name_en"></label>
+								<label>{{ t('taglineZH') }}<input v-model="boardEditor.tagline_zh"></label>
+								<label>{{ t('taglineEN') }}<input v-model="boardEditor.tagline_en"></label>
+								<label class="wide">{{ t('descriptionZH') }}<textarea v-model="boardEditor.description_zh"></textarea></label>
+								<label class="wide">{{ t('descriptionEN') }}<textarea v-model="boardEditor.description_en"></textarea></label>
+								<label>{{ t('chipLabel') }}<input v-model="boardEditor.chip_label" placeholder="ESP32-S3"></label>
+								<label>{{ t('webFlashFamily') }}<input v-model="boardEditor.web_flash_chip_family" placeholder="ESP32-S3"></label>
+								<label>{{ t('displayOrder') }}<input v-model.number="boardEditor.display_order" type="number"></label>
+								<label class="wide">{{ t('highlightsZH') }}<textarea v-model="boardEditor.highlights_zh_text"></textarea></label>
+								<label class="wide">{{ t('highlightsEN') }}<textarea v-model="boardEditor.highlights_en_text"></textarea></label>
+								<div class="actions wide"><button class="primary" @click="saveBoard">{{ t('saveBoard') }}</button></div>
+							</div>
+
+							<div v-if="!boardIsNew" class="panel">
+								<h2 class="panel-h">{{ t('boardImage') }}</h2>
+								<div class="image-upload-row">
+									<img v-if="boardEditor.image_url" class="board-image-preview" :src="boardEditor.image_url" :alt="boardEditor.name_en">
+									<div><input ref="boardImage" type="file" accept="image/jpeg,image/png,image/webp"><button class="primary image-upload-button" @click="uploadBoardImage">{{ t('uploadImage') }}</button></div>
+								</div>
+							</div>
+
+							<div v-if="!boardIsNew" class="panel">
+								<h2 class="panel-h">{{ t('featureAssignments') }}</h2>
+								<div class="feature-editor-grid">
+									<div v-for="f in catalogFeatures" :key="f.key" class="feature-assignment">
+										<div class="feature-assignment-row">
+											<span>{{ language === 'zh' ? f.label_zh : f.label_en }} <code>{{ f.key }}</code></span>
+											<select v-model="boardEditor.features[f.key]"><option value="yes">{{ t('featureYes') }}</option><option value="partial">{{ t('featurePartial') }}</option><option value="no">{{ t('featureNo') }}</option></select>
+										</div>
+										<div v-if="boardEditor.features[f.key] === 'partial'" class="feature-note-row">
+											<input v-model="boardEditor.feature_notes[f.key].zh" :placeholder="t('partialNoteZH')">
+											<input v-model="boardEditor.feature_notes[f.key].en" :placeholder="t('partialNoteEN')">
+										</div>
+									</div>
+								</div>
+								<div class="actions"><button class="primary" @click="saveBoardFeatures">{{ t('saveFeatures') }}</button></div>
+							</div>
+
+							<div class="panel">
+								<div class="panel-head"><h2>{{ featureIsNew ? t('addFeature') : t('editFeature') }}</h2><button class="ghost" @click="newFeatureDraft">{{ t('newFeature') }}</button></div>
+								<div class="feature-picker">
+									<button v-for="f in catalogFeatures" :key="f.key" class="ghost" @click="editFeature(f)">{{ language === 'zh' ? f.label_zh : f.label_en }}</button>
+								</div>
+								<div class="publish-grid compact-form">
+									<label>{{ t('featureKey') }}<input v-model.trim="featureDraft.key" :disabled="!featureIsNew"></label>
+									<label>{{ t('displayOrder') }}<input v-model.number="featureDraft.display_order" type="number"></label>
+									<label>{{ t('featureLabelZH') }}<input v-model="featureDraft.label_zh"></label>
+									<label>{{ t('featureLabelEN') }}<input v-model="featureDraft.label_en"></label>
+									<label class="wide">{{ t('featureDescriptionZH') }}<textarea v-model="featureDraft.description_zh"></textarea></label>
+									<label class="wide">{{ t('featureDescriptionEN') }}<textarea v-model="featureDraft.description_en"></textarea></label>
+									<div class="actions wide"><button class="primary" @click="addFeature">{{ featureIsNew ? t('addFeature') : t('editFeature') }}</button></div>
+								</div>
+							</div>
+
+							<details class="panel ai-import">
+								<summary>{{ t('aiImport') }}</summary>
+								<p class="hint">{{ t('aiImportHint') }}</p>
+								<textarea v-model="aiImportJSON" spellcheck="false" placeholder='{"board":{"id":"...","name_zh":"...","name_en":"...","status":"draft"},"features":[],"assignments":{"aprs":{"state":"yes"}}}'></textarea>
+								<button class="primary" @click="importCatalog">{{ t('importCatalog') }}</button>
+							</details>
+							<p v-if="boardMessage" class="message catalog-message" aria-live="polite">{{ boardMessage }}</p>
+						</div>
+					</div>
+				</section>
+
         <!-- Publish firmware -->
         <section v-else-if="view === 'publish'" class="view">
           <div class="view-head"><h1>{{ t('publishHeading') }}</h1></div>
           <div class="panel">
             <div class="publish-grid">
-              <label>{{ t('boardType') }}<select v-model="board"><option v-for="b in localizedBoards" :key="b.id" :value="b.id">{{ b.name }}</option></select></label>
+								<label>{{ t('boardType') }}<select v-model="board"><option v-for="b in uploadBoards" :key="b.id" :value="b.id">{{ b.name }}</option></select></label>
               <label>{{ t('firmwareVersion') }}<input v-model="version" :placeholder="t('firmwareVersion')"></label>
               <label>{{ t('channel') }}<select v-model="channel"><option value="stable">{{ t('stable') }}</option><option value="beta">{{ t('beta') }}</option></select></label>
               <label>{{ t('firmwareFile') }}<input ref="firmware" type="file" accept=".bin"></label>

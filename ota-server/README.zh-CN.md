@@ -1,6 +1,6 @@
 # NRL OTA 服务器（Go + SQLite API + 独立 Vue 前端）
 
-Go 可执行文件只提供 OTA API 和数据服务；请独立发布 `frontend/dist`，并通过同域名反向代理连接前端与 API。随附的 Caddy 示例会提供 SPA 静态文件，并把 API 请求转发到 Go 服务。以下四种板卡共用同一套 API：`gezipai`、`bh4tdv`、`s31_korvo` 和 `s31_function_coreboard`。
+Go 可执行文件提供 OTA API、动态板卡目录和 MCP 服务；请独立发布 `frontend/dist`，并通过同域名反向代理连接前端与 API。数据库首次迁移会保留并预置 `gezipai`、`bh4tdv`、`s31_korvo` 和 `s31_function_coreboard`，管理员随后可在页面中创建更多板卡类型。
 
 独立构建并发布 Vue 管理站点，再构建 Go 服务：
 
@@ -71,12 +71,28 @@ cd ota-server\frontend
 
 网站是菜单式单页应用（SPA），提供以下页面：
 
-- **首页**：板卡介绍。
+- **首页**：可搜索的动态板卡目录、板卡介绍和功能对照。
 - **固件**：按板卡展示版本历史和更新日志。
 - **USB 烧录**：浏览器内 USB 全量烧录。
 - **设备**：管理员登录后可见的设备管理面板，显示每台设备的在线状态、板卡型号、固件版本（含可升级标记）、NRL 呼号、SSID、IP 地址和最后在线时间。
+- **板卡管理**：创建板卡草稿、上传 JPEG/PNG/WebP 图片、编辑中英文名称与说明、选择现有功能或添加功能，并在资料完整后发布。
+- **发布固件**：从动态板卡目录选择板卡，上传应用固件；草稿板卡可以预先上传固件，但设备只会获取已发布板卡的更新。
 
 管理员通过页面右上角使用 `OTA_ADMIN_USER` / `OTA_ADMIN_PASSWORD` 登录。登录成功后会返回一个有效期为 12 小时、用于授权管理 API 的签名会话令牌。长期有效的 `OTA_ADMIN_TOKEN` 仍可直接用于 API，自动发布脚本正是使用该令牌。未设置 `OTA_ADMIN_PASSWORD` 时，密码登录功能会被禁用并返回 HTTP 503。会话令牌使用每次进程启动时生成的密钥签名，因此重启服务器会使所有管理员退出登录。
+
+## AI / MCP 板卡管理
+
+服务在 `/mcp` 提供 MCP Streamable HTTP 接口；通过示例反向代理访问时地址为 `https://<host>/nrlota/api/mcp`。每个请求都必须携带 `Authorization: Bearer <OTA_ADMIN_TOKEN或管理员会话令牌>`。当前提供以下工具：
+
+- `catalog.list`：读取板卡和可复用功能目录；
+- `board.save_draft`：创建或更新板卡草稿；
+- `feature.save`：创建或更新功能定义；
+- `board.set_features`：设置板卡功能矩阵；
+- `board.upload_image`：提交不超过 5 MB 的 base64 JPEG/PNG/WebP 图片；
+- `board.publish`：显式确认后发布资料完整的板卡。
+- `audit.list`：查看最近的页面/API/MCP 板卡目录变更记录。
+
+AI 提交默认保存为草稿。公开发布被设计成独立操作，并要求板卡已具备双语名称、图片和至少一个功能配置。管理页面还提供“AI / JSON 导入”，可一次导入板卡资料、功能定义和功能状态；图片继续走独立校验接口。远程公网部署应在 HTTPS 反向代理后使用，并为 MCP 配置专用的短期管理员会话；长期机器令牌更适合受控自动化环境。
 
 要在原生固件构建成功后自动发布，请在构建环境中设置以下变量（只有同时设置前两个变量才会执行上传）：
 
