@@ -418,15 +418,11 @@ static void initApp()
     s_seen_config_generation = CONFIG_NOTIFY_Generation();
     if (!nrlExternalNetworkConnected() && !wifiConfigured()) {
         s_waiting_for_provisioning = true;
-#if defined(CONFIG_BT_NIMBLE_ENABLED)
         ESP_LOGI(TAG, "WiFi not configured; reserving BLE before config portal");
         if (!BLEConfig_Init()) {
             ESP_LOGE(TAG, "BLE provisioning init failed before config portal");
         }
         logDramMark("ble_config");
-#else
-        ESP_LOGI(TAG, "WiFi not configured; using SoftAP/screen provisioning (BLE unavailable)");
-#endif
     }
 
     WifiConfigPortal_Init();

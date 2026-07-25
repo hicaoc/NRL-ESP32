@@ -219,6 +219,7 @@ lv_obj_t *s_lbl_caption = nullptr;
 lv_obj_t *s_lbl_rx_codec = nullptr;
 char s_shown_rx_codec[12] = {};
 lv_obj_t *s_lbl_callsign = nullptr;
+lv_obj_t *s_lbl_signaling = nullptr;
 lv_obj_t *s_lbl_ssid = nullptr;
 lv_obj_t *s_lbl_time = nullptr;
 lv_obj_t *s_lbl_local_station = nullptr;
@@ -313,6 +314,12 @@ lv_obj_t *s_lbl_ptt_codec = nullptr;
 lv_obj_t *s_lbl_eptt_codec = nullptr;
 char s_shown_ptt_codec[8] = {};
 char s_shown_eptt_codec[8] = {};
+// Home PTT button objects: kept so refreshHome() can mirror the physical PTT
+// state onto the on-screen button (add/remove LV_STATE_PRESSED).
+lv_obj_t *s_btn_ptt = nullptr;
+lv_obj_t *s_btn_eptt = nullptr;
+bool s_ptt_shown_pressed = false;
+bool s_eptt_shown_pressed = false;
 lv_obj_t *s_lbl_cpu = nullptr;
 char s_shown_cpu[16] = {};
 uint32_t s_clr_cpu = 0xFFFFFFFFu;
@@ -431,6 +438,7 @@ char s_shown_vol[16] = {};
 char s_shown_remote_station[160] = {};
 char s_shown_ip[96] = {};
 char s_shown_server[96] = {};
+char s_shown_signaling[96] = {};
 char s_shown_detail[512] = {};
 char s_shown_bt_top[24] = {};
 char s_wifi_option_ssids[kWifiOptionCount][33] = {};
@@ -1231,6 +1239,7 @@ void clearScreen()
     memset(s_shown_remote_station, 0, sizeof(s_shown_remote_station));
     memset(s_shown_ip, 0, sizeof(s_shown_ip));
     memset(s_shown_server, 0, sizeof(s_shown_server));
+    memset(s_shown_signaling, 0, sizeof(s_shown_signaling));
     memset(s_shown_detail, 0, sizeof(s_shown_detail));
     memset(s_shown_bt_top, 0, sizeof(s_shown_bt_top));
     // Labels are recreated on rebuild, so drop the colour/style caches too.
@@ -1243,6 +1252,7 @@ void clearScreen()
     s_lbl_rx_codec = nullptr;
     s_shown_rx_codec[0] = '\0';
     s_lbl_callsign = nullptr;
+    s_lbl_signaling = nullptr;
     s_lbl_ssid = nullptr;
     s_lbl_time = nullptr;
     s_lbl_local_station = nullptr;
@@ -1316,6 +1326,10 @@ void clearScreen()
     s_lbl_eptt_codec = nullptr;
     s_shown_ptt_codec[0] = '\0';
     s_shown_eptt_codec[0] = '\0';
+    s_btn_ptt = nullptr;
+    s_btn_eptt = nullptr;
+    s_ptt_shown_pressed = false;
+    s_eptt_shown_pressed = false;
     s_lbl_cpu = nullptr;
     memset(s_shown_cpu, 0, sizeof(s_shown_cpu));
     s_clr_cpu = kColorUnset;
@@ -1512,8 +1526,15 @@ void buildHome()
     // centred in the freed space so it reads as the focal element.
     s_lbl_callsign = label(left, &lv_font_montserrat_48, kColorText);
     lv_obj_set_width(s_lbl_callsign, 430);
-    lv_obj_align(s_lbl_callsign, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_align(s_lbl_callsign, LV_ALIGN_LEFT_MID, 0, -14);
     lv_label_set_text(s_lbl_callsign, kCallsignPlaceholder);
+
+    // Last decoded signaling (MDC/CTCSS/DTMF) shown below the callsign.
+    s_lbl_signaling = label(left, &lv_font_montserrat_16, kColorAccent);
+    lv_obj_set_width(s_lbl_signaling, 430);
+    lv_obj_align(s_lbl_signaling, LV_ALIGN_LEFT_MID, 0, 30);
+    lv_label_set_long_mode(s_lbl_signaling, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_label_set_text(s_lbl_signaling, "");
 
     // Bottom row of the main panel: local IP on the left, server IP on the right.
     s_lbl_ip = label(left, &lv_font_montserrat_20, kColorAccent);
@@ -1562,12 +1583,14 @@ void buildHome()
         lv_obj_center(ptt_lbl);
         lv_label_set_text(ptt_lbl, tr("PTT"));
         s_lbl_ptt_codec = make_codec_tag(ptt, kColorSub);
+        s_btn_ptt = ptt;
     } else {
         lv_obj_t *ptt = make_ptt(78, 128, softPttEvent, 0x7A1F1F);
         lv_obj_t *ptt_lbl = label(ptt, &lv_font_montserrat_48, kColorText);
         lv_obj_center(ptt_lbl);
         lv_label_set_text(ptt_lbl, tr("PTT"));
         s_lbl_ptt_codec = make_codec_tag(ptt, kColorSub);
+        s_btn_ptt = ptt;
 
         lv_obj_t *eptt = make_ptt(220, 128, espnowPttEvent, 0x4C1D95);
         lv_obj_t *eptt_lbl = label(eptt, &lv_font_montserrat_20, kColorDuplex);
@@ -1575,6 +1598,7 @@ void buildHome()
         lv_obj_set_style_text_align(eptt_lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text(eptt_lbl, tr("ESP-NOW\nPTT"));
         s_lbl_eptt_codec = make_codec_tag(eptt, kColorDuplex);
+        s_btn_eptt = eptt;
     }
 
     button(scr, 22, 372, 170, 78, "VOL-", Action::VolumeDown);
@@ -4603,6 +4627,19 @@ void refreshHome()
     const bool tx = STATUS_IO_IsSqlActive();
     const bool espnow_tx = ESPNOW_LINK_PttActive();
     const bool espnow_rx = ESPNOW_LINK_IsReceiving();
+
+    // Mirror the physical PTT / ESP-NOW PTT state onto the on-screen buttons so
+    // the user sees the same pressed highlight regardless of input source.
+    if (s_btn_ptt != nullptr && tx != s_ptt_shown_pressed) {
+        s_ptt_shown_pressed = tx;
+        if (tx) lv_obj_add_state(s_btn_ptt, LV_STATE_PRESSED);
+        else    lv_obj_remove_state(s_btn_ptt, LV_STATE_PRESSED);
+    }
+    if (s_btn_eptt != nullptr && espnow_tx != s_eptt_shown_pressed) {
+        s_eptt_shown_pressed = espnow_tx;
+        if (espnow_tx) lv_obj_add_state(s_btn_eptt, LV_STATE_PRESSED);
+        else           lv_obj_remove_state(s_btn_eptt, LV_STATE_PRESSED);
+    }
     char espnow_peer[16] = {};
     if (espnow_rx) {
         ESPNOW_LINK_GetLastPeer(espnow_peer, sizeof(espnow_peer));
@@ -4667,6 +4704,13 @@ void refreshHome()
         lv_obj_set_style_text_color(s_lbl_caption, lv_color_hex(color), 0);
     }
     setLabelColor(s_lbl_callsign, s_clr_callsign, call_color);
+
+    // Last decoded signaling ticker (MDC/CTCSS/DTMF) below the callsign.
+    {
+        char sig[sizeof(s_shown_signaling)] = {};
+        SIGNALING_GetLastResult(sig, sizeof(sig));
+        setLabel(s_lbl_signaling, s_shown_signaling, sizeof(s_shown_signaling), sig);
+    }
 
     // Source audio codec of the incoming stream (blank unless receiving): the
     // NRL network caller takes precedence, else the off-grid ESP-NOW peer.

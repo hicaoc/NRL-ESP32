@@ -23,4 +23,8 @@ void BLEConfig_ReportWifiResult(bool connected);
 // fallback when WiFi is down).
 void BLEConfig_Stop(void);
 
+// True if the BLE module currently owns the BT controller (Bluedroid S31 path).
+// Used by nrl_bt_hfp to detect a controller conflict before stackUp().
+bool BLEConfig_IsControllerUp(void);
+
 #endif // SRC_LIB_BLE_CONFIG_H

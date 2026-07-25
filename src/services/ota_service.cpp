@@ -2,6 +2,7 @@
 
 #include "../app/driver/board_pins.h"
 #include "../app/driver/external_radio.h"
+#include "../lib/nrl_net_compat.h"
 #include "../lib/nrl_version.h"
 #include "../lib/nrl_wifi.h"
 #include "config_notify.h"
@@ -199,8 +200,8 @@ std::string absoluteUrl(const char *url)
 bool checkForReleases()
 {
     DISPLAY_NOTICE_Post("OTA CHECKING...", DISPLAY_NOTICE_INFO, 20000u);
-    if (!wifiIsConnected()) {
-        setError("WiFi is not connected");
+    if (!nrlNetworkConnected()) {
+        setError("Network is not connected");
         DISPLAY_NOTICE_Post("OTA CHECK FAILED", DISPLAY_NOTICE_ERROR, 8000u);
         return false;
     }

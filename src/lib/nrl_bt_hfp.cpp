@@ -4,6 +4,7 @@
 
 #if defined(CONFIG_BT_HFP_AG_ENABLE)
 
+#include "ble_config.h"
 #include "nrl_audio_bridge.h"
 #include "nrl_psram.h"
 #include "../app/driver/external_radio.h"
@@ -1131,9 +1132,18 @@ bool stackUp()
     }
 
     // BR/EDR only: hand the BLE controller memory back to the heap once.
+    // (Skipped in BTDM dual-mode where BLE provisioning may need it.)
+#if !defined(CONFIG_BTDM_CTRL_MODE_BTDM)
     if (!s_ble_mem_released) {
         esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
         s_ble_mem_released = true;
+    }
+#endif
+
+    // If BLE provisioning currently owns the controller, stop it first.
+    if (BLEConfig_IsControllerUp()) {
+        ESP_LOGI(TAG, "BLE provisioning active; stopping before HFP stackUp");
+        BLEConfig_Stop();
     }
 
     // Hand the pre-reserved contiguous internal block back to the heap right
@@ -1160,7 +1170,7 @@ bool stackUp()
         ESP_LOGE(TAG, "controller init: %s", esp_err_to_name(err));
         return false;
     }
-    err = esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT);
+    err = esp_bt_controller_enable(ESP_BT_MODE_BTDM);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "controller enable: %s", esp_err_to_name(err));
         esp_bt_controller_deinit();

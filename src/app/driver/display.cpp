@@ -178,8 +178,8 @@ lv_obj_t *s_lbl_hint = nullptr;
 lv_obj_t *s_lbl_ota = nullptr;
 lv_obj_t *s_bar_ota = nullptr;
 lv_obj_t *s_content = nullptr;
-#if NRL_BOARD == NRL_BOARD_BI4UMD
 lv_obj_t *s_lbl_signaling = nullptr;
+#if NRL_BOARD == NRL_BOARD_BI4UMD
 enum class Bi4umdPage : uint8_t { Radio, Music, MusicList, Settings };
 Bi4umdPage s_bi4umd_page = Bi4umdPage::Radio;
 lv_obj_t *s_lbl_music_title = nullptr;
@@ -329,9 +329,7 @@ char s_shown_ip[96] = {};
 char s_shown_cpu[12] = {};
 char s_shown_gps[16] = {};
 char s_shown_ota[160] = {}; // sized for a scrolling APRS monitor line
-#if NRL_BOARD == NRL_BOARD_BI4UMD
 char s_shown_signaling[160] = {};
-#endif
 int s_shown_state = -1;  // caption: -1 unset, 0 standby, 1 last heard, 2 rx, 3 tx
 bool s_shown_media = false;
 char s_cached_radio_path[256] = {};
@@ -1087,9 +1085,9 @@ void resetCenterWidgets()
     s_shown_ota[0] = '\0';
     s_shown_state = -1;
     s_shown_media = false;
-#if NRL_BOARD == NRL_BOARD_BI4UMD
     s_lbl_signaling = nullptr;
     s_shown_signaling[0] = '\0';
+#if NRL_BOARD == NRL_BOARD_BI4UMD
     s_lbl_music_title = nullptr;
     s_lbl_music_artist = nullptr;
     s_lbl_music_state = nullptr;
@@ -2348,6 +2346,8 @@ void buildHomeContent()
     lv_obj_align(s_lbl_caption, LV_ALIGN_TOP_MID, 0, 8);
     lv_label_set_text(s_lbl_caption, menuText("STANDBY", "待机"));
 
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    // BI4UMD: 320px tall, generous spacing with 48px callsign and 28px clock.
     s_lbl_callsign = makeLabel(content, &lv_font_montserrat_48, kColorCallIdle);
     lv_obj_set_width(s_lbl_callsign, kWidth);
     lv_obj_set_style_text_align(s_lbl_callsign, LV_TEXT_ALIGN_CENTER, 0);
@@ -2365,31 +2365,56 @@ void buildHomeContent()
     lv_obj_align(s_lbl_time, LV_ALIGN_TOP_MID, 0, 100);
     lv_label_set_text(s_lbl_time, "--:--:--");
 
-    // Gezipai is not a touch screen: this is deliberately only a notification.
-    // Upgrade confirmation is AT+OTA=LATEST, the local /update page, or the
-    // physical VOL+ + VOL- chord handled by status_io.cpp.
-#if NRL_BOARD == NRL_BOARD_BI4UMD
-    // BI4UMD has an extra 80 vertical pixels. Keep decoded MDC/DTMF/CTCSS
-    // signaling on its own row so it never displaces the APRS monitor.
+    // Keep decoded MDC/DTMF/CTCSS signaling on its own row so it never
+    // displaces the APRS monitor.
     s_lbl_signaling = makeLabel(content, &s_font_aprs_16, kColorAccent);
     lv_obj_set_width(s_lbl_signaling, kWidth);
     lv_obj_set_style_text_align(s_lbl_signaling, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(s_lbl_signaling, LV_ALIGN_TOP_MID, 0, 136);
     lv_label_set_long_mode(s_lbl_signaling, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_label_set_text(s_lbl_signaling, "");
-#endif
 
     s_lbl_ota = makeLabel(content, &s_font_aprs_16, kColorApWarn);
     lv_obj_set_width(s_lbl_ota, kWidth);
     lv_obj_set_style_text_align(s_lbl_ota, LV_TEXT_ALIGN_CENTER, 0);
-#if NRL_BOARD == NRL_BOARD_BI4UMD
     lv_obj_align(s_lbl_ota, LV_ALIGN_TOP_MID, 0, 164);
-#else
-    lv_obj_align(s_lbl_ota, LV_ALIGN_TOP_MID, 0, 136);
-#endif
-    // Doubles as the APRS monitor ticker; long packet lines scroll circularly.
     lv_label_set_long_mode(s_lbl_ota, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_label_set_text(s_lbl_ota, "");
+#else
+    // Gezipai: 240px tall, compact layout with 40px callsign and 20px clock
+    // to fit both a signaling row and an APRS row in the 170px content area.
+    s_lbl_callsign = makeLabel(content, &lv_font_montserrat_40, kColorCallIdle);
+    lv_obj_set_width(s_lbl_callsign, kWidth);
+    lv_obj_set_style_text_align(s_lbl_callsign, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_lbl_callsign, LV_ALIGN_TOP_MID, 0, 24);
+    lv_label_set_text(s_lbl_callsign, "----");
+
+    s_lbl_ssid = makeLabel(content, &lv_font_montserrat_20, kColorSub);
+    lv_obj_set_width(s_lbl_ssid, kWidth - 16);
+    lv_obj_set_style_text_align(s_lbl_ssid, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_lbl_ssid, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_align(s_lbl_ssid, LV_ALIGN_TOP_MID, 0, 68);
+    lv_label_set_text(s_lbl_ssid, "SSID -");
+
+    s_lbl_time = makeLabel(content, &lv_font_montserrat_20, kColorTime);
+    lv_obj_align(s_lbl_time, LV_ALIGN_TOP_MID, 0, 92);
+    lv_label_set_text(s_lbl_time, "--:--:--");
+
+    // Decoded MDC/DTMF/CTCSS signaling on its own row (like BI4UMD).
+    s_lbl_signaling = makeLabel(content, &s_font_aprs_16, kColorAccent);
+    lv_obj_set_width(s_lbl_signaling, kWidth);
+    lv_obj_set_style_text_align(s_lbl_signaling, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_lbl_signaling, LV_ALIGN_TOP_MID, 0, 118);
+    lv_label_set_long_mode(s_lbl_signaling, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_label_set_text(s_lbl_signaling, "");
+
+    s_lbl_ota = makeLabel(content, &s_font_aprs_16, kColorApWarn);
+    lv_obj_set_width(s_lbl_ota, kWidth);
+    lv_obj_set_style_text_align(s_lbl_ota, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_lbl_ota, LV_ALIGN_TOP_MID, 0, 138);
+    lv_label_set_long_mode(s_lbl_ota, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_label_set_text(s_lbl_ota, "");
+#endif
 
     s_bar_ota = lv_bar_create(content);
     lv_obj_set_pos(s_bar_ota, 16, kContentHeight - 9);
@@ -3037,7 +3062,6 @@ void refreshOtaNotice()
     int progress_percent = -1;
     DisplayNoticeSnapshot notice = {};
     DISPLAY_NOTICE_Get(&notice);
-#if NRL_BOARD == NRL_BOARD_BI4UMD
     char signaling[sizeof(s_shown_signaling)] = {};
     SIGNALING_GetLastResult(signaling, sizeof(signaling));
     if (s_lbl_signaling != nullptr &&
@@ -3045,18 +3069,15 @@ void refreshOtaNotice()
                  sizeof(s_shown_signaling), signaling)) {
         lv_obj_set_style_text_color(s_lbl_signaling, lv_color_hex(kColorAccent), 0);
     }
-#endif
     const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
     bool notice_active = notice.text[0] != '\0' &&
         (notice.duration_ms == 0u || now - notice.posted_ms < notice.duration_ms);
-#if NRL_BOARD == NRL_BOARD_BI4UMD
     // Signaling_service also posts each decode as a generic notice. It is
     // already visible on the dedicated row, so do not duplicate it below.
     if (notice_active && signaling[0] != '\0' &&
         strcmp(notice.text, signaling) == 0) {
         notice_active = false;
     }
-#endif
     if (notice_active) {
         localizeDisplayNotice(text, sizeof(text), notice.text);
         progress_percent = notice.progress_percent;

@@ -2,7 +2,7 @@
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"
   },
-  "idf.currentSetup": "D:\\esp\\v6.0.2\\esp-idf",
+  "idf.currentSetup": "C:\\esp\\esp-idf",
   "idf.openOcdConfigs": [
     "board/esp32s3-builtin.cfg"
   ],

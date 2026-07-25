@@ -2,11 +2,12 @@
 
 #include "sdkconfig.h"
 
-// BLE Wi-Fi provisioning runs on the NimBLE host. S31 builds the Bluedroid host
-// instead (Classic BT + HFP for a BT headset) and the two are mutually
-// exclusive, so this whole module compiles to stubs there; S31 provisions via
-// the touchscreen config UI + SoftAP portal.
-#if defined(CONFIG_BT_NIMBLE_ENABLED)
+// BLE Wi-Fi provisioning. Two host implementations share the same command
+// protocol and NUS GATT service:
+//   * NimBLE (ESP32-S3 boards) -- lightweight BLE-only host
+//   * Bluedroid (ESP32-S31 boards) -- dual-mode host also running Classic BT
+//     HFP/A2DP; BLE provisioning is a fallback when no network is available.
+#if defined(CONFIG_BT_NIMBLE_ENABLED) || defined(CONFIG_BT_BLUEDROID_ENABLED)
 
 #include "nrl_audio_bridge.h"
 #include "nrl_net_compat.h"
@@ -15,7 +16,9 @@
 
 #include "../app/driver/external_radio.h"
 
+#if defined(CONFIG_BT_NIMBLE_ENABLED)
 #include <NimBLEDevice.h>
+#endif
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
@@ -41,6 +44,38 @@ constexpr char kServiceUuid[] = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 constexpr char kRxUuid[] = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 constexpr char kTxUuid[] = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
 constexpr size_t kCommandBufferSize = 160;
+
+// --- Common state (both NimBLE and Bluedroid transports) ---
+bool s_initialized = false;
+bool s_client_connected = false;
+bool s_advertising = false;
+char s_command_buffer[kCommandBufferSize] = {};
+size_t s_command_size = 0;
+bool s_reboot_pending = false;
+uint32_t s_reboot_at_ms = 0;
+// WiFi list/scan work is deferred out of the GATT write callback into
+// BLEConfig_Poll() (mainLoopTask). The host task stack is limited and a
+// blocking SCAN would risk a BLE supervision timeout.
+bool s_scan_pending = false;   // fresh scan requested
+bool s_list_pending = false;   // cached-list dump requested
+bool s_wifi_transaction = false;
+bool s_wifi_transaction_has_ssid = false;
+char s_staged_wifi_ssid[33] = {};
+char s_staged_wifi_password[65] = {};
+volatile bool s_restart_wifi_pending = false;
+volatile bool s_restart_udp_pending = false;
+volatile bool s_wifi_result_pending = false;
+
+static inline uint32_t nowMsBle()
+{
+    return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+}
+
+// Forward declaration: each transport provides its own implementation.
+static void sendLine(const char *line);
+
+#if defined(CONFIG_BT_NIMBLE_ENABLED)
+// --- NimBLE-specific constants and state ---
 constexpr size_t kBleHostStackBytes =
 #if defined(CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE)
     CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE;
@@ -55,27 +90,6 @@ constexpr size_t kBleMinFreeInternal = 96u * 1024u;
 NimBLEServer *s_server = nullptr;
 NimBLECharacteristic *s_tx = nullptr;
 NimBLECharacteristic *s_rx = nullptr;
-bool s_initialized = false;
-bool s_client_connected = false;
-bool s_advertising = false;
-char s_command_buffer[kCommandBufferSize] = {};
-size_t s_command_size = 0;
-bool s_reboot_pending = false;
-uint32_t s_reboot_at_ms = 0;
-// WiFi list/scan work is deferred out of the GATT write callback (NimBLE host
-// task) into BLEConfig_Poll() (mainLoopTask). The host task stack is only 4 KB
-// and is already deep inside the GATT stack when the callback runs; doing the
-// reporting there (with its multi-hundred-byte result buffers) overflowed it
-// and crashed. A blocking SCAN would also risk a BLE supervision timeout.
-bool s_scan_pending = false;   // fresh scan requested
-bool s_list_pending = false;   // cached-list dump requested
-bool s_wifi_transaction = false;
-bool s_wifi_transaction_has_ssid = false;
-char s_staged_wifi_ssid[33] = {};
-char s_staged_wifi_password[65] = {};
-volatile bool s_restart_wifi_pending = false;
-volatile bool s_restart_udp_pending = false;
-volatile bool s_wifi_result_pending = false;
 
 // BT/WiFi coexistence management. The single radio is shared; while the BT
 // controller is up, coexist time-slices airtime and bunches voice packets.
@@ -89,12 +103,9 @@ constexpr uint32_t kBleStartAfterStaDownMs = 30000u; // STA down this long -> br
 bool s_ble_auto_stopped = false;     // true once we tore BLE down due to WiFi
 uint32_t s_sta_up_since_ms = 0u;     // 0 = STA not currently up
 uint32_t s_sta_down_since_ms = 0u;   // 0 = STA not currently down
+#endif // CONFIG_BT_NIMBLE_ENABLED
 
-static inline uint32_t nowMsBle()
-{
-    return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
-}
-
+#if defined(CONFIG_BT_NIMBLE_ENABLED)
 static void sendLine(const char *line)
 {
     if (line == nullptr) {
@@ -109,6 +120,7 @@ static void sendLine(const char *line)
     s_tx->setValue(reinterpret_cast<const uint8_t *>(line), strlen(line));
     s_tx->notify();
 }
+#endif // CONFIG_BT_NIMBLE_ENABLED
 
 static void sendConfig(void)
 {
@@ -550,6 +562,7 @@ static void appendCommandData(const uint8_t *data, const size_t size)
     }
 }
 
+#if defined(CONFIG_BT_NIMBLE_ENABLED)
 class ConfigServerCallbacks final : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer * /*pServer*/, NimBLEConnInfo & /*connInfo*/) override
     {
@@ -583,8 +596,14 @@ class ConfigRxCallbacks final : public NimBLECharacteristicCallbacks {
         appendCommandData(value.data(), value.size());
     }
 };
+#endif // CONFIG_BT_NIMBLE_ENABLED
 
 } // namespace
+
+// ============================================================================
+// NimBLE transport (ESP32-S3 boards)
+// ============================================================================
+#if defined(CONFIG_BT_NIMBLE_ENABLED)
 
 bool BLEConfig_Init(void)
 {
@@ -795,12 +814,413 @@ void BLEConfig_Poll(void)
     }
 }
 
-#else // !CONFIG_BT_NIMBLE_ENABLED -- Bluedroid host (S31): no BLE provisioning.
+bool BLEConfig_IsControllerUp(void) { return false; } // NimBLE owns no shared controller
+
+// ============================================================================
+// Bluedroid BLE transport (ESP32-S31 boards -- dual-mode Classic + BLE)
+// ============================================================================
+#elif defined(CONFIG_BT_BLUEDROID_ENABLED)
+
+#include "nrl_bt_hfp.h"
+
+#include <esp_bt.h>
+#include <esp_bt_device.h>
+#include <esp_bt_main.h>
+#include <esp_gap_ble_api.h>
+#include <esp_gatt_common_api.h>
+#include <esp_gatts_api.h>
+
+// --- Bluedroid BLE state ---
+namespace {
+
+constexpr uint8_t kAppId = 0x4E; // "N"
+
+// 128-bit NUS UUIDs (little-endian byte order for esp_bt_uuid_t).
+const uint8_t kNusServiceUuid128[16] = {
+    0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
+    0x93, 0xf3, 0xa3, 0xb5, 0x01, 0x00, 0x40, 0x6e};
+const uint8_t kNusRxUuid128[16] = {
+    0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
+    0x93, 0xf3, 0xa3, 0xb5, 0x02, 0x00, 0x40, 0x6e};
+const uint8_t kNusTxUuid128[16] = {
+    0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
+    0x93, 0xf3, 0xa3, 0xb5, 0x03, 0x00, 0x40, 0x6e};
+
+esp_gatt_if_t s_gatts_if = ESP_GATT_IF_NONE;
+uint16_t s_service_handle = 0;
+uint16_t s_tx_val_handle = 0;
+uint16_t s_conn_id = 0;
+bool s_controller_up = false;
+bool s_adv_data_configured = false;
+
+// Coexistence: bring BLE up when no network (Ethernet+WiFi+cellular) is
+// available; tear it down once any interface connects.
+constexpr uint32_t kBleStopAfterNetUpMs = 4000u;
+constexpr uint32_t kBleStartAfterNetDownMs = 30000u;
+bool s_ble_auto_stopped = false;
+uint32_t s_net_up_since_ms = 0u;
+uint32_t s_net_down_since_ms = 0u;
+
+static void sendLine(const char *line)
+{
+    if (line == nullptr) {
+        return;
+    }
+    ESP_LOGI(TAG, "%s", line);
+    if (s_tx_val_handle == 0 || !s_client_connected) {
+        return;
+    }
+    esp_ble_gatts_send_indicate(s_gatts_if, s_conn_id, s_tx_val_handle,
+                                static_cast<uint16_t>(strlen(line)),
+                                const_cast<uint8_t *>(reinterpret_cast<const uint8_t *>(line)),
+                                false);
+}
+
+// --- Advertising parameters ---
+static esp_ble_adv_params_t s_adv_params = {};
+static void initAdvParams(void)
+{
+    s_adv_params.adv_int_min = 0x20;
+    s_adv_params.adv_int_max = 0x40;
+    s_adv_params.adv_type = ADV_TYPE_IND;
+    s_adv_params.own_addr_type = BLE_ADDR_TYPE_PUBLIC;
+    s_adv_params.channel_map = ADV_CHNL_ALL;
+    s_adv_params.adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY;
+}
+
+static void configAdvData(void)
+{
+    // Service UUID in advertising data.
+    esp_ble_adv_data_t adv_data = {};
+    adv_data.set_scan_rsp = false;
+    adv_data.include_name = false;
+    adv_data.include_txpower = true;
+    adv_data.service_uuid_len = 16;
+    adv_data.p_service_uuid = const_cast<uint8_t *>(kNusServiceUuid128);
+    esp_ble_gap_config_adv_data(&adv_data);
+
+    // Device name in scan response.
+    esp_ble_adv_data_t scan_rsp = {};
+    scan_rsp.set_scan_rsp = true;
+    scan_rsp.include_name = true;
+    esp_ble_gap_config_adv_data(&scan_rsp);
+}
+
+// --- GATT event handler ---
+static void gattsEventHandler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
+                              esp_ble_gatts_cb_param_t *param)
+{
+    switch (event) {
+    case ESP_GATTS_REG_EVT: {
+        s_gatts_if = gatts_if;
+        esp_ble_gap_set_device_name(kBleDeviceName);
+        // Build the NUS service attribute table.
+        esp_gatt_srvc_id_t srvc_id = {};
+        srvc_id.id.inst_id = 0;
+        srvc_id.id.uuid.len = ESP_UUID_LEN_128;
+        memcpy(srvc_id.id.uuid.uuid.uuid128, kNusServiceUuid128, 16);
+        srvc_id.is_primary = true;
+        esp_ble_gatts_create_service(gatts_if, &srvc_id, 4);
+        break;
+    }
+    case ESP_GATTS_CREATE_EVT: {
+        s_service_handle = param->create.service_handle;
+        // RX characteristic (write)
+        esp_bt_uuid_t rx_uuid;
+        rx_uuid.len = ESP_UUID_LEN_128;
+        memcpy(rx_uuid.uuid.uuid128, kNusRxUuid128, 16);
+        esp_attr_control_t rx_ctrl = {.auto_rsp = ESP_GATT_AUTO_RSP};
+        esp_ble_gatts_add_char(s_service_handle, &rx_uuid,
+                               ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+                               ESP_GATT_CHAR_PROP_BIT_WRITE |
+                               ESP_GATT_CHAR_PROP_BIT_WRITE_NR,
+                               nullptr, &rx_ctrl);
+        break;
+    }
+    case ESP_GATTS_ADD_CHAR_EVT: {
+        // Determine which char was added by comparing UUIDs.
+        if (param->add_char.char_uuid.len == ESP_UUID_LEN_128 &&
+            memcmp(param->add_char.char_uuid.uuid.uuid128, kNusRxUuid128, 16) == 0) {
+            // RX added; now add TX characteristic (notify + read).
+            esp_bt_uuid_t tx_uuid;
+            tx_uuid.len = ESP_UUID_LEN_128;
+            memcpy(tx_uuid.uuid.uuid128, kNusTxUuid128, 16);
+            esp_attr_control_t tx_ctrl = {.auto_rsp = ESP_GATT_AUTO_RSP};
+            esp_ble_gatts_add_char(s_service_handle, &tx_uuid,
+                                   ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+                                   ESP_GATT_CHAR_PROP_BIT_NOTIFY |
+                                   ESP_GATT_CHAR_PROP_BIT_READ,
+                                   nullptr, &tx_ctrl);
+        } else {
+            // TX added; store its value handle and start the service.
+            s_tx_val_handle = param->add_char.attr_handle + 1;
+            esp_ble_gatts_start_service(s_service_handle);
+        }
+        break;
+    }
+    case ESP_GATTS_CONNECT_EVT: {
+        s_client_connected = true;
+        s_advertising = false;
+        s_conn_id = param->connect.conn_id;
+        ESP_LOGI(TAG, "client connected");
+        sendLine(NRL_FIRMWARE_BANNER " BLE config ready. Send HELP.");
+        break;
+    }
+    case ESP_GATTS_DISCONNECT_EVT: {
+        s_client_connected = false;
+        s_advertising = false;
+        if (s_wifi_transaction) {
+            s_wifi_transaction = false;
+            s_wifi_transaction_has_ssid = false;
+        }
+        ESP_LOGI(TAG, "client disconnected reason=%d", param->disconnect.reason);
+        break;
+    }
+    case ESP_GATTS_WRITE_EVT: {
+        if (!param->write.is_prep) {
+            appendCommandData(param->write.value, param->write.len);
+        }
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+// --- GAP event handler (advertising lifecycle) ---
+static void gapEventHandler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
+{
+    switch (event) {
+    case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
+        // Main adv data set; scan response will follow.
+        s_adv_data_configured = true;
+        break;
+    case ESP_GAP_BLE_SCAN_RSP_DATA_SET_COMPLETE_EVT:
+        // Both adv data and scan response configured; start advertising.
+        esp_ble_gap_start_advertising(&s_adv_params);
+        break;
+    case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
+        if (param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+            s_advertising = true;
+            ESP_LOGI(TAG, "advertising as %s", kBleDeviceName);
+        }
+        break;
+    case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
+        s_advertising = false;
+        break;
+    default:
+        break;
+    }
+}
+
+// --- Coexistence: manage BLE based on overall network connectivity ---
+static void manageCoexistence(void)
+{
+    const uint32_t now = nowMsBle();
+    const bool net_up = nrlNetworkConnected();
+
+    if (net_up) {
+        s_net_down_since_ms = 0u;
+        if (s_net_up_since_ms == 0u) {
+            s_net_up_since_ms = now;
+        }
+        if (!s_ble_auto_stopped && s_initialized && !s_client_connected &&
+            (now - s_net_up_since_ms) >= kBleStopAfterNetUpMs) {
+            ESP_LOGI(TAG, "network stable, stopping BLE provisioning");
+            BLEConfig_Stop();
+            s_ble_auto_stopped = true;
+        }
+    } else {
+        s_net_up_since_ms = 0u;
+        if (s_net_down_since_ms == 0u) {
+            s_net_down_since_ms = now;
+        }
+        // Do not start BLE if HFP is using the BT controller.
+        if (!s_initialized && (now - s_net_down_since_ms) >= kBleStartAfterNetDownMs) {
+            if (NRL_BtHfp_IsEnabled()) {
+                ESP_LOGI(TAG, "network down but HFP active; skipping BLE fallback");
+            } else {
+                ESP_LOGI(TAG, "network down, starting BLE for fallback provisioning");
+                if (!BLEConfig_Init()) {
+                    ESP_LOGW(TAG, "BLE fallback init failed; retrying after grace period");
+                }
+            }
+            s_net_down_since_ms = now;
+            s_ble_auto_stopped = false;
+        }
+    }
+}
+
+} // namespace
+
+// --- Bluedroid public API ---
+
+bool BLEConfig_Init(void)
+{
+    if (s_initialized) {
+        return true;
+    }
+
+    // Bring up the BT controller in dual mode if not already running.
+    if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+        esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+#pragma GCC diagnostic pop
+        esp_err_t err = esp_bt_controller_init(&bt_cfg);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "controller init: %s", esp_err_to_name(err));
+            return false;
+        }
+        err = esp_bt_controller_enable(ESP_BT_MODE_BTDM);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "controller enable BTDM: %s", esp_err_to_name(err));
+            esp_bt_controller_deinit();
+            return false;
+        }
+        s_controller_up = true;
+    }
+
+    if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_ENABLED) {
+        if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_INITIALIZED) {
+            esp_bluedroid_deinit();
+        }
+        esp_err_t err = esp_bluedroid_init();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "bluedroid init: %s", esp_err_to_name(err));
+            return false;
+        }
+        err = esp_bluedroid_enable();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "bluedroid enable: %s", esp_err_to_name(err));
+            esp_bluedroid_deinit();
+            return false;
+        }
+    }
+
+    // Register GAP and GATTS callbacks.
+    esp_ble_gap_register_callback(gapEventHandler);
+    esp_ble_gatts_register_callback(gattsEventHandler);
+    esp_ble_gatts_app_register(kAppId);
+
+    // Configure advertising data (name + NUS service UUID).
+    esp_ble_gap_set_device_name(kBleDeviceName);
+    initAdvParams();
+    configAdvData();
+
+    s_initialized = true;
+    ESP_LOGI(TAG, "BLE provisioning started (Bluedroid dual-mode)");
+    return true;
+}
+
+bool BLEConfig_IsReady(void)
+{
+    return s_initialized;
+}
+
+bool BLEConfig_IsControllerUp(void)
+{
+    return s_controller_up && s_initialized;
+}
+
+void BLEConfig_ReportWifiResult(bool connected)
+{
+    if (!s_wifi_result_pending) return;
+    if (connected) {
+        char ip[16] = {};
+        nrlIpToString(nrlWifiStaIp(), ip, sizeof(ip));
+        char line[48] = {};
+        snprintf(line, sizeof(line), "WIFI_STATE=GOT_IP,%s", ip);
+        sendLine(line);
+    } else {
+        sendLine("WIFI_STATE=FAILED");
+    }
+    s_wifi_result_pending = false;
+}
+
+void BLEConfig_Stop(void)
+{
+    if (!s_initialized) {
+        return;
+    }
+    if (s_gatts_if != ESP_GATT_IF_NONE) {
+        esp_ble_gatts_app_unregister(s_gatts_if);
+    }
+    esp_ble_gap_stop_advertising();
+    esp_bluedroid_disable();
+    esp_bluedroid_deinit();
+    if (s_controller_up) {
+        esp_bt_controller_disable();
+        esp_bt_controller_deinit();
+        s_controller_up = false;
+    }
+    s_gatts_if = ESP_GATT_IF_NONE;
+    s_service_handle = 0;
+    s_tx_val_handle = 0;
+    s_conn_id = 0;
+    s_adv_data_configured = false;
+    s_initialized = false;
+    s_advertising = false;
+    s_client_connected = false;
+    s_wifi_transaction = false;
+    s_wifi_transaction_has_ssid = false;
+    ESP_LOGI(TAG, "BLE stopped (Bluedroid + controller released)");
+}
+
+void BLEConfig_Poll(void)
+{
+    manageCoexistence();
+
+    if (!s_initialized) {
+        return;
+    }
+
+    if (s_restart_wifi_pending || s_restart_udp_pending) {
+        const bool restart_wifi = s_restart_wifi_pending;
+        const bool restart_udp = s_restart_udp_pending;
+        s_restart_wifi_pending = false;
+        s_restart_udp_pending = false;
+        NRLAudioBridge_ApplyConfig(restart_wifi, restart_udp);
+    }
+
+    if (s_wifi_result_pending && nrlWifiStaConnected()) {
+        BLEConfig_ReportWifiResult(true);
+    }
+
+    if (!s_client_connected && !s_advertising) {
+        esp_ble_gap_start_advertising(&s_adv_params);
+    }
+
+    if (s_list_pending) {
+        s_list_pending = false;
+        if (s_client_connected) {
+            reportCachedWifi();
+        }
+    }
+
+    if (s_scan_pending) {
+        s_scan_pending = false;
+        if (s_client_connected) {
+            runWifiScanAndReport();
+        }
+    }
+
+    if (s_reboot_pending && static_cast<int32_t>(nowMsBle() - s_reboot_at_ms) >= 0) {
+        ESP_LOGI(TAG, "reboot now");
+        vTaskDelay(pdMS_TO_TICKS(100));
+        esp_restart();
+    }
+}
+
+#else // No BT host available at all.
 
 bool BLEConfig_Init(void) { return false; }
 void BLEConfig_Poll(void) {}
 bool BLEConfig_IsReady(void) { return false; }
 void BLEConfig_ReportWifiResult(bool) {}
 void BLEConfig_Stop(void) {}
+bool BLEConfig_IsControllerUp(void) { return false; }
 
-#endif // CONFIG_BT_NIMBLE_ENABLED
+#endif // CONFIG_BT_NIMBLE_ENABLED / CONFIG_BT_BLUEDROID_ENABLED
+
+#endif // CONFIG_BT_NIMBLE_ENABLED || CONFIG_BT_BLUEDROID_ENABLED

@@ -186,7 +186,7 @@ void mdcDecoded(int frame_count, unsigned char op, unsigned char arg,
     s_last_mdc_signature[index] = signature;
     s_last_mdc_ms[index] = now;
     char text[96];
-    snprintf(text, sizeof(text), "MDC1200 %s: ID %04X OP %02X ARG %02X%s",
+    snprintf(text, sizeof(text), "MDC %s: ID %04X OP %02X ARG %02X%s",
              sourceName(decoder->source), unit_id, op, arg, frame_count == 2 ? " (2)" : "");
     publishResult(text);
 }

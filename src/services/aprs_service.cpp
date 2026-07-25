@@ -1932,9 +1932,26 @@ extern "C" uint32_t APRS_SERVICE_GetTxCount(void) { return s_tx_count; }
 
 extern "C" bool APRS_SERVICE_GpsHasFix(void)
 {
-    AprsGpsInfo info{};
-    APRS_SERVICE_GetGpsInfo(&info);
-    return info.has_fix;
+    // Lightweight check: avoids allocating the full AprsGpsInfo (~450 B) on the
+    // caller's stack. The nrl_main_loop task has only 6 KB and the display
+    // refresh chain is already deep; the old path (GetGpsInfo into a local
+    // AprsGpsInfo) overflowed it and caused a CPU lockup.
+    SerialPortConfig serial{};
+    SERIAL_PORT_CONFIG_Get(&serial);
+    if (!serial.uart2_enabled) return false;
+
+    bool fix = false;
+    uint32_t last_nmea = 0u;
+    uint32_t last_fix = 0u;
+    portENTER_CRITICAL(&s_gps_mux);
+    fix = s_gps_fix;
+    last_nmea = s_gps_last_nmea_ms;
+    last_fix = s_gps_last_fix_ms;
+    portEXIT_CRITICAL(&s_gps_mux);
+
+    const uint32_t now = nowMs();
+    const bool connected = last_nmea != 0u && (now - last_nmea) < kGpsDataFreshMs;
+    return connected && fix && last_fix != 0u && (now - last_fix) < kGpsFixFreshMs;
 }
 
 extern "C" void APRS_SERVICE_GetGpsInfo(AprsGpsInfo *out)
