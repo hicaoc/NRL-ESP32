@@ -194,6 +194,10 @@ lv_obj_t *s_lbl_settings_mic = nullptr;
 lv_obj_t *s_lbl_settings_volume = nullptr;
 char s_shown_music_path[256] = {};
 bool s_shown_music_playing = false;
+size_t s_music_tap_index = SIZE_MAX;
+uint32_t s_music_tap_ms = 0u;
+lv_obj_t *s_music_tap_row = nullptr;
+bool s_bi4umd_aprs_from_settings = false;
 #endif
 
 adc_oneshot_unit_handle_t s_adc = nullptr;
@@ -245,6 +249,47 @@ NrlOtaStatus *s_ota_ui_status = nullptr;
 const char *menuText(const char *english, const char *chinese)
 {
     return s_menu_chinese ? chinese : english;
+}
+
+void localizeDisplayNotice(char *out, size_t out_size, const char *notice)
+{
+    if (out == nullptr || out_size == 0u) return;
+    if (notice == nullptr) notice = "";
+    if (!s_menu_chinese) {
+        snprintf(out, out_size, "%s", notice);
+        return;
+    }
+
+    struct NoticeTranslation {
+        const char *english;
+        const char *chinese;
+    };
+    static constexpr NoticeTranslation kOtaNotices[] = {
+        {"OTA CHECKING...", "OTA检查中..."},
+        {"FIRMWARE IS UP TO DATE", "固件已是最新版本"},
+        {"OTA CHECK FAILED", "OTA检查失败"},
+        {"OTA UPDATE FAILED", "OTA升级失败"},
+        {"OTA UPDATING...", "OTA升级中..."},
+        {"OTA UPLOADING...", "OTA上传中..."},
+        {"OTA COMPLETE - REBOOTING", "OTA完成，正在重启"},
+    };
+    for (const auto &translation : kOtaNotices) {
+        if (strcmp(notice, translation.english) == 0) {
+            snprintf(out, out_size, "%s", translation.chinese);
+            return;
+        }
+    }
+    constexpr char kUpdatingPrefix[] = "OTA UPDATING ";
+    if (strncmp(notice, kUpdatingPrefix, sizeof(kUpdatingPrefix) - 1u) == 0) {
+        snprintf(out, out_size, "OTA升级中 %s", notice + sizeof(kUpdatingPrefix) - 1u);
+        return;
+    }
+    constexpr char kNewFirmwarePrefix[] = "NEW FIRMWARE ";
+    if (strncmp(notice, kNewFirmwarePrefix, sizeof(kNewFirmwarePrefix) - 1u) == 0) {
+        snprintf(out, out_size, "发现新固件 %s", notice + sizeof(kNewFirmwarePrefix) - 1u);
+        return;
+    }
+    snprintf(out, out_size, "%s", notice);
 }
 
 const lv_font_t *menuFont(const lv_font_t *english_font)
@@ -299,6 +344,7 @@ void buildUi();
 void buildProvisioningUi();
 void buildHomeContent();
 void buildMenuUi();
+size_t menuItemCount();
 #if NRL_BOARD == NRL_BOARD_BI4UMD
 void menuTouchPressed(lv_event_t *event);
 void menuTouchReleased(lv_event_t *event);
@@ -630,8 +676,36 @@ void bi4umdShowSettingsPage(lv_event_t *)
 
 void bi4umdOpenMainMenu(lv_event_t *)
 {
+    s_bi4umd_aprs_from_settings = false;
     s_bi4umd_page = Bi4umdPage::Radio;
     Display_MenuOpen();
+}
+
+void bi4umdOpenAprsPage(const MenuPage page)
+{
+    STATUS_IO_SetSoftPtt(false);
+    s_bi4umd_page = Bi4umdPage::Radio;
+    s_menu_active = true;
+    s_menu_open_requested = false;
+    s_menu_nav_pending = 0;
+    s_menu_confirm_pending = 0u;
+    s_menu_message[0] = '\0';
+    s_menu_page = page;
+    s_menu_index = 0u;
+    s_menu_aprs_refresh_ms = 0u;
+    s_menu_aprs_revision = APRS_SERVICE_GetStationRevision();
+    s_bi4umd_aprs_from_settings = true;
+    buildMenuUi();
+}
+
+void bi4umdOpenGpsPage(lv_event_t *)
+{
+    bi4umdOpenAprsPage(MenuPage::AprsGps);
+}
+
+void bi4umdOpenAprsListPage(lv_event_t *)
+{
+    bi4umdOpenAprsPage(MenuPage::AprsList);
 }
 
 void bi4umdMenuUp(lv_event_t *) { Display_MenuNavigate(1); }
@@ -660,17 +734,17 @@ void addBi4umdMenuButtons()
     };
 #if NRL_BOARD == NRL_BOARD_BI4UMD
     if (s_menu_page == MenuPage::AprsList || s_menu_page == MenuPage::AprsGps) {
-        menu_button(166, "返回", bi4umdMenuConfirm);
+        menu_button(166, menuText("BACK", "返回"), bi4umdMenuConfirm);
         return;
     }
     if (s_menu_page == MenuPage::About) {
-        menu_button(88, "返回", bi4umdMenuConfirm);
+        menu_button(88, menuText("BACK", "返回"), bi4umdMenuConfirm);
         return;
     }
 #endif
-    menu_button(10, "上", bi4umdMenuUp);
-    menu_button(88, "下", bi4umdMenuDown);
-    menu_button(166, "确认", bi4umdMenuConfirm);
+    menu_button(10, menuText("UP", "上"), bi4umdMenuUp);
+    menu_button(88, menuText("DOWN", "下"), bi4umdMenuDown);
+    menu_button(166, menuText("OK", "确认"), bi4umdMenuConfirm);
 #endif
 }
 
@@ -1112,8 +1186,17 @@ void menuTouchReleased(lv_event_t *)
     lv_point_t p;
     lv_indev_get_point(indev, &p);
     const int delta_y = p.y - s_menu_touch_start_y;
-    if (delta_y > 30 || delta_y < -30) {
-        Display_MenuNavigate(delta_y > 0 ? 1 : -1);
+    if (delta_y > 24 || delta_y < -24) {
+        const int distance = delta_y > 0 ? delta_y : -delta_y;
+        const size_t item_count = menuItemCount();
+        int steps = distance / 28;
+        if (steps < 1) steps = 1;
+        if (item_count > 1u && steps >= static_cast<int>(item_count)) {
+            steps = static_cast<int>(item_count - 1u);
+        }
+        for (int i = 0; i < steps; ++i) {
+            Display_MenuNavigate(delta_y > 0 ? 1 : -1);
+        }
     } else {
         const int rel_y = p.y - kContentY;
         for (size_t i = 0; i < s_menu_row_count; ++i) {
@@ -1124,6 +1207,56 @@ void menuTouchReleased(lv_event_t *)
             }
         }
     }
+}
+
+void bi4umdScrollableMenuItemClicked(lv_event_t *event)
+{
+    s_menu_index = static_cast<size_t>(
+        reinterpret_cast<uintptr_t>(lv_event_get_user_data(event)));
+    Display_MenuConfirm();
+}
+
+void buildBi4umdScrollableMenu(lv_obj_t *parent, const char *const *items,
+                               const size_t item_count)
+{
+    lv_obj_t *list = lv_obj_create(parent);
+    lv_obj_remove_style_all(list);
+    lv_obj_set_pos(list, 0, 0);
+    lv_obj_set_size(list, kWidth, 170);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    lv_obj_set_style_bg_color(list, lv_color_hex(kColorBg), 0);
+    lv_obj_set_style_bg_opa(list, LV_OPA_COVER, 0);
+    lv_obj_set_style_width(list, 3, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(list, lv_color_hex(kColorAccent), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(list, LV_OPA_COVER, LV_PART_SCROLLBAR);
+
+    lv_obj_t *selected_row = nullptr;
+    for (size_t i = 0; i < item_count; ++i) {
+        lv_obj_t *row = lv_button_create(list);
+        lv_obj_set_pos(row, 4, 2 + static_cast<int>(i) * 28);
+        lv_obj_set_size(row, kWidth - 12, 25);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex(s_menu_index == i ? 0x17364A : kColorBg), 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_outline_width(row, 0, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_add_event_cb(row, bi4umdScrollableMenuItemClicked, LV_EVENT_CLICKED,
+                            reinterpret_cast<void *>(static_cast<uintptr_t>(i)));
+
+        lv_obj_t *label = makeLabel(row, &s_font_aprs_16,
+                                    s_menu_index == i ? kColorCallIdle : kColorSub);
+        lv_obj_set_width(label, kWidth - 28);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+        lv_obj_align(label, LV_ALIGN_LEFT_MID, 5, 0);
+        lv_label_set_text(label, items[i]);
+        if (s_menu_index == i) selected_row = row;
+    }
+    lv_obj_update_layout(list);
+    if (selected_row != nullptr) lv_obj_scroll_to_view(selected_row, LV_ANIM_OFF);
 }
 #endif
 
@@ -1248,6 +1381,9 @@ void buildMainMenu()
         menuText("ABOUT", "关于"),
     };
     constexpr size_t kItemCount = sizeof(items) / sizeof(items[0]);
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    buildBi4umdScrollableMenu(scr, items, kItemCount);
+#else
 #if NRL_BOARD == NRL_BOARD_GEZIPAI
     constexpr size_t kVisibleRows = 6u;
 #else
@@ -1261,6 +1397,7 @@ void buildMainMenu()
     }
 #if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_BI4UMD
     menuScrollBar(scr, kItemCount, kVisibleRows, start);
+#endif
 #endif
     menuStatusFooter(scr, menuText("VOL+/- SELECT   PTT OK", "音量+/- 选择  PTT确认"));
 }
@@ -1323,7 +1460,16 @@ void buildOtaMenu()
         return;
     }
     if (s_menu_index > ota->release_count) s_menu_index = 0u;
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    const bool scroll_releases = !ota->checking && !s_menu_ota_requested &&
+                                 !ota->updating && ota->release_count > 0u;
+    if (!scroll_releases) {
+        menuRow(scr, 1, menuText("< BACK / OTA", "< 返回 / OTA"),
+                s_menu_index == 0u, nullptr, 0);
+    }
+#else
     menuRow(scr, 1, menuText("< BACK / OTA", "< 返回 / OTA"), s_menu_index == 0u, nullptr, 0);
+#endif
 
     if (ota->checking || s_menu_ota_requested) {
         lv_obj_t *lbl = makeLabel(scr, menuFont(&lv_font_montserrat_20), kColorApWarn);
@@ -1362,6 +1508,20 @@ void buildOtaMenu()
         lv_label_set_text(lbl, ota->last_error[0] ? ota->last_error
                                                   : menuText("NO VERSIONS FOUND", "未找到版本"));
     } else {
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+        char version_lines[NRL_OTA_RELEASE_MAX][48] = {};
+        const char *items[NRL_OTA_RELEASE_MAX + 1u] = {};
+        items[0] = menuText("< BACK / OTA", "< 返回 / OTA");
+        for (size_t i = 0; i < ota->release_count; ++i) {
+            snprintf(version_lines[i], sizeof(version_lines[i]), "%.36s%s",
+                     ota->releases[i].version,
+                     strcmp(ota->releases[i].version, NRL_FIRMWARE_VERSION) == 0
+                         ? menuText("  CURRENT", "  当前")
+                         : "");
+            items[i + 1u] = version_lines[i];
+        }
+        buildBi4umdScrollableMenu(scr, items, ota->release_count + 1u);
+#else
         constexpr size_t kVisibleVersions = 4u;
         size_t selected_release = s_menu_index > 0u ? s_menu_index - 1u : 0u;
         size_t start = 0u;
@@ -1382,6 +1542,7 @@ void buildOtaMenu()
             menuRow(scr, 29 + static_cast<int>(i - start) * 27, version,
                     s_menu_index == i + 1u, nullptr, static_cast<int>(i + 1u));
         }
+#endif
     }
 
     if (ota->last_error[0] != '\0' && ota->release_count > 0u) {
@@ -1427,9 +1588,11 @@ void buildAprsSettingsMenu()
     AprsConfig cfg{};
     APRS_SERVICE_GetConfig(&cfg);
     constexpr size_t kItemCount = 9u;
+#if NRL_BOARD != NRL_BOARD_BI4UMD
     constexpr size_t kVisibleRows = 5u;
     const size_t start = menuWindowStart(kItemCount, kVisibleRows);
     const size_t end = (start + kVisibleRows < kItemCount) ? start + kVisibleRows : kItemCount;
+#endif
     const char *names[] = {
         menuText("MASTER", "总开关"), "APRS-IS", menuText("RF TX", "射频发送"),
         menuText("RF RX", "射频接收"), menuText("AUTO PERIOD", "自动周期"),
@@ -1437,6 +1600,28 @@ void buildAprsSettingsMenu()
     const bool values[] = {cfg.enabled, cfg.net_enabled, cfg.rf_tx_enabled,
                            cfg.rf_rx_enabled, cfg.auto_interval,
                            cfg.fixed_beacon_without_gps};
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    char lines[kItemCount][48] = {};
+    const char *items[kItemCount] = {};
+    for (size_t item = 0; item < kItemCount; ++item) {
+        if (item == 0u) {
+            snprintf(lines[item], sizeof(lines[item]), "%s",
+                     menuText("< BACK / APRS SET", "< 返回 / APRS设置"));
+        } else if (item <= 6u) {
+            snprintf(lines[item], sizeof(lines[item]), "%s: %s", names[item - 1u],
+                     values[item - 1u] ? menuText("ON", "开") : menuText("OFF", "关"));
+        } else if (item == 7u) {
+            snprintf(lines[item], sizeof(lines[item]),
+                     menuText("PERIOD: %us", "周期: %u秒"),
+                     static_cast<unsigned>(cfg.beacon_interval_s));
+        } else {
+            snprintf(lines[item], sizeof(lines[item]), "SSID: %u",
+                     static_cast<unsigned>(cfg.ssid));
+        }
+        items[item] = lines[item];
+    }
+    buildBi4umdScrollableMenu(scr, items, kItemCount);
+#else
     for (size_t item = start; item < end; ++item) {
         char line[40];
         if (item == 0u) {
@@ -1453,6 +1638,7 @@ void buildAprsSettingsMenu()
         menuRow(scr, 1 + static_cast<int>(item - start) * 28, line,
                 s_menu_index == item, nullptr, static_cast<int>(item));
     }
+#endif
     char footer[40];
     snprintf(footer, sizeof(footer), menuText("ITEM %u/%u  PTT TOGGLE/NEXT",
                                               "项目 %u/%u  PTT切换"),
@@ -1740,9 +1926,9 @@ void buildWideUi()
     lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, 0);
 
     lv_obj_t *left = makePanel(scr, 22, 76, 456, 260);
-    s_lbl_caption = makeLabel(left, &lv_font_montserrat_20, kColorCaption);
+    s_lbl_caption = makeLabel(left, menuFont(&lv_font_montserrat_20), kColorCaption);
     lv_obj_align(s_lbl_caption, LV_ALIGN_TOP_LEFT, 0, 0);
-    lv_label_set_text(s_lbl_caption, "STANDBY");
+    lv_label_set_text(s_lbl_caption, menuText("STANDBY", "待机"));
 
     s_lbl_callsign = makeLabel(left, &lv_font_montserrat_48, kColorCallIdle);
     lv_obj_set_width(s_lbl_callsign, 428);
@@ -1814,6 +2000,27 @@ void bi4umdMusicSelect(lv_event_t *event)
 {
     const size_t index = static_cast<size_t>(
         reinterpret_cast<uintptr_t>(lv_event_get_user_data(event)));
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+    lv_obj_t *row = static_cast<lv_obj_t *>(lv_event_get_current_target(event));
+    const bool double_tap = s_music_tap_index == index &&
+                            now - s_music_tap_ms <= 700u;
+    if (!double_tap) {
+        if (s_music_tap_row != nullptr && s_music_tap_row != row) {
+            const int current = PLAYLIST_CurrentIndex();
+            lv_obj_set_style_bg_color(
+                s_music_tap_row,
+                lv_color_hex(static_cast<int>(s_music_tap_index) == current ? 0x14505A : 0x101A24), 0);
+        }
+        s_music_tap_index = index;
+        s_music_tap_ms = now;
+        s_music_tap_row = row;
+        lv_obj_set_style_bg_color(row, lv_color_hex(0x14505A), 0);
+        return;
+    }
+
+    s_music_tap_index = SIZE_MAX;
+    s_music_tap_ms = 0u;
+    s_music_tap_row = nullptr;
     if (PLAYLIST_PlayIndex(index)) {
         rebuildBi4umdMusicList();
         refreshBi4umdMusic();
@@ -1823,6 +2030,9 @@ void bi4umdMusicSelect(lv_event_t *event)
 void rebuildBi4umdMusicList()
 {
     if (s_list_music == nullptr) return;
+    s_music_tap_index = SIZE_MAX;
+    s_music_tap_ms = 0u;
+    s_music_tap_row = nullptr;
     lv_obj_clean(s_list_music);
 
     const size_t count = PLAYLIST_Count();
@@ -1855,12 +2065,12 @@ void rebuildBi4umdMusicList()
                                   lv_color_hex(static_cast<int>(i) == current ? 0x14505A : 0x101A24), 0);
         lv_obj_set_style_bg_color(row, lv_color_hex(0x087A82), LV_STATE_PRESSED);
         lv_obj_set_style_border_width(row, 0, 0);
-        lv_obj_add_event_cb(row, bi4umdMusicSelect, LV_EVENT_CLICKED,
+        lv_obj_add_event_cb(row, bi4umdMusicSelect, LV_EVENT_SHORT_CLICKED,
                             reinterpret_cast<void *>(static_cast<uintptr_t>(i)));
 
         lv_obj_t *label = makeLabel(row, &s_font_aprs_16,
                                     static_cast<int>(i) == current ? kColorCallIdle : kColorSub);
-        lv_obj_set_width(label, kWidth - 48);
+        lv_obj_set_size(label, kWidth - 48, lv_font_get_line_height(&s_font_aprs_16));
         lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
         lv_obj_align(label, LV_ALIGN_LEFT_MID, 4, 0);
         lv_label_set_text(label, bi4umdMusicBasename(path));
@@ -2037,18 +2247,26 @@ void buildBi4umdSettingsContent()
 {
     lv_obj_t *content = prepareContent();
 
-    lv_obj_t *menu = lv_button_create(content);
-    lv_obj_set_pos(menu, 8, 6);
-    lv_obj_set_size(menu, 56, 40);
-    lv_obj_set_style_radius(menu, 6, 0);
-    lv_obj_set_style_bg_color(menu, lv_color_hex(0x10212A), 0);
-    lv_obj_set_style_bg_color(menu, lv_color_hex(0x087A82), LV_STATE_PRESSED);
-    lv_obj_set_style_border_color(menu, lv_color_hex(0x1C6B73), 0);
-    lv_obj_set_style_border_width(menu, 1, 0);
-    lv_obj_add_event_cb(menu, bi4umdOpenMainMenu, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t *menu_label = makeLabel(menu, &s_font_aprs_16, kColorCallIdle);
-    lv_label_set_text(menu_label, "主菜单");
-    lv_obj_center(menu_label);
+    auto nav_button = [content](int x, int width, const char *text, lv_event_cb_t callback) {
+        lv_obj_t *button = lv_button_create(content);
+        lv_obj_set_pos(button, x, 22);
+        lv_obj_set_size(button, width, 40);
+        lv_obj_set_style_radius(button, 6, 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x10212A), 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(button, lv_color_hex(0x1C6B73), 0);
+        lv_obj_set_style_border_width(button, 1, 0);
+        lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *label = makeLabel(button, &s_font_aprs_16, kColorCallIdle);
+        lv_obj_set_width(label, width - 8);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+        lv_label_set_text(label, text);
+        lv_obj_center(label);
+    };
+    nav_button(8, 72, menuText("MAIN MENU", "主菜单"), bi4umdOpenMainMenu);
+    nav_button(86, 54, "GPS", bi4umdOpenGpsPage);
+    nav_button(146, 86, menuText("APRS RX", "APRS接收"), bi4umdOpenAprsListPage);
 
     auto square_button = [content](int x, int y, const char *text, lv_event_cb_t callback) {
         lv_obj_t *button = lv_button_create(content);
@@ -2067,7 +2285,7 @@ void buildBi4umdSettingsContent()
 
     lv_obj_t *mic_name = makeLabel(content, &s_font_aprs_16, kColorSub);
     lv_obj_set_pos(mic_name, 12, 88);
-    lv_label_set_text(mic_name, "麦克风");
+    lv_label_set_text(mic_name, menuText("MIC", "麦克风"));
     square_button(88, 78, LV_SYMBOL_MINUS, bi4umdSettingsMicDown);
     s_lbl_settings_mic = makeLabel(content, &lv_font_montserrat_16, kColorCallIdle);
     lv_obj_set_width(s_lbl_settings_mic, 44);
@@ -2077,7 +2295,7 @@ void buildBi4umdSettingsContent()
 
     lv_obj_t *volume_name = makeLabel(content, &s_font_aprs_16, kColorSub);
     lv_obj_set_pos(volume_name, 12, 142);
-    lv_label_set_text(volume_name, "音量");
+    lv_label_set_text(volume_name, menuText("VOLUME", "音量"));
     square_button(88, 132, LV_SYMBOL_MINUS, bi4umdSettingsVolumeDown);
     s_lbl_settings_volume = makeLabel(content, &lv_font_montserrat_16, kColorCallIdle);
     lv_obj_set_width(s_lbl_settings_volume, 44);
@@ -2126,9 +2344,9 @@ void buildHomeContent()
 {
     lv_obj_t *content = prepareContent();
 
-    s_lbl_caption = makeLabel(content, &lv_font_montserrat_14, kColorCaption);
+    s_lbl_caption = makeLabel(content, menuFont(&lv_font_montserrat_14), kColorCaption);
     lv_obj_align(s_lbl_caption, LV_ALIGN_TOP_MID, 0, 8);
-    lv_label_set_text(s_lbl_caption, "STANDBY");
+    lv_label_set_text(s_lbl_caption, menuText("STANDBY", "待机"));
 
     s_lbl_callsign = makeLabel(content, &lv_font_montserrat_48, kColorCallIdle);
     lv_obj_set_width(s_lbl_callsign, kWidth);
@@ -2330,7 +2548,8 @@ void refreshCaller()
                                     sizeof(s_cached_radio_name), nullptr, 0u);
             }
             if (s_cached_radio_name[0] == '\0') {
-                snprintf(s_cached_radio_name, sizeof(s_cached_radio_name), "网络电台");
+                snprintf(s_cached_radio_name, sizeof(s_cached_radio_name), "%s",
+                         menuText("INTERNET RADIO", "网络电台"));
             }
             s_radio_name_refresh_ms = now_ms;
         }
@@ -2433,47 +2652,51 @@ void refreshCaller()
         uint32_t call_color;
         switch (state) {
             case 11:
-                caption = "NOW PLAYING"; caption_color = kColorGood;
+                caption = menuText("NOW PLAYING", "正在播放"); caption_color = kColorGood;
                 call_color = kColorGood;
                 break;
             case 7:
-                caption = "ESP-NOW RX";  caption_color = kColorDuplex;
+                caption = menuText("ESP-NOW RX", "ESP-NOW 接收"); caption_color = kColorDuplex;
                 call_color = kColorCallLive;
                 break;
             case 6:
-                caption = "ESP-NOW FDX"; caption_color = kColorDuplex;
+                caption = menuText("ESP-NOW FDX", "ESP-NOW 全双工"); caption_color = kColorDuplex;
                 call_color = kColorCallLive;
                 break;
             case 5:
-                caption = "ESP-NOW TX";  caption_color = kColorDuplex;
+                caption = menuText("ESP-NOW TX", "ESP-NOW 发送"); caption_color = kColorDuplex;
                 call_color = kColorCallIdle;
                 break;
             case 4:
-                caption = "FULL DUPLEX";  caption_color = kColorDuplex;
+                caption = menuText("FULL DUPLEX", "全双工"); caption_color = kColorDuplex;
                 call_color = kColorCallLive;
                 break;
             case 3:
-                caption = "TRANSMITTING"; caption_color = kColorTx;
+                caption = menuText("TRANSMITTING", "正在发送"); caption_color = kColorTx;
                 call_color = kColorCallIdle;
                 break;
             case 2:
-                caption = "RECEIVING";    caption_color = kColorAccent;
+                caption = menuText("RECEIVING", "正在接收"); caption_color = kColorAccent;
                 call_color = kColorCallLive;
                 break;
             case 9:
-                caption = "STANDBY ESP-NOW OPUS"; caption_color = kColorCaption;
+                caption = menuText("STANDBY ESP-NOW OPUS", "待机 ESP-NOW OPUS");
+                caption_color = kColorCaption;
                 call_color = kColorCallIdle;
                 break;
             case 8:
-                caption = "STANDBY ESP-NOW G711"; caption_color = kColorCaption;
+                caption = menuText("STANDBY ESP-NOW G711", "待机 ESP-NOW G711");
+                caption_color = kColorCaption;
                 call_color = kColorCallIdle;
                 break;
             case 10:
-                caption = "STANDBY NRL OPUS"; caption_color = kColorCaption;
+                caption = menuText("STANDBY NRL OPUS", "待机 NRL OPUS");
+                caption_color = kColorCaption;
                 call_color = kColorCallIdle;
                 break;
             default:
-                caption = "STANDBY NRL G711"; caption_color = kColorCaption;
+                caption = menuText("STANDBY NRL G711", "待机 NRL G711");
+                caption_color = kColorCaption;
                 call_color = kColorCallIdle;
                 break;
         }
@@ -2835,8 +3058,7 @@ void refreshOtaNotice()
     }
 #endif
     if (notice_active) {
-        snprintf(text, sizeof(text), "%.*s",
-                 static_cast<int>(sizeof(text) - 1u), notice.text);
+        localizeDisplayNotice(text, sizeof(text), notice.text);
         progress_percent = notice.progress_percent;
         if (notice.level == DISPLAY_NOTICE_SUCCESS) color = kColorGood;
         else if (notice.level == DISPLAY_NOTICE_ERROR) color = kColorWeak;
@@ -2844,18 +3066,23 @@ void refreshOtaNotice()
         else color = kColorAccent;
     } else if (status != nullptr && status->updating) {
         if (status->update_size > 0u) {
-            snprintf(text, sizeof(text), "OTA UPDATING %u%%",
+            snprintf(text, sizeof(text),
+                     menuText("OTA UPDATING %u%%", "OTA升级中 %u%%"),
                      static_cast<unsigned>(status->update_percent));
             progress_percent = status->update_percent;
         } else {
-            snprintf(text, sizeof(text), "OTA UPDATING...");
+            snprintf(text, sizeof(text), "%s",
+                     menuText("OTA UPDATING...", "OTA升级中..."));
         }
         color = kColorTx;
     } else if (status != nullptr && status->checking) {
-        snprintf(text, sizeof(text), "OTA CHECKING...");
+        snprintf(text, sizeof(text), "%s",
+                 menuText("OTA CHECKING...", "OTA检查中..."));
     } else if (status != nullptr && status->latest_version[0] != '\0' &&
                strcmp(status->latest_version, NRL_FIRMWARE_VERSION) != 0) {
-        snprintf(text, sizeof(text), "NEW FW %.20s VOL+/-", status->latest_version);
+        snprintf(text, sizeof(text),
+                 menuText("NEW FW %.20s VOL+/-", "新固件 %.20s 音量+/-"),
+                 status->latest_version);
         color = kColorGood;
     } else if (APRS_SERVICE_IsEnabled()) {
         // Every parsed APRS packet gets a compact summary. Unlike the station
@@ -2956,7 +3183,9 @@ void confirmMainMenu()
             s_menu_index = 0u;
             s_menu_ota_check_baseline_ms = ota != nullptr ? ota->last_check_ms : 0u;
             s_menu_ota_requested = OtaService_CheckNow();
-            setMenuMessage(s_menu_ota_requested ? "CHECK REQUESTED" : "OTA SERVER NOT SET");
+            setMenuMessage(s_menu_ota_requested
+                               ? menuText("CHECK REQUESTED", "已请求检查")
+                               : menuText("OTA SERVER NOT SET", "未设置 OTA 服务器"));
             s_menu_ota_state[0] = '\0';
             buildMenuUi();
             break;
@@ -3016,12 +3245,18 @@ void confirmAprsMenu()
         s_menu_index = 0u;
         buildMenuUi();
     } else if (s_menu_index == 2u) {
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+        s_bi4umd_aprs_from_settings = false;
+#endif
         s_menu_page = MenuPage::AprsList;
         s_menu_index = 0u;
         s_menu_aprs_refresh_ms = 0u;
         s_menu_aprs_revision = APRS_SERVICE_GetStationRevision();
         buildMenuUi();
     } else if (s_menu_index == 3u) {
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+        s_bi4umd_aprs_from_settings = false;
+#endif
         s_menu_page = MenuPage::AprsGps;
         s_menu_index = 0u;
         s_menu_aprs_refresh_ms = 0u;
@@ -3031,6 +3266,23 @@ void confirmAprsMenu()
         setMenuMessage(ok ? "BEACON QUEUED" : "ENABLE APRS FIRST");
         buildMenuUi();
     }
+}
+
+void leaveAprsDetailMenu()
+{
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    if (s_bi4umd_aprs_from_settings) {
+        s_bi4umd_aprs_from_settings = false;
+        s_menu_active = false;
+        s_menu_message[0] = '\0';
+        s_bi4umd_page = Bi4umdPage::Settings;
+        buildBi4umdSettingsContent();
+        return;
+    }
+#endif
+    s_menu_page = MenuPage::Aprs;
+    s_menu_index = 0u;
+    buildMenuUi();
 }
 
 void confirmAprsSettingsMenu()
@@ -3141,19 +3393,19 @@ void confirmOtaMenu()
     }
     const NrlOtaStatus *ota = otaUiSnapshot();
     if (ota == nullptr) {
-        setMenuMessage("OTA STATUS UNAVAILABLE");
+        setMenuMessage(menuText("OTA STATUS UNAVAILABLE", "OTA状态不可用"));
     } else if (ota->checking || ota->updating || s_menu_ota_requested) {
-        setMenuMessage("OTA BUSY");
+        setMenuMessage(menuText("OTA BUSY", "OTA正忙"));
     } else if (s_menu_index > ota->release_count) {
-        setMenuMessage("SELECT A VERSION");
+        setMenuMessage(menuText("SELECT A VERSION", "请选择版本"));
     } else {
         const char *version = ota->releases[s_menu_index - 1u].version;
         if (strcmp(version, NRL_FIRMWARE_VERSION) == 0) {
-            setMenuMessage("ALREADY INSTALLED");
+            setMenuMessage(menuText("ALREADY INSTALLED", "此版本已安装"));
         } else if (OtaService_UpdateVersion(version)) {
-            setMenuMessage("INSTALL REQUESTED", 10000u);
+            setMenuMessage(menuText("INSTALL REQUESTED", "已请求安装"), 10000u);
         } else {
-            setMenuMessage("INSTALL REQUEST FAILED");
+            setMenuMessage(menuText("INSTALL REQUEST FAILED", "安装请求失败"));
         }
     }
     buildMenuUi();
@@ -3166,6 +3418,7 @@ void processMenuInput(uint32_t now)
 #if NRL_BOARD == NRL_BOARD_BI4UMD
         STATUS_IO_SetSoftPtt(false);
         s_bi4umd_page = Bi4umdPage::Radio;
+        s_bi4umd_aprs_from_settings = false;
 #endif
         s_menu_nav_pending = 0;
         s_menu_confirm_pending = 0u;
@@ -3197,14 +3450,10 @@ void processMenuInput(uint32_t now)
         else if (s_menu_page == MenuPage::Aprs) confirmAprsMenu();
         else if (s_menu_page == MenuPage::AprsSettings) confirmAprsSettingsMenu();
         else if (s_menu_page == MenuPage::AprsList) {
-            s_menu_page = MenuPage::Aprs;
-            s_menu_index = 0u;
-            buildMenuUi();
+            leaveAprsDetailMenu();
         }
         else if (s_menu_page == MenuPage::AprsGps) {
-            s_menu_page = MenuPage::Aprs;
-            s_menu_index = 0u;
-            buildMenuUi();
+            leaveAprsDetailMenu();
         }
         else if (s_menu_page == MenuPage::Signaling) confirmSignalingMenu();
         else if (s_menu_page == MenuPage::Ctcss) confirmCtcssMenu();
@@ -3224,7 +3473,7 @@ void processMenuInput(uint32_t now)
         s_menu_ota_refresh_ms = now;
         const NrlOtaStatus *ota = otaUiSnapshot();
         if (ota == nullptr) {
-            setMenuMessage("OTA STATUS UNAVAILABLE");
+            setMenuMessage(menuText("OTA STATUS UNAVAILABLE", "OTA状态不可用"));
             buildMenuUi();
             return;
         }
