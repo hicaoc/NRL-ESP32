@@ -9,7 +9,7 @@
 // scan networks and provision WiFi credentials over the USB/UART console.
 //
 // Frame: 'I' 'M' 'P' 'R' 'O' 'V' | version | type | length | data[N] | checksum
-// Checksum = XOR of all preceding bytes (magic through data).
+// Checksum = simple sum (LSB) of all preceding bytes (magic through data).
 
 #ifdef __cplusplus
 extern "C" {

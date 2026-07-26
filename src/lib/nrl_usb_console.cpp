@@ -7,12 +7,11 @@
 
 #include <string.h>
 
-// The AT command console follows the configured ESP-IDF console channel:
-//   * UART0 (CONFIG_ESP_CONSOLE_UART_DEFAULT) on the S31-Korvo, whose USB port is
-//     a CP210x UART bridge wired to UART0 TX0/RX0 (GPIO58/59). The USB-JTAG pins
-//     are not connected there, so AT must go to UART0.
-//   * USB-Serial-JTAG (CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG) on boards whose USB
-//     port is the chip's native USB (gezipai / bh4tdv S3).
+// Console topology:
+//   * UART0 primary (CONFIG_ESP_CONSOLE_UART_DEFAULT) on S31 boards whose USB
+//     port is a CP210x UART bridge wired to UART0 TX0/RX0.
+//   * USB-Serial-JTAG primary (CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG) on boards
+//     whose USB port is the chip's native USB (gezipai / bh4tdv).
 #if defined(CONFIG_ESP_CONSOLE_UART_DEFAULT) && CONFIG_ESP_CONSOLE_UART_DEFAULT
 #define NRL_CONSOLE_UART 1
 #include <driver/uart.h>
@@ -28,6 +27,7 @@
 #include <driver/usb_serial_jtag_vfs.h>
 #endif
 
+
 static const char *TAG = "CONSOLE";
 
 namespace {
@@ -37,10 +37,7 @@ constexpr size_t kTxBufferBytes = 1024;
 
 bool s_installed = false;
 
-// One-byte "peek" buffer. The IDF read APIs expose "read with timeout" but no
-// peek count. To support the Arduino-style available()/read() pattern used by
-// pollSerialAtConsole(), Available() stashes a byte if one is buffered; Read()
-// drains the stash first.
+// One-byte "peek" buffer per input source.
 uint8_t s_peek_byte = 0;
 bool s_peek_valid = false;
 
@@ -61,10 +58,6 @@ extern "C" bool NRL_USB_Console_Init(void)
         return true;
     }
 #if NRL_CONSOLE_UART
-    // Install the UART driver on the console UART and route stdio through it so
-    // ESP_LOG output and AT-command reads share UART0 (the CP210x bridge). If the
-    // IDF console already installed the driver, reuse it (installing again would
-    // fail and leave the AT reads dead while logs still flow via the console).
     if (!uart_is_driver_installed((uart_port_t)NRL_CONSOLE_UART_NUM)) {
         const esp_err_t err = uart_driver_install((uart_port_t)NRL_CONSOLE_UART_NUM,
                                                   kRxBufferBytes, kTxBufferBytes, 0, NULL, 0);
@@ -89,6 +82,8 @@ extern "C" bool NRL_USB_Console_Init(void)
     s_installed = true;
     ESP_LOGI(TAG, "USB-Serial-JTAG console ready");
 #endif
+
+
     return true;
 }
 
@@ -113,13 +108,16 @@ extern "C" size_t NRL_USB_Console_Read(uint8_t *buffer, const size_t buffer_size
         return 0u;
     }
     size_t off = 0u;
+    // Drain peek buffers first.
     if (s_peek_valid) {
         buffer[off++] = s_peek_byte;
         s_peek_valid = false;
-        if (off >= buffer_size) {
-            return off;
-        }
+        if (off >= buffer_size) return off;
     }
+    // Read ONLY from primary console (UART0 on S31/CP210x boards).
+    // Do NOT read from USB-Serial-JTAG here: its RX picks up the device's
+    // own mirrored log output (containing "IMPROV" text), corrupting the
+    // Improv frame parser with false triggers.
     const int got = consoleReadBytes(buffer + off, buffer_size - off);
     if (got > 0) {
         off += static_cast<size_t>(got);
@@ -132,13 +130,17 @@ extern "C" size_t NRL_USB_Console_Write(const uint8_t *data, const size_t size)
     if (!s_installed || data == nullptr || size == 0u) {
         return 0u;
     }
+    size_t total = 0;
 #if NRL_CONSOLE_UART
     const int wrote = uart_write_bytes((uart_port_t)NRL_CONSOLE_UART_NUM,
                                        reinterpret_cast<const char *>(data), size);
+    if (wrote > 0) total = (size_t)wrote;
 #else
     const int wrote = usb_serial_jtag_write_bytes(data, size, pdMS_TO_TICKS(100));
+    if (wrote > 0) total = (size_t)wrote;
 #endif
-    return (wrote > 0) ? static_cast<size_t>(wrote) : 0u;
+
+    return total;
 }
 
 extern "C" void NRL_USB_Console_Flush(void)

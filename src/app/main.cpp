@@ -25,6 +25,7 @@
 #include "../services/radio_favorites.h"
 #include "../services/storage_service.h"
 #include "../lib/nrl_audio_bridge.h"
+#include "../lib/improv_protocol.h"
 #include "../lib/nrl_bt_hfp.h"
 #include "../lib/nrl_ethernet.h"
 #include "../lib/nrl_net_compat.h"

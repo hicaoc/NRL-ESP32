@@ -704,6 +704,7 @@ bool nrlWifiScanStartBlocking(uint32_t timeout_ms)
         snprintf(s_scan_cache[s_scan_count].ssid, sizeof(s_scan_cache[s_scan_count].ssid),
                  "%s", reinterpret_cast<const char *>(records[i].ssid));
         s_scan_cache[s_scan_count].rssi = records[i].rssi;
+        s_scan_cache[s_scan_count].secured = (records[i].authmode != WIFI_AUTH_OPEN);
         ++s_scan_count;
     }
     const size_t cached = s_scan_count;

@@ -22,6 +22,7 @@ struct NetProbeResult {
 struct NrlWifiScanResult {
     char ssid[33];  // includes the trailing NUL
     int8_t rssi;
+    bool secured;  // true if the AP requires authentication
 };
 
 // Initialize the WiFi driver (NVS + netif + event loop + esp_wifi_init). The

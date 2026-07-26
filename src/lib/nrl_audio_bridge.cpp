@@ -1148,6 +1148,16 @@ static void pollSerialAtConsole(void)
         if (got == 0u) {
             break;
         }
+        ESP_LOGI(TAG, "[SERIAL] RX %u bytes, first=0x%02X", (unsigned)got, buf[0]);
+        // Hex dump for Improv debugging (first 32 bytes)
+        {
+            char hex[3*32+1];
+            const size_t n = got < 32 ? got : 32;
+            for (size_t h = 0; h < n; ++h)
+                snprintf(hex + h*3, 4, "%02X ", buf[h]);
+            hex[n*3] = '\0';
+            ESP_LOGI(TAG, "[SERIAL] HEX: %s", hex);
+        }
         for (size_t i = 0; i < got; ++i) {
             // Improv protocol (binary frames from ESP Web Tools) takes priority;
             // only bytes not consumed by Improv reach the AT line parser.
