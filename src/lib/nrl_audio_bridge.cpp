@@ -1,5 +1,6 @@
 #include "nrl_audio_bridge.h"
 
+#include "improv_protocol.h"
 #include "nrl_at_commands.h"
 #include "nrl_audio_config.h"
 #include "nrl_bt_hfp.h"
@@ -1148,6 +1149,11 @@ static void pollSerialAtConsole(void)
             break;
         }
         for (size_t i = 0; i < got; ++i) {
+            // Improv protocol (binary frames from ESP Web Tools) takes priority;
+            // only bytes not consumed by Improv reach the AT line parser.
+            if (IMPROV_ProcessByte(buf[i])) {
+                continue;
+            }
             const char ch = static_cast<char>(buf[i]);
             if (ch == '\n' || ch == '\r') {
                 if (s_serial_at_len > 0u) {

@@ -49,6 +49,7 @@ set(app_sources
     lib/aprs/aprs_modem.cpp
     lib/aprs/parse_aprs.cpp
     lib/ble_config.cpp
+    lib/improv_protocol.cpp
     lib/nrl_bt_hfp.cpp
     lib/nrl_ethernet.cpp
     lib/nrl_at_commands.cpp

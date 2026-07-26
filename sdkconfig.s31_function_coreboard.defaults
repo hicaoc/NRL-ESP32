@@ -32,7 +32,7 @@ CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
 # IDF's default main-task stack (3584 B) is too small for our boot path:
 # initApp() opens the WiFi/HTTPD/audio/network stacks back-to-back. Match
 # arduino-esp32's old CONFIG_ARDUINO_LOOP_STACK_SIZE=8192 and a bit more.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=24576
 
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y

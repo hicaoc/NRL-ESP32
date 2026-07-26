@@ -610,7 +610,7 @@ void MAIN_LOOP_PROFILE_Get(MainLoopProfileSnapshot *snapshot)
 // the slow RTCRAM heap block (stack @0x2e007594), which made every poll this
 // task runs ~4x slower and cost ~10% of core0. A fixed .bss buffer keeps the
 // stack in main SRAM on every board, every boot.
-constexpr size_t kMainLoopStackBytes = 6144;
+constexpr size_t kMainLoopStackBytes = 8192;
 static StackType_t s_main_loop_stack[kMainLoopStackBytes / sizeof(StackType_t)];
 static StaticTask_t s_main_loop_tcb;
 
