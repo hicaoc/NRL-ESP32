@@ -38,7 +38,7 @@ From left to right: the Gezipai ESP32-S3 terminal, BH4TDV NRL-3188 controller, a
 
 The left image is the ESP32-S31-Korvo-1 used by `s31_korvo`, with display, touch, TF-card, USB-host, and audio peripherals. The right image is the ESP32-S31-Function-CoreBoard-1 used by `s31_function_coreboard`, with RJ45 Gigabit Ethernet, USB-A host, on-board audio, and an RGB status LED.
 
-> USB web flashing is available only for the ESP32-S3 targets, `gezipai` and `bh4tdv`. Flash the two ESP32-S31 boards over serial. Korvo UART1/SCI and UART2/GPS use DVP-camera GPIOs and default to off; they can be enabled through Web/AT, but cannot coexist with a parallel camera.
+> USB web flashing provided by NRL-OTA supports the four ESP32-S3 targets: `gezipai`, `gezipai_4g`, `bi4umd`, and `bh4tdv`. Flash the two ESP32-S31 boards over serial. Korvo UART1/SCI and UART2/GPS use DVP-camera GPIOs and default to off; they can be enabled through Web/AT, but cannot coexist with a parallel camera.
 
 ## Extended Features and Availability
 
@@ -77,7 +77,7 @@ The following capabilities are implemented in the current codebase. Features mar
 - **Release OTA and publishing service**
   - The OTA management system now lives in the separate [`NRL-OTA`](https://github.com/hicaoc/NRL-OTA) repository: a Go server with a Vue admin UI and SQLite registry for firmware releases and release notes, organized by board, version, and release channel (such as `stable` / `beta`).
   - The management UI provides board introductions, per-board firmware history and changelogs, USB flashing, and a device dashboard. During an update check, a device reports its board, firmware version, callsign, SSID, IP address, and last-seen time, allowing the dashboard to flag devices with an available update.
-  - The **complete flash package** is the single release source. One upload contains the bootloader, partition table, OTA data, application, and required resource images. The server registers the application slice as the device OTA release and, for ESP32-S3 boards, serves a USB web-flasher manifest from the same package, preventing drift between the two delivery paths.
+  - The **complete flash package** is the single release source. One upload contains the bootloader, partition table, OTA data, application, and required resource images. The server registers the application slice as the device OTA release and, for ESP32-S3 boards, generates the manifest used by its own browser-based USB flashing UI, preventing drift between the two delivery paths.
   - All six build targets can use the OTA management system. The four ESP32-S3 targets additionally support first-time full USB web flashing in Chrome/Edge; `s31_korvo` and `s31_function_coreboard` require serial flashing for the first install, then can use device OTA.
   - A device persists its OTA service URL and device token, checks a compatible-release manifest periodically or on demand, and can install the latest or a specified historical version. Production OTA downloads accept HTTPS only. Use local serial AT commands `AT+OTAURL`, `AT+OTACHECK`, `AT+OTALIST`, and `AT+OTA` to configure and run updates.
   - Administrators manage releases with web login or an admin token. When `OTA_SERVER_URL`, `OTA_UPLOAD_TOKEN`, and related release variables are present, `scripts/build.py` uploads the release package automatically after a successful build.
@@ -257,26 +257,11 @@ GitHub Actions builds all six boards natively with the official ESP-IDF image on
 
 ## Firmware Flashing
 
-### USB Web Flashing
+### USB Web Flashing (provided by NRL-OTA)
 
-The `web-flasher/` page is intended for first installation or recovery. It writes the bootloader, partition table, OTA data, application firmware, and esp-sr models.
+This repository no longer contains the USB flashing page, its static assets, or its packaging script. This project still builds and uploads the complete flash package containing the bootloader, partition table, OTA data, application firmware, and resource images; the separate [`NRL-OTA`](https://github.com/hicaoc/NRL-OTA) project provides the browser UI and manifest.
 
-> The four ESP32-S3 boards (`gezipai`, `gezipai_4g`, `bi4umd`, and `bh4tdv`) are supported. The ESP32-S31
-> is not supported by esptool-js, so flash `s31_korvo` and `s31_function_coreboard`
-> over serial.
-
-Build both boards, then stage the page (`stage_web_flasher.py` reads each
-`build/<board>/flasher_args.json` for the image offsets and writes the
-esp-web-tools manifests):
-
-```powershell
-python scripts/build.py gezipai build
-python scripts/build.py bh4tdv build
-python scripts/stage_web_flasher.py
-python -m http.server 8000 -d web-flasher
-```
-
-Then open `http://localhost:8000` in Chrome or Edge and install the firmware over USB serial. (CI also bundles this in the `web-flasher` job and publishes `web-flasher-<version>.zip` to the Release on tags.)
+> NRL-OTA supports first-time USB installation or recovery for the four ESP32-S3 boards (`gezipai`, `gezipai_4g`, `bi4umd`, and `bh4tdv`). Browser flashing does not support ESP32-S31, so flash `s31_korvo` and `s31_function_coreboard` over serial.
 
 ### WiFi Web Flashing
 
@@ -287,7 +272,7 @@ After the device is running the dual OTA partition layout, firmware can be updat
 3. Upload the board's application image `build/<board>/nrl-esp32.bin` (e.g. `build/gezipai/nrl-esp32.bin`, `build/bh4tdv/nrl-esp32.bin`, `build/s31_korvo/nrl-esp32.bin`, or `build/s31_function_coreboard/nrl-esp32.bin`).
 4. The device reboots automatically after a successful upload.
 
-Note: WiFi OTA requires the `app0/app1` dual OTA layout from `part.csv`. Devices using the old partition layout should first be updated with USB web flashing or serial flashing so the new partition table is installed.
+Note: WiFi OTA requires the `app0/app1` dual OTA layout from `part.csv`. Devices using the old partition layout should first be updated with USB web flashing provided by NRL-OTA or with serial flashing so the new partition table is installed.
 
 ## Project Layout
 
@@ -303,7 +288,6 @@ src/lib/nrl_at_commands.*         Remote AT commands
 src/lib/ble_config.*              BLE configuration
 src/lib/wifi_config_portal.*      Web configuration portal
 src/lib/nrl_audio_config.h        Default network and audio settings
-web-flasher/                      USB web flasher page
 scripts/                          Build helper scripts
 ```
 

@@ -40,7 +40,7 @@ HTML 阅读版：[中文](README.html) / [English](README.en.html)
 
 左图为 `s31_korvo` 使用的 ESP32-S31-Korvo-1，提供屏幕、触摸、TF 卡、USB 主机及音频外设；右图为 `s31_function_coreboard` 使用的 ESP32-S31-Function-CoreBoard-1，提供 RJ45 千兆以太网、USB-A 主机、板载音频和 RGB 状态灯。
 
-> 注意：网页 USB 刷机仅支持 ESP32-S3 的 `gezipai` 和 `bh4tdv`；两块 ESP32-S31 板请使用串口烧录。Korvo 的 UART1/SCI 与 UART2/GPS 使用 DVP 摄像头接口 GPIO，默认关闭，可通过 Web/AT 启用；启用后不能同时使用并口摄像头。
+> 注意：由 NRL-OTA 提供的网页 USB 刷机支持四块 ESP32-S3 板：`gezipai`、`gezipai_4g`、`bi4umd` 和 `bh4tdv`；两块 ESP32-S31 板请使用串口烧录。Korvo 的 UART1/SCI 与 UART2/GPS 使用 DVP 摄像头接口 GPIO，默认关闭，可通过 Web/AT 启用；启用后不能同时使用并口摄像头。
 
 ## 扩展功能与适用范围
 
@@ -79,8 +79,8 @@ HTML 阅读版：[中文](README.html) / [English](README.en.html)
 - **版本 OTA 与发布服务**
   - OTA 管理系统已拆分到独立的 [`NRL-OTA`](https://github.com/hicaoc/NRL-OTA) 仓库：Go 服务端配合 Vue 管理界面，使用 SQLite 保存按板卡、版本和发布通道（如 `stable` / `beta`）划分的固件发布记录与更新说明。
   - 管理后台提供板卡介绍、各板卡固件历史与变更说明、USB 刷机入口，以及设备管理面板。设备在检查更新时会上报板卡型号、固件版本、呼号、SSID、IP 和最后在线时间，后台可识别有可用更新的设备。
-  - 发布流程以**完整刷机包**为唯一来源：一次上传包含 bootloader、分区表、OTA data、应用及所需资源镜像。服务端从其中登记应用镜像作为设备 OTA 版本，并为 ESP32-S3 板同时生成 USB 网页刷机 manifest，避免两套固件来源不一致。
-  - 所有四个构建目标均可接入 OTA 管理系统；`gezipai` / `bh4tdv` 还可通过 Chrome/Edge 的 USB 网页刷机首次全量安装，`s31_korvo` / `s31_function_coreboard` 保持串口首次烧录，后续可使用设备 OTA。
+  - 发布流程以**完整刷机包**为唯一来源：一次上传包含 bootloader、分区表、OTA data、应用及所需资源镜像。服务端从其中登记应用镜像作为设备 OTA 版本，并为 ESP32-S3 板生成其刷机页面所需的 manifest，避免两套固件来源不一致。
+  - 所有六个构建目标均可接入 OTA 管理系统；`gezipai`、`gezipai_4g`、`bi4umd` 和 `bh4tdv` 还可通过 NRL-OTA 在 Chrome/Edge 中首次全量安装，`s31_korvo` 和 `s31_function_coreboard` 保持串口首次烧录，后续可使用设备 OTA。
   - 设备端保存 OTA 服务 URL 与设备令牌，定时或按需拉取兼容版本清单，可安装最新版本或指定历史版本；生产 OTA 下载仅接受 HTTPS。可通过本地串口 AT 命令 `AT+OTAURL`、`AT+OTACHECK`、`AT+OTALIST`、`AT+OTA` 管理和执行更新。
   - 管理员可通过网页登录或管理令牌维护发布；构建环境设置 `OTA_SERVER_URL`、`OTA_UPLOAD_TOKEN` 等变量后，`scripts/build.py` 会在构建成功后自动上传发布包。
   - 推荐使用 `scripts/publish_ota_mcp.py` 进行需要审核确认的正式发布。脚本通过 MCP 创建一次性上传会话，上传完整刷机包后校验状态，再显式确认发布；重复执行时会核对应用镜像大小和 SHA-256，不会重复创建相同版本。
@@ -273,10 +273,8 @@ LVGL 以**本地组件**形式放在 `components/lvgl`。LVGL 与 esp_lcd 的对
 
 ## 构建和烧录
 
-工程使用原生 ESP-IDF（≥6.1，含 ESP32-S31 支持），不再使用 PlatformIO。共有四块板：
-`gezipai`（格子派，ESP32-S3）、`bh4tdv`（BH4TDV 3188，ESP32-S3）、`s31_korvo`
-（ESP32-S31-Korvo-1，ESP32-S31），以及 `s31_function_coreboard`
-（ESP32-S31-Function-CoreBoard-1，YT8531 以太网，无屏幕）。
+工程使用原生 ESP-IDF（≥6.1，含 ESP32-S31 支持），不再使用 PlatformIO。共有六个构建目标：
+`gezipai`、`gezipai_4g`、`bi4umd`、`bh4tdv`、`s31_korvo` 和 `s31_function_coreboard`。
 
 首次需安装 ESP-IDF 工具链（一次性）：
 
@@ -305,30 +303,16 @@ python scripts/build.py gezipai menuconfig                # 修改配置
 `-DNRL_BOARD_ID` 传入。
 
 GitHub Actions 会在每次 push、pull request 或手动触发时，用官方 ESP-IDF 镜像原生构建
-四块板，并上传各板的 `firmware` / `partition-table` / `bootloader` 作为构建产物，
+六块板，并上传各板的 `firmware` / `partition-table` / `bootloader` 作为构建产物，
 打 tag 时发布到 Release。
 
 ## 固件刷机
 
-### USB 网页刷机
+### USB 网页刷机（由 NRL-OTA 提供）
 
-工程提供 `web-flasher/` 页面，适合首次烧录或恢复设备。它会写入 bootloader、分区表、OTA data、应用固件和 esp-sr 模型。
+本仓库不再包含 USB 网页刷机页面、静态资源或打包脚本。本项目仍会构建和上传包含 bootloader、分区表、OTA data、应用固件及资源镜像的完整刷机包；刷机页面和 manifest 由独立的 [`NRL-OTA`](https://github.com/hicaoc/NRL-OTA) 项目提供。
 
-> 仅支持两块 ESP32-S3 板（`gezipai` / `bh4tdv`）。ESP32-S31 因 esptool-js 不支持，
-> `s31_korvo` 和 `s31_function_coreboard` 只能串口烧录。
-
-先编译这两块板，再打包页面（`stage_web_flasher.py` 从 `build/<board>/flasher_args.json`
-读取各镜像的偏移并生成 esp-web-tools manifest）：
-
-```powershell
-python scripts/build.py gezipai build
-python scripts/build.py bh4tdv build
-python scripts/stage_web_flasher.py
-python -m http.server 8000 -d web-flasher
-```
-
-然后用 Chrome 或 Edge 打开 `http://localhost:8000`，通过 USB 串口安装固件。
-（CI 也会在 `web-flasher` 任务里自动打包，打 tag 时把 `web-flasher-<版本>.zip` 发布到 Release。）
+> NRL-OTA 支持四块 ESP32-S3 板（`gezipai`、`gezipai_4g`、`bi4umd` 和 `bh4tdv`）的首次 USB 安装或恢复。ESP32-S31 因浏览器刷机工具不支持，`s31_korvo` 和 `s31_function_coreboard` 需使用串口烧录。
 
 ### WiFi 网页刷机
 
@@ -339,7 +323,7 @@ python -m http.server 8000 -d web-flasher
 3. 上传对应板子的应用固件 `build/<板名>/nrl-esp32.bin`（例如格子派 `build/gezipai/nrl-esp32.bin`、BH4TDV `build/bh4tdv/nrl-esp32.bin`、Korvo `build/s31_korvo/nrl-esp32.bin`、功能核心板 `build/s31_function_coreboard/nrl-esp32.bin`）。
 4. 上传完成后设备会自动重启到新固件。
 
-注意：WiFi OTA 需要 `part.csv` 中的 `app0/app1` 双 OTA 分区布局。旧分区布局设备应先用 USB 网页刷机或串口刷机更新分区表。
+注意：WiFi OTA 需要 `part.csv` 中的 `app0/app1` 双 OTA 分区布局。旧分区布局设备应先用 NRL-OTA 提供的 USB 网页刷机或串口刷机更新分区表。
 
 ## 目录结构
 
@@ -356,7 +340,6 @@ src/lib/nrl_at_commands.*         远程 AT 命令
 src/lib/ble_config.*              BLE 蓝牙配置
 src/lib/wifi_config_portal.*      Web 配置门户
 src/lib/nrl_audio_config.h        默认网络和音频参数
-web-flasher/                      USB 网页刷机页面
 scripts/                          构建辅助脚本
 ```
 
