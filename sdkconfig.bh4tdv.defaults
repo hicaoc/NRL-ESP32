@@ -141,4 +141,10 @@ CONFIG_BT_BLE_42_SCAN_EN=y
 # --- BH4TDV partition layout ---
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="part-bh4tdv.csv"
 CONFIG_PARTITION_TABLE_FILENAME="part-bh4tdv.csv"
+
+# --- Compiler optimization: -O2  ---
+# The shared defaults inherit the legacy "default" (-Og debug) level; LVGL's
+# software renderer and the audio decoders are 2-3x slower there, which reads
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
 CONFIG_LWIP_MAX_SOCKETS=16

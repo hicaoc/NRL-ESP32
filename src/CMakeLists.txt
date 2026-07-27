@@ -13,6 +13,7 @@ set(app_sources
     services/aprs_service.cpp
     services/cellular_rndis_service.cpp
     services/config_notify.cpp
+    services/cw_service.cpp
     services/display_notice.cpp
     services/espnow_link.cpp
     services/lan_discovery.cpp
@@ -59,6 +60,7 @@ set(app_sources
     lib/nrl_smb_readv.cpp
     lib/dtmf_codec.cpp
     lib/ctcss_decoder.cpp
+    lib/cw_codec.cpp
     lib/nrl_usb_console.cpp
     lib/nrl_wifi.cpp
     lib/wifi_config_portal.cpp

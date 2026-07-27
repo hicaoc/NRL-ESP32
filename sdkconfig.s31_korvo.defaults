@@ -260,7 +260,7 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="part-s31.csv"
 CONFIG_PARTITION_TABLE_FILENAME="part-s31.csv"
 
-# --- Compiler optimization: -O2 (S31 only) ---
+# --- Compiler optimization: -O2  ---
 # The shared defaults inherit the legacy "default" (-Og debug) level; LVGL's
 # software renderer and the audio decoders are 2-3x slower there, which reads
 # directly as UI latency on the 800x480 panel.

@@ -7,6 +7,7 @@
 #include "external_radio.h"
 #include "es8311.h"
 #include "../../lib/nrl_bt_hfp.h"  // route the volume keys to a connected headset
+#include "../../services/cw_service.h"
 #if NRL_BOARD_IS_GEZIPAI_FAMILY
 #include "display.h"
 #endif
@@ -456,6 +457,22 @@ static void pollGezipaiMenuButtons(const unsigned long now)
     const bool up_edge = pollButtonPressEdge(s_btn_vol_up, now);
     const bool down_edge = pollButtonPressEdge(s_btn_vol_down, now);
     const bool chord = s_btn_vol_up.pressed && s_btn_vol_down.pressed;
+    if (Display_CwIsActive()) {
+        s_pending_volume_delta = 0;
+        s_btn_vol_up_repeat.active = false;
+        s_btn_vol_down_repeat.active = false;
+        if (chord && !s_menu_chord_active) {
+            s_menu_chord_active = true;
+            CW_SERVICE_Delete();
+        } else if (!s_btn_vol_up.pressed && !s_btn_vol_down.pressed) {
+            s_menu_chord_active = false;
+        }
+        if (!chord) {
+            if (up_edge) Display_MenuNavigate(+1);
+            if (down_edge) Display_MenuNavigate(-1);
+        }
+        return;
+    }
     if (chord && !s_menu_chord_active) {
         s_menu_chord_active = true;
         s_pending_volume_delta = 0;
@@ -524,8 +541,24 @@ static void updatePtt(const unsigned long now)
     const bool is_pressed = s_btn_ptt.pressed;
 
 #if NRL_BOARD_IS_GEZIPAI_FAMILY
+    if (Display_CwIsActive()) {
+        if (is_pressed && !was_pressed) {
+            s_ptt_press_ms = now;
+        } else if (!is_pressed && was_pressed) {
+            if (now - s_ptt_press_ms >= kPttLongPressMs) {
+                Display_CwExit();
+            } else {
+                (void)CW_SERVICE_Send();
+            }
+        }
+        s_tx_latched = false;
+        s_tx_suppressed = false;
+        s_tx_active = false;
+        return;
+    }
     if (Display_MenuIsActive()) {
         if (is_pressed && !was_pressed) {
+            s_ptt_press_ms = now;
             Display_MenuConfirm();
             s_menu_ptt_suppressed_until_release = true;
         } else if (!is_pressed) {

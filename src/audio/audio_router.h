@@ -40,6 +40,8 @@ typedef enum {
     AUDIO_SRC_MDC_SPEAKER,  // MDC1200 tail burst appended to speaker playback
     AUDIO_SRC_DTMF_NRL,     // DTMF tail burst appended to NRL uplink
     AUDIO_SRC_DTMF_SPEAKER, // DTMF tail burst appended to speaker playback
+    AUDIO_SRC_CW_NRL,       // CW practice/automatic keying to NRL uplink
+    AUDIO_SRC_CW_SPEAKER,   // CW sidetone to the local speaker
     AUDIO_SRC_COUNT
 } AudioRouterSource_t;
 

@@ -1231,9 +1231,9 @@ static esp_err_t handleSignalingPage(httpd_req_t *req)
 {
     s_server.bind(req);
     sendConfigPage((std::string(NRL_FIRMWARE_NAME) + " Signaling").c_str(),
-                   "MDC1200 / DTMF / CTCSS",
+                   "CW / MDC1200 / DTMF / CTCSS",
                    "signalingHeadline",
-                   "Configure signaling decode sources and voice-tail transmit destinations.",
+                   "Configure CW and signaling decode sources and voice-tail transmit destinations.",
                    "signalingIntro",
                    "/save_signaling",
                    WifiConfigPortalView_BuildSignalingSections(),
@@ -1260,6 +1260,8 @@ static void sendSignalingSavedJson(const bool ok)
     append("mdc_rx_nrl", cfg.mdc_rx_nrl ? "1" : "0");
     append("mdc_tx_nrl", cfg.mdc_tx_nrl ? "1" : "0");
     append("mdc_tx_speaker", cfg.mdc_tx_speaker ? "1" : "0");
+    append("cw_rx_mic", cfg.cw_rx_mic ? "1" : "0");
+    append("cw_rx_nrl", cfg.cw_rx_nrl ? "1" : "0");
     append("dtmf_rx_mic", cfg.dtmf_rx_mic ? "1" : "0");
     append("dtmf_rx_nrl", cfg.dtmf_rx_nrl ? "1" : "0");
     append("dtmf_tx_nrl", cfg.dtmf_tx_nrl ? "1" : "0");
@@ -1286,6 +1288,12 @@ static esp_err_t handleSaveSignaling(httpd_req_t *req)
     if (ok && s_server.hasArg("ctcss_rx_nrl_present")) {
         ok = SIGNALING_SetCtcssRoute(SIGNAL_ROUTE_RX_NRL,
                                      s_server.hasArg("ctcss_rx_nrl"));
+    }
+    if (ok && s_server.hasArg("cw_rx_mic_present")) {
+        ok = SIGNALING_SetCwRoute(SIGNAL_ROUTE_RX_MIC, s_server.hasArg("cw_rx_mic"));
+    }
+    if (ok && s_server.hasArg("cw_rx_nrl_present")) {
+        ok = SIGNALING_SetCwRoute(SIGNAL_ROUTE_RX_NRL, s_server.hasArg("cw_rx_nrl"));
     }
     struct RouteField { const char *present; const char *name; bool mdc; SignalingRoute route; };
     static const RouteField routes[] = {

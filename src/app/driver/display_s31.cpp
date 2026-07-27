@@ -15,6 +15,7 @@
 #include "../../services/ai_assistant.h"
 #include "../../services/aprs_service.h"
 #include "../../services/config_notify.h"
+#include "../../services/cw_service.h"
 #include "../../services/display_notice.h"
 #include "../../services/espnow_link.h"
 #include "../../services/music_player.h"
@@ -110,6 +111,7 @@ enum class Page : uint8_t {
     Ai,
     About,
     Aprs,
+    Cw,
 };
 
 enum class Action : intptr_t {
@@ -163,6 +165,12 @@ enum class Action : intptr_t {
     OtaNewer,
     InstallOta,
     Aprs,
+    Cw,
+    CwDit,
+    CwDah,
+    CwDelete,
+    CwSend,
+    CwPractice,
     Ctcss,
     Mdc,
     Dtmf,
@@ -387,6 +395,12 @@ uint32_t s_aprs_last_refresh_ms = 0u;
 
 lv_obj_t *s_img_video = nullptr;
 lv_obj_t *s_lbl_video_status = nullptr;
+lv_obj_t *s_lbl_cw_rx = nullptr;
+lv_obj_t *s_lbl_cw_rx_code = nullptr;
+lv_obj_t *s_lbl_cw_tx = nullptr;
+lv_obj_t *s_lbl_cw_tx_code = nullptr;
+lv_obj_t *s_lbl_cw_metrics = nullptr;
+uint32_t s_cw_revision = UINT32_MAX;
 lv_obj_t *s_btn_video_tx_label = nullptr;
 CoverBitmap s_video_bmp = {};
 lv_image_dsc_t s_video_dsc = {};
@@ -1072,6 +1086,8 @@ lv_obj_t *button(lv_obj_t *parent, int x, int y, int w, int h, const char *text,
     if (id == Action::VolumeDown || id == Action::VolumeUp) {
         lv_obj_add_event_cb(btn, volumeEvent, LV_EVENT_PRESSED, user_data);
         lv_obj_add_event_cb(btn, volumeEvent, LV_EVENT_LONG_PRESSED_REPEAT, user_data);
+    } else if (id == Action::CwDit || id == Action::CwDah) {
+        lv_obj_add_event_cb(btn, action, LV_EVENT_PRESSED, user_data);
     } else {
         lv_obj_add_event_cb(btn, action, LV_EVENT_CLICKED, user_data);
     }
@@ -1265,6 +1281,12 @@ void clearScreen()
     s_lbl_server = nullptr;
     s_lbl_detail = nullptr;
     s_lbl_form_status = nullptr;
+    s_lbl_cw_rx = nullptr;
+    s_lbl_cw_rx_code = nullptr;
+    s_lbl_cw_tx = nullptr;
+    s_lbl_cw_tx_code = nullptr;
+    s_lbl_cw_metrics = nullptr;
+    s_cw_revision = UINT32_MAX;
     s_lbl_provision_ip = nullptr;
     s_lbl_provision_ssid = nullptr;
     s_notice_panel = nullptr;
@@ -1529,7 +1551,7 @@ void buildHome()
     lv_obj_align(s_lbl_callsign, LV_ALIGN_LEFT_MID, 0, -14);
     lv_label_set_text(s_lbl_callsign, kCallsignPlaceholder);
 
-    // Last decoded signaling (MDC/CTCSS/DTMF) shown below the callsign.
+    // Last decoded signaling (CW/MDC/CTCSS/DTMF) shown below the callsign.
     s_lbl_signaling = label(left, &lv_font_montserrat_16, kColorAccent);
     lv_obj_set_width(s_lbl_signaling, 430);
     lv_obj_align(s_lbl_signaling, LV_ALIGN_LEFT_MID, 0, 30);
@@ -1614,12 +1636,13 @@ void buildApps()
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
     // ESP-NOW lives under Config (it's a settings entry, not an app).
-    button(scr, 24, 84, 118, 120, "Music", Action::Music);
-    button(scr, 150, 84, 118, 120, "Radio", Action::Radio);
-    button(scr, 276, 84, 118, 120, "Video", Action::Video);
-    button(scr, 402, 84, 118, 120, "AI", Action::Ai);
-    button(scr, 528, 84, 118, 120, "Tetris", Action::Game);
-    button(scr, 654, 84, 120, 120, "APRS", Action::Aprs);
+    button(scr, 24, 84, 102, 120, "Music", Action::Music);
+    button(scr, 132, 84, 102, 120, "Radio", Action::Radio);
+    button(scr, 240, 84, 102, 120, "Video", Action::Video);
+    button(scr, 348, 84, 102, 120, "AI", Action::Ai);
+    button(scr, 456, 84, 102, 120, "Tetris", Action::Game);
+    button(scr, 564, 84, 102, 120, "APRS", Action::Aprs);
+    button(scr, 672, 84, 102, 120, "CW", Action::Cw);
 
     // Shared playback target: one setting for everything the music player
     // outputs (music / nanny beacon / net radio), so it lives here next to
@@ -1648,6 +1671,87 @@ void buildApps()
     lv_label_set_text(s_lbl_form_status, tr("Applies from the next track."));
 
     button(scr, 24, 372, 230, 76, "Back", Action::Home);
+}
+
+void setLabelTextIfChanged(lv_obj_t *label_obj, const char *text)
+{
+    if (label_obj == nullptr || text == nullptr) return;
+    const char *shown = lv_label_get_text(label_obj);
+    if (shown == nullptr || strcmp(shown, text) != 0) {
+        lv_label_set_text(label_obj, text);
+    }
+}
+
+void refreshCwPage()
+{
+    CwSnapshot cw{};
+    CW_SERVICE_GetSnapshot(&cw);
+    if (cw.revision == s_cw_revision || s_lbl_cw_rx == nullptr) return;
+    s_cw_revision = cw.revision;
+    char text[160];
+    snprintf(text, sizeof(text), "%s", cw.rx_letters[0] != '\0' ? cw.rx_letters : "-");
+    setLabelTextIfChanged(s_lbl_cw_rx, text);
+    setLabelTextIfChanged(s_lbl_cw_rx_code, cw.rx_code[0] != '\0' ? cw.rx_code : "-");
+    snprintf(text, sizeof(text), "%s%s%s%s", cw.tx_letters,
+             cw.current_pattern[0] != '\0' ? "  [" : "",
+             cw.current_pattern, cw.current_pattern[0] != '\0' ? "]" : "");
+    setLabelTextIfChanged(s_lbl_cw_tx, text[0] != '\0' ? text : "-");
+    snprintf(text, sizeof(text), "%s%s", cw.tx_code, cw.current_pattern);
+    setLabelTextIfChanged(s_lbl_cw_tx_code, text[0] != '\0' ? text : "-");
+    if (cw.practice_enabled) {
+        snprintf(text, sizeof(text), "TRAIN: key %c   %u WPM   accuracy %u%% (%u)%s",
+                 cw.practice_target, static_cast<unsigned>(cw.wpm),
+                 static_cast<unsigned>(cw.accuracy_percent),
+                 static_cast<unsigned>(cw.practice_attempts), cw.sending ? "   SENDING" : "");
+    } else {
+        snprintf(text, sizeof(text), "%u WPM   accuracy %u%%%s",
+                 static_cast<unsigned>(cw.wpm), static_cast<unsigned>(cw.accuracy_percent),
+                 cw.sending ? "   SENDING" : "");
+    }
+    setLabelTextIfChanged(s_lbl_cw_metrics, text);
+}
+
+void buildCw()
+{
+    clearScreen();
+    s_page = Page::Cw;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+
+    lv_obj_t *rx_box = panel(scr, 24, 78, 752, 112);
+    fieldLabel(rx_box, 0, 0, "RECEIVE / 接收");
+    s_lbl_cw_rx = label(rx_box, &lv_font_montserrat_28, kColorText);
+    lv_obj_set_pos(s_lbl_cw_rx, 0, 24);
+    lv_obj_set_width(s_lbl_cw_rx, 720);
+    lv_label_set_long_mode(s_lbl_cw_rx, LV_LABEL_LONG_CLIP);
+    s_lbl_cw_rx_code = label(rx_box, &lv_font_montserrat_20, kColorAccent);
+    lv_obj_set_pos(s_lbl_cw_rx_code, 0, 62);
+    lv_obj_set_width(s_lbl_cw_rx_code, 720);
+    lv_label_set_long_mode(s_lbl_cw_rx_code, LV_LABEL_LONG_CLIP);
+
+    lv_obj_t *tx_box = panel(scr, 24, 202, 752, 150);
+    fieldLabel(tx_box, 0, 0, "TRANSMIT / 发射");
+    s_lbl_cw_tx = label(tx_box, &lv_font_montserrat_28, kColorText);
+    lv_obj_set_pos(s_lbl_cw_tx, 0, 24);
+    lv_obj_set_width(s_lbl_cw_tx, 720);
+    lv_label_set_long_mode(s_lbl_cw_tx, LV_LABEL_LONG_CLIP);
+    s_lbl_cw_tx_code = label(tx_box, &lv_font_montserrat_20, kColorAccent);
+    lv_obj_set_pos(s_lbl_cw_tx_code, 0, 62);
+    lv_obj_set_width(s_lbl_cw_tx_code, 720);
+    lv_label_set_long_mode(s_lbl_cw_tx_code, LV_LABEL_LONG_CLIP);
+    s_lbl_cw_metrics = label(tx_box, &lv_font_montserrat_16, kColorGood);
+    lv_obj_set_pos(s_lbl_cw_metrics, 0, 100);
+    lv_obj_set_width(s_lbl_cw_metrics, 720);
+
+    button(scr, 14, 372, 105, 76, "Back", Action::Apps);
+    button(scr, 127, 372, 130, 76, ". DIT", Action::CwDit);
+    button(scr, 265, 372, 130, 76, "- DAH", Action::CwDah);
+    button(scr, 403, 372, 105, 76, "Delete", Action::CwDelete);
+    button(scr, 516, 372, 130, 76, "Send", Action::CwSend);
+    CwSnapshot cw{};
+    CW_SERVICE_GetSnapshot(&cw);
+    button(scr, 654, 372, 132, 76, cw.practice_enabled ? "Train ON" : "Train", Action::CwPractice);
+    refreshCwPage();
 }
 
 void buildConfig()
@@ -4200,6 +4304,18 @@ void action(lv_event_t *event)
         case Action::Game: buildGame(); break;
         case Action::Ai: buildAi(); break;
         case Action::Aprs: buildAprs(); break;
+        case Action::Cw: buildCw(); break;
+        case Action::CwDit: CW_SERVICE_InputElement(CW_ELEMENT_DIT); break;
+        case Action::CwDah: CW_SERVICE_InputElement(CW_ELEMENT_DAH); break;
+        case Action::CwDelete: CW_SERVICE_Delete(); break;
+        case Action::CwSend: (void)CW_SERVICE_Send(); break;
+        case Action::CwPractice: {
+            CwSnapshot cw{};
+            CW_SERVICE_GetSnapshot(&cw);
+            CW_SERVICE_SetPractice(!cw.practice_enabled);
+            buildCw();
+            break;
+        }
         case Action::About: buildAbout(); break;
         case Action::SaveOtaUrl: (void)saveOtaUrl(true); break;
         case Action::CheckOta: checkOtaFromPage(); break;
@@ -5063,6 +5179,9 @@ void refresh()
     if (s_page == Page::Aprs) {
         refreshAprsPage();
     }
+    if (s_page == Page::Cw) {
+        refreshCwPage();
+    }
 }
 
 // Rebuild the active page so a font-engine switch takes effect on every
@@ -5091,6 +5210,7 @@ void rebuildCurrentPage()
         case Page::Ai: buildAi(); break;
         case Page::About: buildAbout(); break;
         case Page::Aprs: buildAprs(); break;
+        case Page::Cw: buildCw(); break;
     }
     s_last_refresh_ms = 0;
 }

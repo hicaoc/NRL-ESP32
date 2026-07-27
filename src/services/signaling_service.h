@@ -16,6 +16,8 @@ struct SignalingConfig {
     bool ctcss_rx_nrl;
     bool mdc_rx_mic;
     bool mdc_rx_nrl;
+    bool cw_rx_mic;
+    bool cw_rx_nrl;
     bool mdc_tx_nrl;
     bool mdc_tx_speaker;
     bool dtmf_rx_mic;
@@ -31,6 +33,7 @@ struct SignalingConfig {
 void SIGNALING_Init(void);
 void SIGNALING_GetConfig(SignalingConfig *out);
 bool SIGNALING_SetMdcRoute(SignalingRoute route, bool enabled);
+bool SIGNALING_SetCwRoute(SignalingRoute route, bool enabled);
 bool SIGNALING_SetDtmfRoute(SignalingRoute route, bool enabled);
 bool SIGNALING_SetCtcssRoute(SignalingRoute route, bool enabled);
 bool SIGNALING_SetMdcPacket(uint8_t opcode, uint8_t argument, uint16_t unit_id);
