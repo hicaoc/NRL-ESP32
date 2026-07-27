@@ -2762,6 +2762,7 @@ static esp_err_t handleUpdate(httpd_req_t *req)
     char buf[1536];
     size_t total = 0u;
     bool ok = true;
+    unsigned consecutive_timeouts = 0u;
     while (ok) {
         const int got = httpd_req_recv(req, buf, sizeof(buf));
         if (got > 0) {
@@ -2773,10 +2774,19 @@ static esp_err_t handleUpdate(httpd_req_t *req)
                 break;
             }
             total += static_cast<size_t>(got);
+            consecutive_timeouts = 0u;
             continue;
         }
         if (got == HTTPD_SOCK_ERR_TIMEOUT) {
-            // Slow client / flash stall -- one more retry.
+            // Slow client / flash stall -- retry a few times, then abort so a
+            // stalled client cannot hold the OTA handle and an httpd socket
+            // forever (recv_wait_timeout is 30s per attempt).
+            if (++consecutive_timeouts >= 5u) {
+                ESP_LOGE(TAG, "OTA upload stalled after %u bytes, aborting",
+                         static_cast<unsigned>(total));
+                ok = false;
+                break;
+            }
             continue;
         }
         if (got == 0) {

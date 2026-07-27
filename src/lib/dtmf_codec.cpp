@@ -8,15 +8,21 @@ constexpr double kPi = 3.14159265358979323846;
 
 double goertzelPower(const int16_t *samples, size_t count, double frequency)
 {
-    const double coefficient = 2.0 * cos(2.0 * kPi * frequency / static_cast<double>(kSampleRate));
-    double q1 = 0.0;
-    double q2 = 0.0;
+    // The ESP32-S3/S31 FPU is single-precision only; double arithmetic in the
+    // per-sample loop is emulated in software. Iterate in float (standard
+    // practice for a 320-point Goertzel window) and only promote to double
+    // for the final power term.
+    const float coefficient =
+        static_cast<float>(2.0 * cos(2.0 * kPi * frequency / static_cast<double>(kSampleRate)));
+    float q1 = 0.0f;
+    float q2 = 0.0f;
     for (size_t i = 0; i < count; ++i) {
-        const double q0 = static_cast<double>(samples[i]) + coefficient * q1 - q2;
+        const float q0 = static_cast<float>(samples[i]) + coefficient * q1 - q2;
         q2 = q1;
         q1 = q0;
     }
-    return q1 * q1 + q2 * q2 - coefficient * q1 * q2;
+    return static_cast<double>(q1) * q1 + static_cast<double>(q2) * q2 -
+           static_cast<double>(coefficient) * q1 * q2;
 }
 } // namespace
 

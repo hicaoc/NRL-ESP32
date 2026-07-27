@@ -273,3 +273,11 @@ CONFIG_ETH_DMA_BUFFER_SIZE=512
 CONFIG_ETH_DMA_RX_BUFFER_NUM=10
 CONFIG_ETH_DMA_TX_BUFFER_NUM=6
 CONFIG_LWIP_MAX_SOCKETS=16
+
+# --- lwIP TCP window: SMB lossless-audio streaming headroom ---
+# The IDF default is 5760 (4x MSS), so one 16KB SMB read reply needs 3+
+# window cycles and smb_stream tops out around 1-2 MB/s -- 24/96 FLAC
+# (~4.5 Mbps) has almost no jitter margin. 16KB covers a full
+# kWireReadBytes reply per cycle; gezipai already runs 32768.
+CONFIG_LWIP_TCP_WND_DEFAULT=16384
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
