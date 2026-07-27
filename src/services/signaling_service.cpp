@@ -4,7 +4,6 @@
 #include "lib/ctcss_decoder.h"
 #include "lib/dtmf_codec.h"
 #include "lib/nrl_psram.h"
-#include "services/display_notice.h"
 
 extern "C" {
 #include "mdc_decode.h"
@@ -70,6 +69,7 @@ NRL_PSRAM_BSS int16_t s_dtmf_pcm_storage[kDtmfCacheSamples];
 PcmCache s_mdc_cache = {s_mdc_pcm_storage, 0u};
 PcmCache s_dtmf_cache = {s_dtmf_pcm_storage, 0u};
 char s_last_result[96] = {};
+uint32_t s_last_result_ms = 0u;
 uint32_t s_revision = 0u;
 uint32_t s_last_mdc_ms[2] = {};
 uint32_t s_last_mdc_signature[2] = {};
@@ -165,11 +165,9 @@ void publishResult(const char *text)
 {
     portENTER_CRITICAL(&s_lock);
     snprintf(s_last_result, sizeof(s_last_result), "%s", text);
+    s_last_result_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
     ++s_revision;
     portEXIT_CRITICAL(&s_lock);
-    // Keep the latest decode visible long enough to read; a newer result still
-    // replaces it immediately through the shared notice snapshot.
-    DISPLAY_NOTICE_Post(text, DISPLAY_NOTICE_INFO, kDecodeNoticeDurationMs);
     ESP_LOGI(TAG, "%s", text);
 }
 
@@ -670,7 +668,11 @@ uint32_t SIGNALING_GetRevision(void)
 void SIGNALING_GetLastResult(char *out, size_t out_size)
 {
     if (out == nullptr || out_size == 0u) return;
+    uint32_t posted_ms = 0u;
     portENTER_CRITICAL(&s_lock);
+    posted_ms = s_last_result_ms;
     snprintf(out, out_size, "%s", s_last_result);
     portEXIT_CRITICAL(&s_lock);
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+    if (out[0] != '\0' && now - posted_ms >= kDecodeNoticeDurationMs) out[0] = '\0';
 }
