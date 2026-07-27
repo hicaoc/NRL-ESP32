@@ -7,6 +7,7 @@
 #include "nrl_ethernet.h"
 #include "nrl_g711.h"
 #include "nrl_net_compat.h"
+#include "nrl_text_message.h"
 #include "nrl_usb_console.h"
 #include "nrl_wifi.h"
 #include "wifi_config_portal.h"
@@ -21,6 +22,7 @@
 #include "driver/sci_serial.h"
 #include "driver/status_io.h"
 #include "services/espnow_link.h"
+#include "services/display_notice.h"
 #include "services/signaling_service.h"
 
 #include <esp_log.h>
@@ -50,6 +52,7 @@ namespace {
 
 constexpr uint8_t kNrlHeaderSize = 48u;
 constexpr uint8_t kNrlTypeVoice = 1u;
+constexpr uint8_t kNrlTypeTextMessage = 5u;
 constexpr uint8_t kNrlTypeOpusVoice = 8u;  // wideband voice: one 16k/20ms Opus frame per packet
 constexpr uint8_t kNrlTypeVideo = 13u;     // video-call JPEG fragments (services/video_call)
 constexpr uint8_t kNrlTypeHeartbeat = 2u;
@@ -69,6 +72,7 @@ constexpr size_t kG711RxPayloadMaxBytes = 500u;
 constexpr size_t kSciPayloadMaxBytes = 256u;
 constexpr size_t kNrlMaxPayloadSize = 1024u;
 constexpr size_t kNrlMaxPacketSize = kNrlHeaderSize + kNrlMaxPayloadSize;
+constexpr uint32_t kTextMessageNoticeDurationMs = 15000u;
 constexpr int kDownlinkPcmGain = 1;
 constexpr uint32_t kSciPollIntervalMs = 20u;
 constexpr uint32_t kSciFlushIntervalMs = 20u;
@@ -113,6 +117,7 @@ uint8_t s_rx_packet_buffer[kNrlMaxPacketSize];
 uint8_t s_at_reply_packet[kNrlMaxPacketSize];
 uint8_t s_sci_tx_packet[kNrlHeaderSize + kSciPayloadMaxBytes];
 uint8_t s_sci_payload_buffer[kSciPayloadMaxBytes];
+char s_text_message_log[kNrlMaxPayloadSize + 1u];
 int16_t s_downlink_pcm_buffer[kG711RxPayloadMaxBytes];
 size_t s_sci_payload_count = 0u;
 uint32_t s_last_sci_rx_ms = 0u;
@@ -885,6 +890,36 @@ static void logReceivedPacket(const uint8_t packet_type,
              static_cast<unsigned>(payload_size));
 }
 
+static void handleIncomingTextMessagePayload(const uint8_t *payload, const size_t payload_size)
+{
+    const NrlTextMessageView message = NRL_TEXT_MESSAGE_Parse(payload, payload_size);
+    const char *media = message.kind == NRL_TEXT_MESSAGE_UNKNOWN && message.tag[0] != '\0'
+                            ? message.tag
+                            : NRL_TEXT_MESSAGE_KindLabel(message.kind);
+    NRL_TEXT_MESSAGE_CopySanitized(message.content, message.content_size,
+                                   s_text_message_log, sizeof(s_text_message_log));
+    if (s_text_message_log[0] == '\0') {
+        snprintf(s_text_message_log, sizeof(s_text_message_log), "(empty)");
+    }
+
+    const char *callsign = s_remote_callsign[0] != '\0' ? s_remote_callsign : "UNKNOWN";
+    ESP_LOGI(TAG, "[NRL][TYPE5] from=%s-%u media=%s bytes=%u data=%s",
+             callsign, static_cast<unsigned>(s_remote_ssid), media,
+             static_cast<unsigned>(payload_size), s_text_message_log);
+
+    char notice[sizeof(DisplayNoticeSnapshot::text)] = {};
+    const int prefix_result = snprintf(notice, sizeof(notice), "NRL %.6s-%u %.8s: ",
+                                       callsign, static_cast<unsigned>(s_remote_ssid), media);
+    size_t prefix_size = prefix_result > 0 ? static_cast<size_t>(prefix_result) : 0u;
+    if (prefix_size >= sizeof(notice)) prefix_size = sizeof(notice) - 1u;
+    NRL_TEXT_MESSAGE_CopySanitized(message.content, message.content_size,
+                                   notice + prefix_size, sizeof(notice) - prefix_size);
+    if (notice[prefix_size] == '\0') {
+        snprintf(notice + prefix_size, sizeof(notice) - prefix_size, "(empty)");
+    }
+    DISPLAY_NOTICE_Post(notice, DISPLAY_NOTICE_INFO, kTextMessageNoticeDurationMs);
+}
+
 static void stopDownlinkPlayback(void)
 {
     if (!s_downlink_playback_active) {
@@ -1243,6 +1278,8 @@ static void bridgeTask(void *)
                                   s_last_peer_port);
                 if (packet_type == kNrlTypeVoice || packet_type == kNrlTypeServerVoice) {
                     handleIncomingVoicePayload(payload, payload_size);
+                } else if (packet_type == kNrlTypeTextMessage) {
+                    handleIncomingTextMessagePayload(payload, payload_size);
                 } else if (packet_type == kNrlTypeOpusVoice) {
                     handleIncomingOpusPayload(payload, payload_size);
                 } else if (packet_type == kNrlTypeVideo) {

@@ -195,8 +195,8 @@ def main():
     # and upload token publish every successful firmware build. This keeps normal
     # local builds offline while making the release pipeline one command. The
     # whole flash package (bootloader + partition table + app + …) is uploaded;
-    # the server serves the USB web-flasher from it AND registers the app slice as
-    # the OTA release, so both come from one source.
+    # the external OTA server registers the app slice as the OTA release and uses
+    # the same package for its browser-based USB flashing service.
     if (result.returncode == 0 and "build" in passthrough and
             os.environ.get("OTA_SERVER_URL") and os.environ.get("OTA_UPLOAD_TOKEN")):
         publish = [sys.executable, str(REPO / "scripts" / "publish_ota.py"), board]

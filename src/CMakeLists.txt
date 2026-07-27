@@ -55,6 +55,7 @@ set(app_sources
     lib/nrl_ethernet.cpp
     lib/nrl_at_commands.cpp
     lib/nrl_audio_bridge.cpp
+    lib/nrl_text_message.cpp
     lib/nrl_captive_dns.cpp
     lib/nrl_g711.cpp
     lib/nrl_smb_readv.cpp
