@@ -546,7 +546,8 @@ static void uplinkSinkWrite(const uint8_t source_id,
                             void *)
 {
     const bool signaling_tail = source_id == AUDIO_SRC_MDC_NRL ||
-                                source_id == AUDIO_SRC_DTMF_NRL;
+                                source_id == AUDIO_SRC_DTMF_NRL ||
+                                source_id == AUDIO_SRC_CW_NRL;
     // A media stream (nanny/beacon) owns the uplink exclusively while
     // active: captured audio would garble the G.711 accumulator.
     if (s_media_uplink_active) {

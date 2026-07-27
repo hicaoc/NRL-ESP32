@@ -35,6 +35,8 @@ void Display_MenuOpen(void);
 bool Display_MenuIsActive(void);
 void Display_MenuNavigate(int direction);
 void Display_MenuConfirm(void);
+bool Display_CwIsActive(void);
+void Display_CwExit(void);
 
 // Battery sense (Geizipai/BI4UMD; returns 0 on boards without a battery ADC).
 // Both readings are in millivolts. The raw reading is the uncalibrated ADC

@@ -2,8 +2,11 @@
 
 #include "audio/audio_router.h"
 #include "lib/ctcss_decoder.h"
+#include "lib/cw_codec.h"
 #include "lib/dtmf_codec.h"
 #include "lib/nrl_psram.h"
+#include "services/display_notice.h"
+#include "services/cw_service.h"
 
 extern "C" {
 #include "mdc_decode.h"
@@ -44,9 +47,11 @@ enum class TailDestination : uint8_t { Nrl, Speaker };
 struct DecoderContext {
     DecodeSource source;
     mdc_decoder_t *mdc;
+    CwAudioDecoder cw;
     DtmfDecoder dtmf;
     CtcssDecoder ctcss;
     char dtmf_result[17];
+    char cw_result[49];
     uint32_t last_dtmf_ms;
 };
 
@@ -57,8 +62,8 @@ struct PcmCache {
 
 portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 SignalingConfig s_config = {};
-DecoderContext s_mic = {DecodeSource::Mic, nullptr, {}, {}, {}, 0u};
-DecoderContext s_nrl = {DecodeSource::Nrl, nullptr, {}, {}, {}, 0u};
+DecoderContext s_mic = {DecodeSource::Mic, nullptr, {}, {}, {}, {}, {}, 0u};
+DecoderContext s_nrl = {DecodeSource::Nrl, nullptr, {}, {}, {}, {}, {}, 0u};
 mdc_encoder_t *s_encoder = nullptr;
 QueueHandle_t s_tail_queue = nullptr;
 TaskHandle_t s_task = nullptr;
@@ -100,6 +105,8 @@ bool saveConfig()
     put8("ctcss_rx_nrl", cfg.ctcss_rx_nrl);
     put8("mdc_rx_mic", cfg.mdc_rx_mic);
     put8("mdc_rx_nrl", cfg.mdc_rx_nrl);
+    put8("cw_rx_mic", cfg.cw_rx_mic);
+    put8("cw_rx_nrl", cfg.cw_rx_nrl);
     put8("mdc_tx_nrl", cfg.mdc_tx_nrl);
     put8("mdc_tx_spk", cfg.mdc_tx_speaker);
     put8("dtmf_rx_mic", cfg.dtmf_rx_mic);
@@ -132,6 +139,8 @@ void loadConfig()
     getBool("ctcss_rx_nrl", &s_config.ctcss_rx_nrl);
     getBool("mdc_rx_mic", &s_config.mdc_rx_mic);
     getBool("mdc_rx_nrl", &s_config.mdc_rx_nrl);
+    getBool("cw_rx_mic", &s_config.cw_rx_mic);
+    getBool("cw_rx_nrl", &s_config.cw_rx_nrl);
     getBool("mdc_tx_nrl", &s_config.mdc_tx_nrl);
     getBool("mdc_tx_spk", &s_config.mdc_tx_speaker);
     getBool("dtmf_rx_mic", &s_config.dtmf_rx_mic);
@@ -152,9 +161,10 @@ void applyRoutes()
     SignalingConfig cfg{};
     copyConfig(&cfg);
     s_ctcss_mic_enabled = cfg.ctcss_rx_mic;
-    AudioRouter_SetRoute(AUDIO_SRC_MIC, AUDIO_SINK_SIGNALING, cfg.mdc_rx_mic || cfg.dtmf_rx_mic);
+    AudioRouter_SetRoute(AUDIO_SRC_MIC, AUDIO_SINK_SIGNALING,
+                         cfg.mdc_rx_mic || cfg.dtmf_rx_mic || cfg.cw_rx_mic);
     AudioRouter_SetRoute(AUDIO_SRC_NRL_DOWNLINK, AUDIO_SINK_SIGNALING,
-                         cfg.mdc_rx_nrl || cfg.dtmf_rx_nrl || cfg.ctcss_rx_nrl);
+                         cfg.mdc_rx_nrl || cfg.dtmf_rx_nrl || cfg.ctcss_rx_nrl || cfg.cw_rx_nrl);
     AudioRouter_SetRoute(AUDIO_SRC_MDC_NRL, AUDIO_SINK_NRL_UPLINK, cfg.mdc_tx_nrl);
     AudioRouter_SetRoute(AUDIO_SRC_MDC_SPEAKER, AUDIO_SINK_SPEAKER, cfg.mdc_tx_speaker);
     AudioRouter_SetRoute(AUDIO_SRC_DTMF_NRL, AUDIO_SINK_NRL_UPLINK, cfg.dtmf_tx_nrl);
@@ -207,6 +217,25 @@ void dtmfDecoded(char digit, void *context)
     publishResult(text);
 }
 
+void cwDecoded(const char character, const char *pattern, const uint16_t wpm, void *context)
+{
+    auto *decoder = static_cast<DecoderContext *>(context);
+    size_t length = strlen(decoder->cw_result);
+    if (length >= sizeof(decoder->cw_result) - 1u) {
+        memmove(decoder->cw_result, decoder->cw_result + 1u, length - 1u);
+        length = sizeof(decoder->cw_result) - 2u;
+    }
+    decoder->cw_result[length] = character;
+    decoder->cw_result[length + 1u] = '\0';
+    CW_SERVICE_RecordReceived(decoder->source == DecodeSource::Mic ? CW_SOURCE_MIC : CW_SOURCE_NRL,
+                              character, pattern, wpm);
+    char text[96];
+    snprintf(text, sizeof(text), "CW %s: %s  %s %uWPM", sourceName(decoder->source),
+             decoder->cw_result, pattern != nullptr ? pattern : "?",
+             static_cast<unsigned>(wpm));
+    publishResult(text);
+}
+
 void ctcssDecoded(const float frequency_hz, void *context)
 {
     auto *decoder = static_cast<DecoderContext *>(context);
@@ -223,11 +252,13 @@ void signalingSink(uint8_t source_id, const int16_t *samples, size_t count, void
     copyConfig(&cfg);
     const bool mdc_enabled = decoder->source == DecodeSource::Mic ? cfg.mdc_rx_mic : cfg.mdc_rx_nrl;
     const bool dtmf_enabled = decoder->source == DecodeSource::Mic ? cfg.dtmf_rx_mic : cfg.dtmf_rx_nrl;
+    const bool cw_enabled = decoder->source == DecodeSource::Mic ? cfg.cw_rx_mic : cfg.cw_rx_nrl;
     const bool ctcss_enabled = decoder->source == DecodeSource::Mic ? false : cfg.ctcss_rx_nrl;
     if (mdc_enabled && decoder->mdc != nullptr) {
         mdc_decoder_process_samples(decoder->mdc, const_cast<mdc_sample_t *>(samples), static_cast<int>(count));
     }
     if (dtmf_enabled) decoder->dtmf.feed(samples, count, dtmfDecoded, decoder);
+    if (cw_enabled) decoder->cw.feed(samples, count, cwDecoded, decoder);
     if (ctcss_enabled) decoder->ctcss.feed(samples, count, ctcssDecoded, decoder);
 }
 
@@ -544,11 +575,23 @@ bool setCtcssRouteValue(const SignalingRoute route, const bool enabled)
     return saveConfig();
 }
 
+bool setCwRouteValue(const SignalingRoute route, const bool enabled)
+{
+    if (route != SIGNAL_ROUTE_RX_MIC && route != SIGNAL_ROUTE_RX_NRL) return false;
+    portENTER_CRITICAL(&s_lock);
+    if (route == SIGNAL_ROUTE_RX_MIC) s_config.cw_rx_mic = enabled;
+    else s_config.cw_rx_nrl = enabled;
+    portEXIT_CRITICAL(&s_lock);
+    applyRoutes();
+    return saveConfig();
+}
+
 } // namespace
 
 void SIGNALING_Init(void)
 {
     loadConfig();
+    CW_SERVICE_Init();
     bool config_changed = false;
     if (s_config.mdc_rx_mic && !ensureMdcDecoder(&s_mic)) {
         ESP_LOGE(TAG, "failed to allocate MDC MIC decoder, disabling route");
@@ -590,15 +633,17 @@ void SIGNALING_Init(void)
     // Do not write NVS on this low-memory boot path. The runtime routes are
     // safely disabled; a later explicit setting change persists normally.
     if (config_changed) ESP_LOGW(TAG, "one or more signaling routes disabled for this boot");
-    ESP_LOGI(TAG, "ready mdc_rx=%d/%d mdc_tx=%d/%d dtmf=%d/%d ctcss=%d/%d",
+    ESP_LOGI(TAG, "ready mdc_rx=%d/%d mdc_tx=%d/%d dtmf=%d/%d ctcss=%d/%d cw=%d/%d",
              s_config.mdc_rx_mic, s_config.mdc_rx_nrl,
              s_config.mdc_tx_nrl, s_config.mdc_tx_speaker,
              s_config.dtmf_rx_mic, s_config.dtmf_rx_nrl,
-             s_config.ctcss_rx_mic, s_config.ctcss_rx_nrl);
+             s_config.ctcss_rx_mic, s_config.ctcss_rx_nrl,
+             s_config.cw_rx_mic, s_config.cw_rx_nrl);
 }
 
 void SIGNALING_GetConfig(SignalingConfig *out) { if (out != nullptr) copyConfig(out); }
 bool SIGNALING_SetMdcRoute(SignalingRoute route, bool enabled) { return setRouteValue(true, route, enabled); }
+bool SIGNALING_SetCwRoute(SignalingRoute route, bool enabled) { return setCwRouteValue(route, enabled); }
 bool SIGNALING_SetDtmfRoute(SignalingRoute route, bool enabled) { return setRouteValue(false, route, enabled); }
 bool SIGNALING_SetCtcssRoute(SignalingRoute route, bool enabled) { return setCtcssRouteValue(route, enabled); }
 

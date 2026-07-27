@@ -732,6 +732,8 @@ std::string WifiConfigPortalView_BuildSignalingSections(void)
     replaceToken(html, "{{MDC_RX_NRL_CHECKED}}", checkedAttr(cfg.mdc_rx_nrl));
     replaceToken(html, "{{MDC_TX_NRL_CHECKED}}", checkedAttr(cfg.mdc_tx_nrl));
     replaceToken(html, "{{MDC_TX_SPEAKER_CHECKED}}", checkedAttr(cfg.mdc_tx_speaker));
+    replaceToken(html, "{{CW_RX_MIC_CHECKED}}", checkedAttr(cfg.cw_rx_mic));
+    replaceToken(html, "{{CW_RX_NRL_CHECKED}}", checkedAttr(cfg.cw_rx_nrl));
     replaceToken(html, "{{DTMF_RX_MIC_CHECKED}}", checkedAttr(cfg.dtmf_rx_mic));
     replaceToken(html, "{{DTMF_RX_NRL_CHECKED}}", checkedAttr(cfg.dtmf_rx_nrl));
     replaceToken(html, "{{DTMF_TX_NRL_CHECKED}}", checkedAttr(cfg.dtmf_tx_nrl));

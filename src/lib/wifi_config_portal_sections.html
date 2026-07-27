@@ -303,6 +303,13 @@
   </div>
 </section>
 <section class="panel">
+  <div class="section-head"><h2 data-i18n="cwRoutes">CW / Morse Decode</h2></div>
+  <div class="grid">
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="decodeMic">Decode from MIC</label><input type="hidden" name="cw_rx_mic_present" value="1"><label class="hint"><input type="checkbox" name="cw_rx_mic" value="1" onchange="submitSwitch(this)" {{CW_RX_MIC_CHECKED}}><span data-i18n="cwDecodeMicText">Decode Morse audio received from microphone/radio</span></label></form>
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="decodeNrl">Decode from NRL</label><input type="hidden" name="cw_rx_nrl_present" value="1"><label class="hint"><input type="checkbox" name="cw_rx_nrl" value="1" onchange="submitSwitch(this)" {{CW_RX_NRL_CHECKED}}><span data-i18n="cwDecodeNrlText">Decode Morse audio in NRL downlink voice</span></label></form>
+  </div>
+</section>
+<section class="panel">
   <div class="section-head"><h2 data-i18n="mdcRoutes">MDC1200 Routes</h2><span class="hint mono">{{SIGNALING_STATUS}}</span></div>
   <div class="grid">
     <form class="item-form" method="post" action="/save_signaling"><label data-i18n="decodeMic">Decode from MIC</label><input type="hidden" name="mdc_rx_mic_present" value="1"><label class="hint"><input type="checkbox" name="mdc_rx_mic" value="1" onchange="submitSwitch(this)" {{MDC_RX_MIC_CHECKED}}><span data-i18n="mdcDecodeMicText">Decode MDC1200 received from microphone/radio</span></label></form>

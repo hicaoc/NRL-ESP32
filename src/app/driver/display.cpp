@@ -46,6 +46,7 @@
 #include "../../services/aprs_service.h"
 #include "../../services/espnow_link.h"
 #include "../../services/display_notice.h"
+#include "../../services/cw_service.h"
 #include "../../services/music_player.h"
 #include "../../services/music_playlist.h"
 #include "../../services/ota_service.h"
@@ -222,6 +223,7 @@ enum class MenuPage : uint8_t {
     Ctcss,
     Mdc,
     Dtmf,
+    Cw,
 };
 
 // Written by STATUS_IO_Poll() and consumed only by Display_Poll(). Keeping
@@ -230,6 +232,7 @@ volatile bool s_menu_active = false;
 volatile bool s_menu_open_requested = false;
 volatile int s_menu_nav_pending = 0;
 volatile unsigned s_menu_confirm_pending = 0u;
+volatile bool s_cw_exit_requested = false;
 MenuPage s_menu_page = MenuPage::Main;
 bool s_menu_chinese = true;
 size_t s_menu_index = 0u;
@@ -714,6 +717,7 @@ void addBi4umdMenuButtons()
 {
 #if NRL_BOARD == NRL_BOARD_BI4UMD
     if (s_content == nullptr) return;
+    if (s_menu_page == MenuPage::Cw) return;
     auto menu_button = [](int x, const char *text, lv_event_cb_t callback) {
         lv_obj_t *button = lv_button_create(s_content);
         lv_obj_set_pos(button, x,
@@ -1372,6 +1376,7 @@ void buildMainMenu()
         ptt,
         nrl_codec,
         now_codec,
+        "CW MORSE",
         menuText("SIGNALING", "信令设置"),
         menuText("CHECK UPDATE", "检查更新"),
         "APRS",
@@ -1673,7 +1678,10 @@ void buildAprsListMenu()
         if (s.age_s < 60u) snprintf(age, sizeof(age), "%lus", static_cast<unsigned long>(s.age_s));
         else snprintf(age, sizeof(age), "%lum", static_cast<unsigned long>(s.age_s / 60u));
         char line[64];
-        snprintf(line, sizeof(line), "%s %s %s %s",
+        // Keep explicit precision bounds here: GCC 16's interprocedural
+        // format analysis cannot prove that every APRS field is terminated,
+        // even though the service sanitizes them before returning the array.
+        snprintf(line, sizeof(line), "%.9s %.15s %.2s %.11s",
                  s.name, dist, s.via_rf ? "RF" : "IS", age);
         menuRow(scr, 25 + static_cast<int>(i) * 22, line, false);
     }
@@ -1836,6 +1844,102 @@ void buildProtocolMenu(bool mdc)
     menuStatusFooter(scr, footer);
 }
 
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+void cwDitClicked(lv_event_t *) { CW_SERVICE_InputElement(CW_ELEMENT_DIT); }
+void cwDahClicked(lv_event_t *) { CW_SERVICE_InputElement(CW_ELEMENT_DAH); }
+void cwDeleteClicked(lv_event_t *) { CW_SERVICE_Delete(); }
+void cwSendClicked(lv_event_t *) { (void)CW_SERVICE_Send(); }
+void cwPracticeClicked(lv_event_t *)
+{
+    CwSnapshot snapshot{};
+    CW_SERVICE_GetSnapshot(&snapshot);
+    CW_SERVICE_SetPractice(!snapshot.practice_enabled);
+}
+#endif
+
+void buildCwMenu()
+{
+    lv_obj_t *scr = prepareContent();
+    CwSnapshot cw{};
+    CW_SERVICE_GetSnapshot(&cw);
+    char line[128];
+
+    lv_obj_t *title = makeLabel(scr, &lv_font_montserrat_16, kColorAccent);
+    lv_obj_set_width(title, kWidth - 8);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(title, 4, 2);
+    snprintf(line, sizeof(line), "CW  %u WPM  ACC %u%%", static_cast<unsigned>(cw.wpm),
+             static_cast<unsigned>(cw.accuracy_percent));
+    lv_label_set_text(title, line);
+
+    lv_obj_t *rx = makeLabel(scr, &lv_font_montserrat_16, kColorCallIdle);
+    lv_obj_set_width(rx, kWidth - 12);
+    lv_obj_set_pos(rx, 6, 26);
+    lv_label_set_long_mode(rx, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    snprintf(line, sizeof(line), "RX  %s", cw.rx_letters[0] != '\0' ? cw.rx_letters : "-");
+    lv_label_set_text(rx, line);
+
+    lv_obj_t *rx_code = makeLabel(scr, &lv_font_montserrat_14, kColorSub);
+    lv_obj_set_width(rx_code, kWidth - 12);
+    lv_obj_set_pos(rx_code, 6, 47);
+    lv_label_set_long_mode(rx_code, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_label_set_text(rx_code, cw.rx_code[0] != '\0' ? cw.rx_code : ".- / -...");
+
+    lv_obj_t *tx = makeLabel(scr, &lv_font_montserrat_16, kColorCallIdle);
+    lv_obj_set_width(tx, kWidth - 12);
+    lv_obj_set_pos(tx, 6, 73);
+    lv_label_set_long_mode(tx, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    snprintf(line, sizeof(line), "TX  %s%s%s", cw.tx_letters,
+             cw.current_pattern[0] != '\0' ? " [" : "",
+             cw.current_pattern[0] != '\0' ? cw.current_pattern : "");
+    if (cw.current_pattern[0] != '\0') strncat(line, "]", sizeof(line) - strlen(line) - 1u);
+    lv_label_set_text(tx, line);
+
+    lv_obj_t *tx_code = makeLabel(scr, &lv_font_montserrat_14, kColorSub);
+    lv_obj_set_width(tx_code, kWidth - 12);
+    lv_obj_set_pos(tx_code, 6, 94);
+    lv_label_set_long_mode(tx_code, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    snprintf(line, sizeof(line), "%s%s", cw.tx_code, cw.current_pattern);
+    lv_label_set_text(tx_code, line[0] != '\0' ? line : "KEY:  . DIT   - DAH");
+
+    lv_obj_t *score = makeLabel(scr, &lv_font_montserrat_14,
+                                cw.practice_enabled ? kColorGood : kColorCaption);
+    lv_obj_set_width(score, kWidth - 8);
+    lv_obj_set_style_text_align(score, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(score, 4, 119);
+    if (cw.practice_enabled) {
+        snprintf(line, sizeof(line), "TRAIN: SEND %c  %u%%/%u%s", cw.practice_target,
+                 static_cast<unsigned>(cw.accuracy_percent),
+                 static_cast<unsigned>(cw.practice_attempts), cw.sending ? " TX..." : "");
+    } else {
+        snprintf(line, sizeof(line), "TRAIN OFF%s", cw.sending ? "  TX..." : "");
+    }
+    lv_label_set_text(score, line);
+
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    auto cw_button = [scr](int x, int y, int w, const char *text,
+                           lv_event_cb_t callback, bool on_press = false) {
+        lv_obj_t *button = lv_button_create(scr);
+        lv_obj_set_pos(button, x, y);
+        lv_obj_set_size(button, w, 42);
+        lv_obj_set_style_radius(button, 6, 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x10212A), 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+        lv_obj_add_event_cb(button, callback, on_press ? LV_EVENT_PRESSED : LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *label = makeLabel(button, &lv_font_montserrat_16, kColorCallIdle);
+        lv_label_set_text(label, text);
+        lv_obj_center(label);
+    };
+    cw_button(5, 146, 54, ". DIT", cwDitClicked, true);
+    cw_button(64, 146, 54, "- DAH", cwDahClicked, true);
+    cw_button(123, 146, 54, "DEL", cwDeleteClicked);
+    cw_button(182, 146, 54, "SEND", cwSendClicked);
+    cw_button(64, 196, 112, cw.practice_enabled ? "TRAIN ON" : "TRAIN OFF", cwPracticeClicked);
+#else
+    menuFooter(scr, "VOL+=DAH VOL-=DIT  PTT SEND/HOLD EXIT");
+#endif
+}
+
 void buildMenuUi()
 {
 #if NRL_BOARD == NRL_BOARD_BI4UMD
@@ -1852,6 +1956,7 @@ void buildMenuUi()
     else if (s_menu_page == MenuPage::Ctcss) buildCtcssMenu();
     else if (s_menu_page == MenuPage::Mdc) buildProtocolMenu(true);
     else if (s_menu_page == MenuPage::Dtmf) buildProtocolMenu(false);
+    else if (s_menu_page == MenuPage::Cw) buildCwMenu();
     else buildMainMenu();
 #if NRL_BOARD == NRL_BOARD_BI4UMD
     addBi4umdMenuButtons();
@@ -3148,7 +3253,8 @@ void refreshOtaNotice()
 
 size_t menuItemCount()
 {
-    if (s_menu_page == MenuPage::Main) return 9u;
+    if (s_menu_page == MenuPage::Main) return 10u;
+    if (s_menu_page == MenuPage::Cw) return 1u;
     if (s_menu_page == MenuPage::Language) return 3u;
     if (s_menu_page == MenuPage::About) return 1u;
     if (s_menu_page == MenuPage::Aprs) return 5u;
@@ -3210,11 +3316,16 @@ void confirmMainMenu()
             break;
         }
         case 4:
+            s_menu_page = MenuPage::Cw;
+            s_menu_index = 0u;
+            buildMenuUi();
+            break;
+        case 5:
             s_menu_page = MenuPage::Signaling;
             s_menu_index = 0u;
             buildMenuUi();
             break;
-        case 5: {
+        case 6: {
             const NrlOtaStatus *ota = otaUiSnapshot();
             s_menu_page = MenuPage::Ota;
             s_menu_index = 0u;
@@ -3227,19 +3338,19 @@ void confirmMainMenu()
             buildMenuUi();
             break;
         }
-        case 6:
+        case 7:
             s_menu_page = MenuPage::Aprs;
             s_menu_index = 0u;
             s_menu_aprs_refresh_ms = 0u;
             s_menu_aprs_revision = APRS_SERVICE_GetStationRevision();
             buildMenuUi();
             break;
-        case 7:
+        case 8:
             s_menu_page = MenuPage::Language;
             s_menu_index = 0u;
             buildMenuUi();
             break;
-        case 8:
+        case 9:
             s_menu_page = MenuPage::About;
             s_menu_index = 0u;
             buildMenuUi();
@@ -3450,6 +3561,16 @@ void confirmOtaMenu()
 
 void processMenuInput(uint32_t now)
 {
+    if (s_cw_exit_requested) {
+        s_cw_exit_requested = false;
+        s_menu_active = false;
+        s_menu_message[0] = '\0';
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+        s_bi4umd_page = Bi4umdPage::Radio;
+#endif
+        buildHomeContent();
+        return;
+    }
     if (s_menu_open_requested) {
         s_menu_open_requested = false;
 #if NRL_BOARD == NRL_BOARD_BI4UMD
@@ -3553,6 +3674,15 @@ void processMenuInput(uint32_t now)
         s_menu_aprs_refresh_ms = now;
         buildMenuUi();
     }
+    if (s_menu_page == MenuPage::Cw) {
+        static uint32_t shown_cw_revision = UINT32_MAX;
+        CwSnapshot cw{};
+        CW_SERVICE_GetSnapshot(&cw);
+        if (cw.revision != shown_cw_revision) {
+            shown_cw_revision = cw.revision;
+            buildMenuUi();
+        }
+    }
 }
 
 } // namespace
@@ -3573,6 +3703,10 @@ extern "C" bool Display_MenuIsActive(void)
 extern "C" void Display_MenuNavigate(const int direction)
 {
     if (!s_menu_active || direction == 0) return;
+    if (s_menu_page == MenuPage::Cw) {
+        CW_SERVICE_InputElement(direction > 0 ? CW_ELEMENT_DAH : CW_ELEMENT_DIT);
+        return;
+    }
     int pending = s_menu_nav_pending + (direction > 0 ? 1 : -1);
     if (pending > 8) pending = 8;
     if (pending < -8) pending = -8;
@@ -3585,6 +3719,17 @@ extern "C" void Display_MenuConfirm(void)
     if (s_menu_active && pending < 4u) {
         s_menu_confirm_pending = pending + 1u;
     }
+}
+
+extern "C" bool Display_CwIsActive(void)
+{
+    return s_menu_active && s_menu_page == MenuPage::Cw;
+}
+
+extern "C" void Display_CwExit(void)
+{
+    if (!Display_CwIsActive()) return;
+    s_cw_exit_requested = true;
 }
 
 extern "C" void Display_Init(void)
@@ -3751,6 +3896,8 @@ extern "C" void Display_MenuOpen(void) {}
 extern "C" bool Display_MenuIsActive(void) { return false; }
 extern "C" void Display_MenuNavigate(int) {}
 extern "C" void Display_MenuConfirm(void) {}
+extern "C" bool Display_CwIsActive(void) { return false; }
+extern "C" void Display_CwExit(void) {}
 extern "C" int Display_GetBatteryRawMv(void) { return 0; }
 extern "C" int Display_GetBatteryCalibratedMv(void) { return 0; }
 extern "C" bool Display_SetCjkFontEngine(int) { return false; }

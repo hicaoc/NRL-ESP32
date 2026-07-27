@@ -381,6 +381,8 @@ static bool appendSupportedAtList(uint8_t *payload,
     appendKeyValueLineIfFits(payload, capacity, used, "MDC_RX_NRL", sig.mdc_rx_nrl ? "ON" : "OFF");
     appendKeyValueLineIfFits(payload, capacity, used, "MDC_TX_NRL", sig.mdc_tx_nrl ? "ON" : "OFF");
     appendKeyValueLineIfFits(payload, capacity, used, "MDC_TX_SPK", sig.mdc_tx_speaker ? "ON" : "OFF");
+    appendKeyValueLineIfFits(payload, capacity, used, "CW_RX_MIC", sig.cw_rx_mic ? "ON" : "OFF");
+    appendKeyValueLineIfFits(payload, capacity, used, "CW_RX_NRL", sig.cw_rx_nrl ? "ON" : "OFF");
     appendKeyValueLineIfFits(payload, capacity, used, "DTMF", sig.dtmf_digits);
     appendKeyValueLineIfFits(payload, capacity, used, "DTMF_RX_MIC", sig.dtmf_rx_mic ? "ON" : "OFF");
     appendKeyValueLineIfFits(payload, capacity, used, "DTMF_RX_NRL", sig.dtmf_rx_nrl ? "ON" : "OFF");
@@ -1588,6 +1590,50 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         appendKeyValueLine(result->payload, sizeof(result->payload),
                            &result->payload_size, entry.command,
                            enabled ? "ON" : "OFF");
+        return;
+    }
+
+    // CW receive decoding mirrors MDC: MIC and NRL downlink are independently
+    // selectable. AT+CW is a convenient master for both receive sources.
+    if (stringEqualsIgnoreCase(command.command, "CW")) {
+        SignalingConfig cfg{};
+        SIGNALING_GetConfig(&cfg);
+        if (!is_query) {
+            bool enabled = false;
+            if (!parseBoolValue(command.value, &enabled) ||
+                !SIGNALING_SetCwRoute(SIGNAL_ROUTE_RX_MIC, enabled) ||
+                !SIGNALING_SetCwRoute(SIGNAL_ROUTE_RX_NRL, enabled)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload),
+                                   &result->payload_size, "ERR", "CW");
+                return;
+            }
+            cfg.cw_rx_mic = enabled;
+            cfg.cw_rx_nrl = enabled;
+        }
+        char status[48];
+        snprintf(status, sizeof(status), "RXMIC=%s,RXNRL=%s",
+                 cfg.cw_rx_mic ? "ON" : "OFF", cfg.cw_rx_nrl ? "ON" : "OFF");
+        appendKeyValueLine(result->payload, sizeof(result->payload),
+                           &result->payload_size, "CW", status);
+        return;
+    }
+    struct CwAtRoute { const char *command; SignalingRoute route; };
+    static const CwAtRoute cw_routes[] = {
+        {"CW_RX_MIC", SIGNAL_ROUTE_RX_MIC}, {"CW_RX_NRL", SIGNAL_ROUTE_RX_NRL},
+    };
+    for (const CwAtRoute &entry : cw_routes) {
+        if (!stringEqualsIgnoreCase(command.command, entry.command)) continue;
+        SignalingConfig cfg{};
+        SIGNALING_GetConfig(&cfg);
+        bool enabled = entry.route == SIGNAL_ROUTE_RX_MIC ? cfg.cw_rx_mic : cfg.cw_rx_nrl;
+        if (!is_query && (!parseBoolValue(command.value, &enabled) ||
+                          !SIGNALING_SetCwRoute(entry.route, enabled))) {
+            appendKeyValueLine(result->payload, sizeof(result->payload),
+                               &result->payload_size, "ERR", entry.command);
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload),
+                           &result->payload_size, entry.command, enabled ? "ON" : "OFF");
         return;
     }
 
