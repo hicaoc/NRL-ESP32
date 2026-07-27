@@ -226,6 +226,8 @@ lv_indev_t *s_touch_indev = nullptr;
 lv_obj_t *s_lbl_caption = nullptr;
 lv_obj_t *s_lbl_rx_codec = nullptr;
 char s_shown_rx_codec[12] = {};
+lv_obj_t *s_lbl_dmrid = nullptr;
+char s_shown_dmrid[20] = {};
 lv_obj_t *s_lbl_callsign = nullptr;
 lv_obj_t *s_lbl_signaling = nullptr;
 lv_obj_t *s_lbl_ssid = nullptr;
@@ -1246,6 +1248,7 @@ void clearScreen()
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     memset(s_shown_caption, 0, sizeof(s_shown_caption));
+    memset(s_shown_dmrid, 0, sizeof(s_shown_dmrid));
     memset(s_shown_callsign, 0, sizeof(s_shown_callsign));
     memset(s_shown_ssid, 0, sizeof(s_shown_ssid));
     memset(s_shown_time, 0, sizeof(s_shown_time));
@@ -1267,6 +1270,7 @@ void clearScreen()
     s_lbl_caption = nullptr;
     s_lbl_rx_codec = nullptr;
     s_shown_rx_codec[0] = '\0';
+    s_lbl_dmrid = nullptr;
     s_lbl_callsign = nullptr;
     s_lbl_signaling = nullptr;
     s_lbl_ssid = nullptr;
@@ -1543,6 +1547,14 @@ void buildHome()
     s_lbl_rx_codec = label(left, &lv_font_montserrat_20, kColorAccent);
     lv_obj_align(s_lbl_rx_codec, LV_ALIGN_TOP_RIGHT, 0, 0);
     lv_label_set_text(s_lbl_rx_codec, "");
+
+    // The active NRL2 voice packet's optional 24-bit DMR ID. Keep it on a
+    // dedicated row immediately above the caller so it never replaces the
+    // receive-state caption or the callsign.
+    s_lbl_dmrid = label(left, &lv_font_montserrat_20, kColorSub);
+    lv_obj_set_width(s_lbl_dmrid, 430);
+    lv_obj_align(s_lbl_dmrid, LV_ALIGN_LEFT_MID, 0, -58);
+    lv_label_set_text(s_lbl_dmrid, "");
 
     // Incoming caller's callsign-SSID at the largest crisp built-in font (48px),
     // centred in the freed space so it reads as the focal element.
@@ -4779,6 +4791,14 @@ void refreshHome()
         formatStationBadge(call, sizeof(call), has_caller ? voice_call : nullptr, voice_ssid);
     }
     setLabel(s_lbl_callsign, s_shown_callsign, sizeof(s_shown_callsign), call);
+
+    char dmrid[sizeof(s_shown_dmrid)] = {};
+    const uint32_t remote_dmr_id = NRLAudioBridge_GetRemoteDmrId();
+    if (rx && remote_dmr_id != 0u) {
+        snprintf(dmrid, sizeof(dmrid), "DMRID %lu",
+                 static_cast<unsigned long>(remote_dmr_id));
+    }
+    setLabel(s_lbl_dmrid, s_shown_dmrid, sizeof(s_shown_dmrid), dmrid);
     if (s_lbl_callsign != nullptr) {
         // Spread only the placeholder dashes so they read bigger; keep a real
         // callsign at normal spacing. Only re-apply on change (avoids a full

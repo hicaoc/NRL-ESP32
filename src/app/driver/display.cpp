@@ -3167,8 +3167,24 @@ void refreshOtaNotice()
     int progress_percent = -1;
     DisplayNoticeSnapshot notice = {};
     DISPLAY_NOTICE_Get(&notice);
+    char decoded_signaling[sizeof(s_shown_signaling)] = {};
+    SIGNALING_GetLastResult(decoded_signaling, sizeof(decoded_signaling));
     char signaling[sizeof(s_shown_signaling)] = {};
-    SIGNALING_GetLastResult(signaling, sizeof(signaling));
+#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_BI4UMD
+    const uint32_t remote_dmr_id = NRLAudioBridge_GetRemoteDmrId();
+    if (remote_dmr_id != 0u) {
+        if (decoded_signaling[0] != '\0') {
+            snprintf(signaling, sizeof(signaling), "DMRID %lu  %.140s",
+                     static_cast<unsigned long>(remote_dmr_id), decoded_signaling);
+        } else {
+            snprintf(signaling, sizeof(signaling), "DMRID %lu",
+                     static_cast<unsigned long>(remote_dmr_id));
+        }
+    } else
+#endif
+    {
+        snprintf(signaling, sizeof(signaling), "%s", decoded_signaling);
+    }
     if (s_lbl_signaling != nullptr &&
         setLabel(s_lbl_signaling, s_shown_signaling,
                  sizeof(s_shown_signaling), signaling)) {
@@ -3179,8 +3195,8 @@ void refreshOtaNotice()
         (notice.duration_ms == 0u || now - notice.posted_ms < notice.duration_ms);
     // Signaling_service also posts each decode as a generic notice. It is
     // already visible on the dedicated row, so do not duplicate it below.
-    if (notice_active && signaling[0] != '\0' &&
-        strcmp(notice.text, signaling) == 0) {
+    if (notice_active && decoded_signaling[0] != '\0' &&
+        strcmp(notice.text, decoded_signaling) == 0) {
         notice_active = false;
     }
     if (notice_active) {

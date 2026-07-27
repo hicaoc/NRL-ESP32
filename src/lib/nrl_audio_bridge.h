@@ -19,6 +19,11 @@ bool NRLAudioBridge_GetRemoteIdentity(char *buffer, size_t buffer_size);
 // cases, or an empty string if no caller has ever been heard.
 bool NRLAudioBridge_GetRemoteCaller(char *callsign, size_t callsign_size, unsigned *ssid);
 
+// DMR ID carried in bytes 6..8 of the active NRL2 voice packet header,
+// decoded as an unsigned 24-bit big-endian value. Returns 0 when the current
+// voice stream has no DMR ID or no NRL voice stream is active.
+uint32_t NRLAudioBridge_GetRemoteDmrId(void);
+
 // Codec of the most recently decoded downlink voice packet: 0 = G.711,
 // 1 = Opus. Only meaningful while NRLAudioBridge_GetRemoteCaller reports an
 // active caller; the LCD reads it to show the incoming stream's format.

@@ -99,11 +99,13 @@ uint16_t s_last_peer_port = 0u;
 uint8_t s_cpu_id[4] = {};
 char s_remote_callsign[7] = {};
 uint8_t s_remote_ssid = 0u;
+uint32_t s_remote_dmr_id = 0u;
 // Identity of the last *voice* caller specifically. s_remote_callsign above
 // tracks every packet (heartbeat, AT, SCI...), so it must not be used to
 // decide "who is talking" or "is a voice stream active".
 char s_voice_callsign[7] = {};
 uint8_t s_voice_ssid = 0u;
+uint32_t s_voice_dmr_id = 0u;
 size_t s_last_voice_payload_size = 0u;
 uint32_t s_next_wifi_retry_ms = 0u;
 uint8_t s_wifi_connect_failures = 0u;
@@ -171,6 +173,9 @@ static void updateRemoteIdentity(const uint8_t *packet, const size_t packet_size
         }
     }
     s_remote_ssid = packet[30];
+    s_remote_dmr_id = (static_cast<uint32_t>(packet[6]) << 16u) |
+                      (static_cast<uint32_t>(packet[7]) << 8u) |
+                      static_cast<uint32_t>(packet[8]);
     s_last_remote_identity_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
 }
 
@@ -910,6 +915,7 @@ static void stopDownlinkPlayback(void)
     // resurrect the previous NRL caller's name on the LCD in that case.
     s_voice_callsign[0] = '\0';
     s_voice_ssid = 0u;
+    s_voice_dmr_id = 0u;
     STATUS_IO_SetPttActive(false);
 
     // Arm the tail-audio suppression window now that downlink playback (the
@@ -951,6 +957,7 @@ static void handleIncomingVoicePayload(const uint8_t *payload, const size_t payl
     // s_remote_callsign / s_remote_ssid just before this call.
     memcpy(s_voice_callsign, s_remote_callsign, sizeof(s_voice_callsign));
     s_voice_ssid = s_remote_ssid;
+    s_voice_dmr_id = s_remote_dmr_id;
 
     startDownlinkPlayback();
     if (!s_downlink_playback_active) {
@@ -1016,6 +1023,7 @@ static void handleIncomingOpusPayload(const uint8_t *payload, const size_t paylo
 
     memcpy(s_voice_callsign, s_remote_callsign, sizeof(s_voice_callsign));
     s_voice_ssid = s_remote_ssid;
+    s_voice_dmr_id = s_remote_dmr_id;
 
     startDownlinkPlayback();
     if (!s_downlink_playback_active) {
@@ -1313,6 +1321,7 @@ static void bridgeTask(void *)
                 s_voice_callsign[0] = '\0';
                 s_voice_ssid = 0u;
             }
+            s_voice_dmr_id = 0u;
         }
         if (s_downlink_playback_active &&
             (now - s_last_rx_packet_ms) > currentRxPacketTimeoutMs()) {
@@ -1551,6 +1560,11 @@ bool NRLAudioBridge_GetRemoteCaller(char *callsign, size_t callsign_size, unsign
     // merely that some packet arrived recently. Heartbeat / AT / SCI packets
     // never start downlink playback, so they no longer count as reception.
     return s_downlink_playback_active;
+}
+
+uint32_t NRLAudioBridge_GetRemoteDmrId(void)
+{
+    return s_downlink_playback_active ? s_voice_dmr_id : 0u;
 }
 
 uint8_t NRLAudioBridge_GetRxCodec(void)
