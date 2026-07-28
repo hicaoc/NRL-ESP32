@@ -1,0 +1,490 @@
+<!-- CW rhythm trainer fragment, injected into cw_guide.html by scripts/render_cw_guide.py -->
+<div id="cw-sim">
+  <style>
+    #cw-sim{margin:1.5em 0;user-select:none;-webkit-user-select:none}
+    #cw-sim .cw-panel{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:linear-gradient(180deg,#0b1220,#101c30)}
+    #cw-sim .cw-hud{display:flex;align-items:center;gap:18px;padding:10px 16px;color:#e6edf3;font:14px/1.4 ui-monospace,Consolas,monospace}
+    #cw-sim .cw-letter-float{position:absolute;bottom:84px;right:calc(50% - 344px);width:160px;text-align:center;font:700 64px/1 ui-monospace,Consolas,monospace;color:#ffd166;text-shadow:0 0 22px #ffd16680;pointer-events:none}
+    #cw-sim .cw-pattern-float{position:absolute;bottom:46px;right:calc(50% - 344px);width:160px;text-align:center;font:700 26px/1.2 ui-monospace,Consolas,monospace;color:#9bf6ff;text-shadow:0 0 12px #3a86ff66;letter-spacing:.12em;pointer-events:none}
+    #cw-sim .cw-judge-float{position:absolute;bottom:104px;left:calc(50% - 264px);min-width:120px;text-align:right;font:700 26px/1.2 ui-monospace,Consolas,monospace;pointer-events:none;text-shadow:0 0 12px #00000088}
+    #cw-sim .cw-spacer{flex:1}
+    #cw-sim .cw-body{display:flex}
+    #cw-sim .cw-history{width:150px;flex:none;height:380px;border-right:1px solid #ffffff14;display:flex;flex-direction:column}
+    #cw-sim .cw-hist-head{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;color:#8b98ac;font-size:12px;border-bottom:1px solid #ffffff10}
+    #cw-sim .cw-hist-clear{padding:2px 8px;font-size:12px}
+    #cw-sim .cw-hist-list{flex:1;min-height:0;overflow-y:auto;padding:4px 0;font:13px/1.9 ui-monospace,Consolas,monospace;scrollbar-width:thin;scrollbar-color:#3d5a80 transparent}
+    #cw-sim .cw-hist-list::-webkit-scrollbar{width:8px}
+    #cw-sim .cw-hist-list::-webkit-scrollbar-track{background:transparent}
+    #cw-sim .cw-hist-list::-webkit-scrollbar-thumb{background:#3d5a80;border-radius:4px}
+    #cw-sim .cw-hist-list::-webkit-scrollbar-thumb:hover{background:#58a6ff}
+    #cw-sim .cw-hist-list div{padding:0 10px;color:#c9d4e3;white-space:nowrap}
+    #cw-sim .cw-hist-list div b{color:#ffd166;margin-right:8px}
+    #cw-sim .cw-hist-list div span.p{color:#ffd166}
+    #cw-sim .cw-hist-list div span.g{color:#7ee787}
+    #cw-sim .cw-hist-list div span.m{color:#ff7b72}
+    #cw-sim .cw-stage{position:relative;height:380px;perspective:520px;overflow:hidden;cursor:pointer;touch-action:none;flex:1}
+    #cw-sim .cw-plane{position:absolute;left:50%;bottom:-140px;width:340px;height:900px;transform:translateX(-50%) rotateX(58deg);transform-origin:50% 100%;background:linear-gradient(180deg,rgba(88,166,255,.03),rgba(88,166,255,.10));border-left:1px solid rgba(88,166,255,.25);border-right:1px solid rgba(88,166,255,.25)}
+    #cw-sim .cw-hit{position:absolute;left:50%;bottom:118px;width:300px;height:0;transform:translateX(-50%);border-top:3px solid #58a6ff;box-shadow:0 0 18px #58a6ff88}
+    #cw-sim .cw-hit-ring{position:absolute;left:50%;bottom:104px;width:56px;height:56px;transform:translateX(-50%);border:3px solid #58a6ff;border-radius:50%;box-shadow:0 0 16px #58a6ff66;transition:transform .08s,background .08s}
+    #cw-sim .cw-stage.cw-down .cw-hit-ring{transform:translateX(-50%) scale(.82);background:#58a6ff55}
+    #cw-sim .cw-note{position:absolute;left:50%;transform:translateX(-50%);border-radius:10px;pointer-events:none;opacity:.95}
+    #cw-sim .cw-note.dit{width:34px;height:34px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#ffe9a8,#ffb703);box-shadow:0 0 14px #ffb703aa}
+    #cw-sim .cw-note.dah{width:34px;background:linear-gradient(180deg,#9bf6ff,#3a86ff);box-shadow:0 0 14px #3a86ffaa}
+    #cw-sim .cw-note.done{opacity:.15;transition:opacity .2s}
+    #cw-sim .cw-note.miss{opacity:.08;filter:grayscale(1)}
+    #cw-sim .cw-bar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:10px 16px;border-top:1px solid #ffffff14;color:#c9d4e3;font-size:14px}
+    #cw-sim .cw-btn{padding:7px 16px;border:1px solid #3d5a80;border-radius:8px;background:#12233a;color:#dbe7ff;cursor:pointer;font-size:14px}
+    #cw-sim .cw-btn:hover{background:#1b3355}
+    #cw-sim .cw-btn.on{background:#1d4e63;border-color:#58a6ff}
+    #cw-sim input[type=range]{width:130px;accent-color:#58a6ff}
+    #cw-sim .cw-input{flex:1;min-width:220px;padding:7px 12px;border:1px solid #3d5a80;border-radius:8px;background:#0d1a2b;color:#dbe7ff;font-size:14px;outline:none}
+    #cw-sim .cw-input:focus{border-color:#58a6ff}
+    #cw-sim .cw-hint{color:#8b98ac;font-size:12px}
+    #cw-sim .cw-links{margin-left:auto;font-size:12px;white-space:nowrap}
+    #cw-sim .cw-links a{color:#58a6ff;text-decoration:none;margin-left:12px}
+    #cw-sim .cw-links a:hover{text-decoration:underline}
+  </style>
+  <div class="cw-panel">
+    <div class="cw-hud">
+      <div style="font-weight:700;font-size:15px;color:#58a6ff;white-space:nowrap">NRL-ESP32 CW 收发训练模拟器</div>
+      <div class="cw-spacer"></div>
+      <div>COMBO <b id="cwCombo">0</b></div>
+      <div>正确 <b id="cwAcc">–</b></div>
+      <div>WPM <b id="cwWpmText">15</b></div>
+    </div>
+    <div class="cw-body">
+      <div class="cw-history">
+        <div class="cw-hist-head">练习历史<button class="cw-btn cw-hist-clear" id="cwHistClear">清除</button></div>
+        <div class="cw-hist-list" id="cwHist"></div>
+      </div>
+      <div class="cw-stage" id="cwStage">
+        <div class="cw-plane" id="cwPlane"></div>
+        <div class="cw-hit"></div>
+        <div class="cw-hit-ring"></div>
+        <div class="cw-letter-float" id="cwLetter">–</div>
+        <div class="cw-pattern-float" id="cwPattern"></div>
+        <div class="cw-judge-float" id="cwJudge"></div>
+      </div>
+    </div>
+    <div class="cw-bar">
+      <button class="cw-btn" id="cwStart">开始</button>
+      <button class="cw-btn" id="cwDemo">示范</button>
+      <button class="cw-btn on" id="cwModeFollow">跟打</button>
+      <button class="cw-btn" id="cwModeListen">听抄</button>
+      <button class="cw-btn on" id="cwGuide">导音</button>
+      <label>速度 <input type="range" id="cwWpm" min="8" max="30" value="15"></label>
+      <span class="cw-hint">空格 / 按住画面 = 电键 · 圆点=点按 长条=按住</span>
+      <span class="cw-links">
+        <a href="https://github.com/hicaoc/NRL-ESP32" target="_blank" rel="noopener">GitHub 项目</a>
+        <a href="https://ota.nrlptt.com" target="_blank" rel="noopener">OTA 升级</a>
+      </span>
+    </div>
+    <div class="cw-bar">
+      <input type="text" id="cwText" class="cw-input" placeholder="输入文本和数字，如 SOS BG4ABC" maxlength="60">
+      <button class="cw-btn" id="cwTextGo">练习文本</button>
+      <button class="cw-btn" id="cwTextDemo">示范文本</button>
+      <button class="cw-btn" id="cwWav">保存 WAV</button>
+      <span class="cw-hint">字母间隔 3 嘀、单词间隔 7 嘀，速度跟随上方 WPM</span>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  var MORSE = {A:'.-',B:'-...',C:'-.-.',D:'-..',E:'.',F:'..-.',G:'--.',H:'....',I:'..',J:'.---',K:'-.-',L:'.-..',M:'--',N:'-.',O:'---',P:'.--.',Q:'--.-',R:'.-.',S:'...',T:'-',U:'..-',V:'...-',W:'.--',X:'-..-',Y:'-.--',Z:'--..','0':'-----','1':'.----','2':'..---','3':'...--','4':'....-','5':'.....','6':'-....','7':'--...','8':'---..','9':'----.'};
+  var LETTERS = 'KMRESNUAJTGWFHLOIXPCBZQYVD5293847160'.split('');
+  var $ = function (id) { return document.getElementById(id); };
+  var stage = $('cwStage'), plane = $('cwPlane'), letterEl = $('cwLetter'), judgeEl = $('cwJudge');
+  var patternEl = $('cwPattern');
+  var comboEl = $('cwCombo'), accEl = $('cwAcc'), wpmText = $('cwWpmText');
+
+  var wpm = 15, mode = 'follow', guideOn = true;
+  var playing = false, demo = false, notes = [], t0 = 0, raf = 0, endMs = 0;
+  var letter = '', pressed = false, pressMs = 0, holdNote = null;
+  var combo = 0, judged = 0, hits = 0, phase = 'idle', userPattern = '';
+  var lastLetter = '';
+  var customChars = null, customIdx = 0; // practice queue from the text input
+
+  function dit() { return 1200 / wpm; }
+  function pxPerMs() { return 96 / dit(); }
+  function now() { return performance.now() - t0; }
+
+  // ---- audio ----
+  var ac = null, gain = null;
+  function audio() {
+    if (!ac) {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      ac = new AC();
+      var osc = ac.createOscillator();
+      osc.frequency.value = 700;
+      gain = ac.createGain();
+      gain.gain.value = 0;
+      osc.connect(gain); gain.connect(ac.destination);
+      osc.start();
+    }
+    if (ac.state === 'suspended') ac.resume();
+  }
+  function tone(on) {
+    if (!ac) return;
+    gain.gain.setTargetAtTime(on ? 0.28 : 0, ac.currentTime, 0.004);
+  }
+  // Schedule one pattern playback starting at ms-from-now (guide / demo / listen).
+  function playPattern(pattern, delayMs) {
+    var d = dit(), t = ac.currentTime + delayMs / 1000;
+    for (var i = 0; i < pattern.length; i++) {
+      var dur = (pattern[i] === '-' ? 3 : 1) * d / 1000;
+      gain.gain.setValueAtTime(0.14, t);
+      gain.gain.setTargetAtTime(0, t + dur, 0.004);
+      t += dur + d / 1000;
+    }
+  }
+
+  // ---- song building ----
+  function buildNotes(ch) {
+    var d = dit(), t = 4 * d, out = [], pattern = MORSE[ch];
+    for (var i = 0; i < pattern.length; i++) {
+      var len = (pattern[i] === '-' ? 3 : 1) * d;
+      out.push({ t0: t, t1: t + len, el: pattern[i], state: 'wait', pressJudge: '', dom: null });
+      t += len + d;
+    }
+    endMs = t + 2 * d;
+    return out;
+  }
+  function clearNotes() {
+    for (var i = 0; i < notes.length; i++) if (notes[i].dom) notes[i].dom.remove();
+    notes = [];
+  }
+  function pickLetter() {
+    var ch;
+    do { ch = LETTERS[Math.floor(Math.random() * LETTERS.length)]; } while (ch === lastLetter);
+    lastLetter = ch;
+    return ch;
+  }
+  function sanitize(text) {
+    return text.toUpperCase().replace(/[^A-Z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
+  }
+
+  // Render the text as 700 Hz CW into a 16-bit mono WAV (8 kHz, 5 ms edges).
+  function exportWav(text) {
+    if (text === '') { judge('先输入文本', '#ff7b72'); return; }
+    var sr = 8000, d = 1.2 / wpm, ramp = Math.round(0.005 * sr), amp = 0.5;
+    var segs = [], t = 0.3;
+    var words = text.split(' ');
+    for (var wi = 0; wi < words.length; wi++) {
+      if (wi > 0) t += 7 * d;
+      var word = words[wi];
+      for (var ci = 0; ci < word.length; ci++) {
+        if (ci > 0) t += 3 * d;
+        var pat = MORSE[word[ci]];
+        if (!pat) continue;
+        for (var i = 0; i < pat.length; i++) {
+          if (i > 0) t += d;
+          var len = (pat[i] === '-' ? 3 : 1) * d;
+          segs.push([t, t + len]);
+          t += len;
+        }
+      }
+    }
+    var n = Math.ceil((t + 0.3) * sr), data = new Int16Array(n), s, a, b, j;
+    for (s = 0; s < segs.length; s++) {
+      a = Math.floor(segs[s][0] * sr); b = Math.floor(segs[s][1] * sr);
+      for (j = a; j < b; j++) {
+        var env = Math.min(1, (j - a) / ramp, (b - j) / ramp);
+        data[j] = Math.round(32767 * amp * env * Math.sin(2 * Math.PI * 700 * j / sr));
+      }
+    }
+    var buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    function ws(o, str) { for (var k = 0; k < str.length; k++) v.setUint8(o + k, str.charCodeAt(k)); }
+    ws(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); ws(8, 'WAVE'); ws(12, 'fmt ');
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true);
+    v.setUint16(34, 16, true); ws(36, 'data'); v.setUint32(40, n * 2, true);
+    new Int16Array(buf, 44).set(data);
+    var aEl = document.createElement('a');
+    aEl.href = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+    aEl.download = 'cw_' + text.replace(/ /g, '_') + '.wav';
+    aEl.click();
+    setTimeout(function () { URL.revokeObjectURL(aEl.href); }, 5000);
+    judge('WAV 已保存', '#7ee787');
+  }
+
+  function judge(text, color) {
+    judgeEl.textContent = text;
+    judgeEl.style.color = color;
+    judgeEl.style.opacity = 1;
+  }
+  // Latest-first practice log in the left panel (capped at 60 rows).
+  function hist(ch, kind, cls) {
+    var list = $('cwHist');
+    var row = document.createElement('div');
+    var b = document.createElement('b');
+    b.textContent = ch;
+    var s = document.createElement('span');
+    s.className = cls;
+    s.textContent = kind;
+    row.appendChild(b);
+    row.appendChild(s);
+    list.insertBefore(row, list.firstChild);
+    while (list.children.length > 60) list.lastChild.remove();
+  }
+  // Free keying outside a practice session: decode the pattern after a
+  // 3-dit pause and log the letter.
+  var freePattern = '', freeTimer = 0;
+  function freeDecode() {
+    if (freePattern === '') return;
+    var ch = '?';
+    for (var k in MORSE) {
+      if (Object.prototype.hasOwnProperty.call(MORSE, k) && MORSE[k] === freePattern) { ch = k; break; }
+    }
+    letterEl.textContent = ch;
+    hist(ch, freePattern.split('').join(' '), ch === '?' ? 'm' : 'g');
+    freePattern = '';
+  }
+  function stats() {
+    comboEl.textContent = combo;
+    accEl.textContent = judged > 0 ? Math.round(100 * hits / judged) + '%' : '–';
+  }
+  function finishLetter() {
+    phase = 'idle';
+    if (mode === 'listen' && !demo && MORSE[letter]) {
+      var ok = userPattern === MORSE[letter];
+      judged++; if (ok) { hits++; combo++; } else combo = 0;
+      judge(ok ? '正确 ' + letter : '错误 = ' + letter, ok ? '#7ee787' : '#ff7b72');
+      hist(letter, ok ? '正确' : '错误', ok ? 'g' : 'm');
+      letterEl.textContent = letter;
+      patternEl.textContent = MORSE[letter].split('').join(' ');
+    }
+    stats();
+    setTimeout(function () { if (playing) nextRound(); else letterEl.textContent = '–'; }, 900);
+  }
+  function nextRound() {
+    clearNotes();
+    userPattern = '';
+    holdNote = null;
+    t0 = performance.now(); // each round's note timeline starts from zero
+    if (customChars !== null) {
+      if (customIdx >= customChars.length) {
+        customChars = null;
+        letterEl.textContent = '✓';
+        patternEl.textContent = '';
+        judge('完成', '#7ee787');
+        setTimeout(function () { if (playing) stop(); }, 800);
+        return;
+      }
+      letter = customChars[customIdx++];
+      if (letter === ' ') {
+        // Word gap: a quiet 7-dit round with no notes.
+        letterEl.textContent = '·';
+        patternEl.textContent = '';
+        notes = [];
+        endMs = 7 * dit();
+        phase = 'play';
+        return;
+      }
+    } else {
+      letter = pickLetter();
+    }
+    letterEl.textContent = (mode === 'listen' && !demo) ? '?' : letter;
+    patternEl.textContent = (mode === 'listen' && !demo) ? '' : MORSE[letter].split('').join(' ');
+    notes = buildNotes(letter);
+    if (mode === 'follow' || demo) {
+      for (var i = 0; i < notes.length; i++) {
+        var n = notes[i], dom = document.createElement('div');
+        dom.className = 'cw-note ' + (n.el === '-' ? 'dah' : 'dit');
+        if (n.el === '-') dom.style.height = ((n.t1 - n.t0) * pxPerMs()) + 'px';
+        plane.appendChild(dom);
+        n.dom = dom;
+      }
+    }
+    phase = (mode === 'listen' && !demo) ? 'listen' : 'play';
+    if (guideOn || demo || phase === 'listen') playPattern(MORSE[letter], 4 * dit());
+    if (demo) for (var j = 0; j < notes.length; j++) notes[j].state = 'done';
+  }
+
+  // ---- judging ----
+  function rate(err, d) {
+    if (err <= 0.4 * d) return 'perfect';
+    if (err <= d) return 'good';
+    return 'miss';
+  }
+  function applyJudge(n, kind) {
+    n.state = kind;
+    judged++;
+    if (kind === 'miss') { combo = 0; judge('错过', '#ff7b72'); }
+    else {
+      hits++; combo++;
+      judge(kind === 'perfect' ? '完美' : '良好', kind === 'perfect' ? '#ffd166' : '#7ee787');
+    }
+    hist(letter, kind === 'perfect' ? '完美' : kind === 'good' ? '良好' : '错过',
+         kind === 'perfect' ? 'p' : kind === 'good' ? 'g' : 'm');
+    if (n.dom) n.dom.className += kind === 'miss' ? ' miss' : ' done';
+    stats();
+  }
+  function press(ms) {
+    if (pressed) return;
+    pressed = true; pressMs = ms;
+    stage.classList.add('cw-down');
+    tone(true);
+    if (phase !== 'play' || demo) return;
+    var d = dit(), best = null, err = 0;
+    for (var i = 0; i < notes.length; i++) {
+      var n = notes[i];
+      if (n.state !== 'wait') continue;
+      var e = Math.abs(ms - n.t0);
+      if (e <= d && (best === null || e < err)) { best = n; err = e; }
+    }
+    if (best === null) return;
+    if (best.el === '-') {
+      best.pressJudge = rate(err, d);
+      holdNote = best;
+    } else {
+      applyJudge(best, rate(err, d));
+    }
+  }
+  function release(ms) {
+    if (!pressed) return;
+    pressed = false;
+    stage.classList.remove('cw-down');
+    tone(false);
+    var d = dit();
+    if (phase === 'answer' && !demo) {
+      userPattern += (ms - pressMs >= 2 * d) ? '-' : '.';
+      return;
+    }
+    if (phase !== 'play') {
+      // Free keying (session not started or between rounds): classify and
+      // decode after a 3-dit pause instead of judging against notes.
+      freePattern += (ms - pressMs >= 2 * d) ? '-' : '.';
+      patternEl.textContent = freePattern.split('').join(' ');
+      clearTimeout(freeTimer);
+      freeTimer = setTimeout(freeDecode, 3 * d);
+      return;
+    }
+    if (holdNote !== null) {
+      var n = holdNote; holdNote = null;
+      var r1 = n.pressJudge === 'perfect' ? 2 : n.pressJudge === 'good' ? 1 : 0;
+      var r2kind = rate(Math.abs(ms - n.t1), d);
+      var r2 = r2kind === 'perfect' ? 2 : r2kind === 'good' ? 1 : 0;
+      applyJudge(n, (r1 + r2) >= 3 ? 'perfect' : (r1 + r2) >= 2 ? 'good' : 'miss');
+    }
+  }
+
+  // ---- main loop ----
+  function frame() {
+    if (!playing) return;
+    var ms = now(), p = pxPerMs(), i, n;
+    for (i = 0; i < notes.length; i++) {
+      n = notes[i];
+      if (n.dom) {
+        var bottom = 118 + (n.t0 - ms) * p;
+        n.dom.style.bottom = bottom + 'px';
+      }
+      if (phase === 'play' && !demo && n.state === 'wait' && ms > n.t1 + dit()) {
+        applyJudge(n, 'miss');
+        if (holdNote === n) holdNote = null;
+      }
+    }
+    if (phase === 'listen' && ms > endMs) { phase = 'answer'; judge('请发码', '#58a6ff'); }
+    else if (phase === 'answer' && ms > endMs + 8 * dit()) finishLetter();
+    else if (phase === 'play' && ms > endMs) {
+      var allDone = true;
+      for (i = 0; i < notes.length; i++) if (notes[i].state === 'wait') allDone = false;
+      if (allDone || demo) finishLetter();
+    }
+    raf = requestAnimationFrame(frame);
+  }
+
+  function start(isDemo) {
+    audio();
+    demo = isDemo;
+    playing = true;
+    $('cwStart').textContent = '停止';
+    combo = 0; judged = 0; hits = 0;
+    freePattern = '';
+    clearTimeout(freeTimer);
+    stats();
+    t0 = performance.now();
+    nextRound();
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(frame);
+  }
+  function stop() {
+    playing = false;
+    cancelAnimationFrame(raf);
+    tone(false);
+    clearNotes();
+    customChars = null;
+    letterEl.textContent = '–';
+    patternEl.textContent = '';
+    judgeEl.textContent = '';
+    $('cwStart').textContent = '开始';
+    stage.classList.remove('cw-down');
+    pressed = false; holdNote = null;
+  }
+
+  // ---- events ----
+  // Keep keyboard focus off the buttons: after any button click, Space must
+  // key CW instead of re-triggering the focused button.
+  $('cw-sim').addEventListener('click', function (e) {
+    if (e.target && e.target.tagName === 'BUTTON') e.target.blur();
+  });
+  $('cwTextGo').addEventListener('click', function () {
+    var t = sanitize($('cwText').value);
+    if (t === '') { judge('先输入文本', '#ff7b72'); return; }
+    if (playing) stop();
+    customChars = t.split('');
+    customIdx = 0;
+    start(false);
+  });
+  $('cwTextDemo').addEventListener('click', function () {
+    var t = sanitize($('cwText').value);
+    if (t === '') { judge('先输入文本', '#ff7b72'); return; }
+    if (playing) stop();
+    customChars = t.split('');
+    customIdx = 0;
+    start(true);
+  });
+  $('cwWav').addEventListener('click', function () {
+    exportWav(sanitize($('cwText').value));
+  });
+  $('cwHistClear').addEventListener('click', function () {
+    $('cwHist').textContent = '';
+  });
+  $('cwText').addEventListener('input', function () {
+    if (judgeEl.textContent === '先输入文本') judgeEl.textContent = '';
+  });
+  $('cwStart').addEventListener('click', function () { playing ? stop() : start(false); });
+  $('cwDemo').addEventListener('click', function () { playing ? stop() : start(true); });
+  $('cwModeFollow').addEventListener('click', function () {
+    mode = 'follow';
+    $('cwModeFollow').classList.add('on'); $('cwModeListen').classList.remove('on');
+  });
+  $('cwModeListen').addEventListener('click', function () {
+    mode = 'listen';
+    $('cwModeListen').classList.add('on'); $('cwModeFollow').classList.remove('on');
+  });
+  $('cwGuide').addEventListener('click', function () {
+    guideOn = !guideOn;
+    $('cwGuide').classList.toggle('on', guideOn);
+  });
+  $('cwWpm').addEventListener('input', function () {
+    wpm = parseInt(this.value, 10);
+    wpmText.textContent = wpm;
+  });
+  stage.addEventListener('pointerdown', function (e) { e.preventDefault(); audio(); press(now()); });
+  window.addEventListener('pointerup', function () { release(now()); });
+  stage.addEventListener('pointerleave', function () { release(now()); });
+  window.addEventListener('keydown', function (e) {
+    if (e.code !== 'Space' || e.repeat) return;
+    var tag = (e.target && e.target.tagName) || '';
+    if (tag === 'TEXTAREA') return;
+    if (tag === 'INPUT' && (!e.target.type || e.target.type === 'text')) return;
+    e.preventDefault();
+    audio();
+    press(now());
+  });
+  window.addEventListener('keyup', function (e) {
+    if (e.code !== 'Space') return;
+    release(now());
+  });
+})();
+</script>

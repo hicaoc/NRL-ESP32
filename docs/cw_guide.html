@@ -1,0 +1,497 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CW 莫尔斯电码功能使用说明 · NRL ESP32</title><style>
+:root{color-scheme:light dark;--bg:#f6f8fa;--card:#fff;--fg:#1f2328;--muted:#57606a;--line:#d0d7de;--accent:#0969da;--code:#f0f3f6}
+@media(prefers-color-scheme:dark){:root{--bg:#0d1117;--card:#161b22;--fg:#e6edf3;--muted:#9198a1;--line:#30363d;--accent:#58a6ff;--code:#1b222b}}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Arial,sans-serif}
+.layout{max-width:1240px;margin:auto;display:flex;gap:28px;padding:0 24px}.toc{position:sticky;top:0;width:230px;height:100vh;overflow:auto;padding:28px 0;flex:none}.toc b{color:var(--muted);font-size:12px;letter-spacing:.08em}.toc a{display:block;padding:5px 10px;color:var(--muted);text-decoration:none;border-left:2px solid transparent}.toc a:hover{color:var(--accent);border-color:var(--accent)}
+main{min-width:0;flex:1;padding:42px 0 64px}article{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:42px;box-shadow:0 8px 24px #0000000d}h1,h2,h3{line-height:1.25;scroll-margin-top:20px}h1{font-size:2.15em;margin-top:0}h2{margin-top:2.2em;padding-top:.15em;border-top:1px solid var(--line)}h3{margin-top:1.5em}a{color:var(--accent)}code{background:var(--code);padding:.12em .35em;border-radius:4px;font-family:ui-monospace,Consolas,monospace;font-size:.9em}pre{overflow:auto;background:var(--code);padding:16px;border-radius:8px}pre code{padding:0;background:none}table{width:100%;border-collapse:collapse;display:block;overflow:auto}th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}th{background:var(--code)}blockquote{margin:1em 0;padding:.2em 1em;border-left:4px solid var(--accent);background:var(--code);color:var(--muted)}img{max-width:100%;height:auto;border-radius:8px}footer{margin-top:36px;color:var(--muted);font-size:.9em}@media(max-width:820px){.layout{display:block;padding:0 12px}.toc{position:static;width:auto;height:auto;padding:16px 0}.toc a{display:inline-block}main{padding:12px 0 32px}article{padding:24px 18px}}
+</style></head><body><div class="layout"><nav class="toc"><b>CONTENTS</b><a href="#cw-莫尔斯电码功能使用说明">CW 莫尔斯电码功能使用说明</a><a href="#项目链接">项目链接</a><a href="#功能概览">功能概览</a><a href="#各板卡操作方式">各板卡操作方式</a><a href="#bi4umd-触屏-无实体键">bi4umd（触屏，无实体键）</a><a href="#gezipai-gezipai-4g-实体三键-无触屏">gezipai / gezipai_4g（实体三键，无触屏）</a><a href="#s31-korvo-800-480-触屏">s31_korvo（800×480 触屏）</a><a href="#bh4tdv-s31-function-coreboard-无屏">bh4tdv / s31_function_coreboard（无屏）</a><a href="#界面元素">界面元素</a><a href="#练习模式">练习模式</a><a href="#tx-抄发-trn-tx">TX 抄发（TRN TX）</a><a href="#rx-听抄-trn-rx">RX 听抄（TRN RX）</a><a href="#koch-学习进度">Koch 学习进度</a><a href="#练习字符集">练习字符集</a><a href="#自适应调速">自适应调速</a><a href="#成绩页">成绩页</a><a href="#at-命令参考">AT 命令参考</a><a href="#nrl-esp32-cw-收发训练模拟器">NRL-ESP32 CW 收发训练模拟器</a><a href="#常见问题">常见问题</a></nav><main><article><h1 id="cw-莫尔斯电码功能使用说明">CW 莫尔斯电码功能使用说明</h1><p>适用固件版本：v0.8.36 及以上。本文介绍 CW（莫尔斯电码）收发显示、电键输入、练习模式（抄发 / 听抄）、Koch 学习进度、练习字符集、成绩页和自适应调速的用法。</p><h2 id="项目链接">项目链接</h2><ul><li><strong>固件源码（GitHub）</strong>：&lt;https://github.com/hicaoc/NRL-ESP32&gt; — 问题反馈、功能建议请提 Issue；发布页可下载各板卡固件包</li><li><strong>固件 OTA 服务</strong>：&lt;https://ota.nrlptt.com&gt; — 设备在线升级与 USB 网页刷机入口（管理端见 <a href="https://github.com/hicaoc/NRL-OTA"><code>NRL-OTA</code></a> 项目）</li></ul><h2 id="功能概览">功能概览</h2><ul><li><strong>接收解码</strong>：实时解码 MIC（电台）或 NRL（网络下行）音频中的 CW 信号，显示字母与电码图案，并自动跟踪对方速度（WPM）</li><li><strong>电键发送</strong>：用触屏或实体键输入电码，700 Hz 侧音同步发声，可同时送上 NRL 网络（空中发射）</li><li><strong>练习模式</strong>：TX 抄发（看字母键入）、RX 听抄（听音键回）两种，自动判题打分</li><li><strong>Koch 学习法</strong>：36 个字符循序解锁，进度断电保留</li><li><strong>键控时机评分</strong>：直键输入时评估嘀嗒比例是否接近标准 1:3（TIM 分）</li><li><strong>自适应调速</strong>：随答题正确率自动升降练习速度</li></ul><h2 id="各板卡操作方式">各板卡操作方式</h2><h3 id="bi4umd-触屏-无实体键">bi4umd（触屏，无实体键）</h3><p>主菜单选择 <code>CW MORSE</code> 进入。界面下方是一整条<strong>电键区</strong>：</p><table><thead><tr><th>操作</th><th>效果</th></tr></thead><tbody><tr><td>轻点电键区</td><td>嘀（dit）</td></tr><tr><td>按住电键区</td><td>嗒（dah），松开定型</td></tr><tr><td><code>DEL</code></td><td>删除当前图案一个元素 / 删除已输入字符</td></tr><tr><td><code>SEND</code></td><td>把已输入文本以 CW 发出（侧音 + NRL）</td></tr><tr><td><code>RPT</code></td><td>RX 听抄模式：重听当前题目</td></tr><tr><td><code>SCR</code></td><td>非 RX 模式：进入成绩页</td></tr><tr><td><code>TRAIN</code> / <code>TRN TX</code> / <code>TRN RX</code></td><td>循环切换练习模式：关 → 抄发 → 听抄</td></tr><tr><td><code>EXIT</code>（标题行左侧）</td><td>退出 CW 页面</td></tr></tbody></table><blockquote><p>如果接了外置 PTT（GPIO21），长按 PTT ≥0.5 秒也可以退出；短按 PTT 等效 SEND。</p></blockquote><h3 id="gezipai-gezipai-4g-实体三键-无触屏">gezipai / gezipai_4g（实体三键，无触屏）</h3><table><thead><tr><th>操作</th><th>效果</th></tr></thead><tbody><tr><td><code>VOL-</code></td><td>嘀（dit）</td></tr><tr><td><code>VOL+</code></td><td>嗒（dah）</td></tr><tr><td><code>VOL+</code> + <code>VOL-</code> 同时按</td><td>删除</td></tr><tr><td>PTT 短按</td><td>发送</td></tr><tr><td>PTT 长按（≥0.5 秒）</td><td>退出 CW 页面</td></tr></tbody></table><h3 id="s31-korvo-800-480-触屏">s31_korvo（800×480 触屏）</h3><p>应用列表进入 CW 页。底部键区有两种模式，用 <code>Mode:KEY</code> / <code>Mode:PDL</code> 按钮切换：</p><ul><li><strong>直键（KEY）</strong>：整宽键区，轻点 = 嘀、按住 = 嗒，与 bi4umd 相同</li><li><strong>单桨（PDL）</strong>：左半区按住 = 自动连续嘀、右半区按住 = 自动连续嗒（标准 1:3:1 时值，电键器效果）；按住中滑到另一区可切换码流</li></ul><p>按钮：<code>Back</code> 返回、<code>Delete</code> 删除、<code>Send</code> 发送、<code>Train</code> 循环练习模式、<code>Replay</code> 听抄重听、<code>Score</code> 成绩页。</p><h3 id="bh4tdv-s31-function-coreboard-无屏">bh4tdv / s31_function_coreboard（无屏）</h3><p>CW 解码与练习配置通过网页配置门户（Signaling 页的 CW 路由开关）和 AT 命令管理，无本地练习界面。</p><h2 id="界面元素">界面元素</h2><table><thead><tr><th>区域</th><th>内容</th></tr></thead><tbody><tr><td>标题行</td><td>当前 WPM、正确率；bi4umd 左侧有 EXIT</td></tr><tr><td>RX</td><td>解码到的最近字母序列</td></tr><tr><td>RX code</td><td>对应的电码图案（<code>·−</code>）</td></tr><tr><td>TX</td><td>你键入的文本，方括号内是当前未完成的图案</td></tr><tr><td>TX code</td><td>你键入的电码图案</td></tr><tr><td>成绩行</td><td>练习状态：目标、正确率、题数、TIM 分 / 听抄等级与反馈</td></tr></tbody></table><h2 id="练习模式">练习模式</h2><h3 id="tx-抄发-trn-tx">TX 抄发（TRN TX）</h3><p>屏幕显示一个字母，用电键把它发出来。字符定型后自动判题并出下一题。</p><ul><li><strong>ACC</strong>：累计正确率</li><li><strong>TIM（时机分）</strong>：对含嘀又含嗒的字符，评估你的嗒嘀时长比与理想 3:1 的偏差；纯嘀（E）或纯嗒（T、M、O）的字符不参与评分。桨发元素按理想值计分</li></ul><h3 id="rx-听抄-trn-rx">RX 听抄（TRN RX）</h3><p>机器随机播放一个字母的 CW，你<strong>用键把听到的字母发回去</strong>作为答案。判题后显示 <code>= K correct / wrong</code> 并自动出下一题；<code>RPT</code>/<code>Replay</code> 可重听。</p><h3 id="koch-学习进度">Koch 学习进度</h3><p>字符集共 36 个（A–Z、0–9），按以下顺序解锁：</p><p><code>K M R S U A P T L O W I N J E F Y V G Q H Z X C B D 5 2 9 3 8 4 7 1 6 0</code></p><ul><li>初始只有 <strong>K、M</strong> 两个字母</li><li>最近 20 题正确率 ≥ 90%（18/20）自动解锁下一个字母，窗口重新计</li><li>每个字母的答题数 / 正确数和解锁等级保存在 NVS，<strong>断电不丢</strong></li></ul><h3 id="练习字符集">练习字符集</h3><p>四种集合（成绩页 <code>SET</code> 键循环，或 AT 命令设置）：</p><table><thead><tr><th>集合</th><th>内容</th></tr></thead><tbody><tr><td><code>KOCH</code></td><td>按解锁等级开放的字符（默认，含进度）</td></tr><tr><td><code>LETTERS</code></td><td>全部 26 个字母，立即可用</td></tr><tr><td><code>DIGITS</code></td><td>全部 10 个数字，立即可用</td></tr><tr><td><code>CUSTOM</code></td><td>自定义子集（如自己呼号的字母），立即全部可用</td></tr></tbody></table><p>自定义集合用 AT 命令编辑，例如 <code>AT+CWSET=CUSTOM:BG4ABC</code>（自动大写、去重、剔除不支持的字符）。</p><h3 id="自适应调速">自适应调速</h3><p>开启后（成绩页 <code>ADP</code> / <code>Adaptive</code> 键，或 <code>AT+CWADAPT=ON</code>），每 5 题评估一次：对 ≥4 题速度 +1 WPM，对 ≤2 题 −1 WPM，范围 10–30 WPM。练习速度同样断电保留。关闭时速度固定为当前 WPM（WPM 也会从接收到的 CW 中学习）。</p><h3 id="成绩页">成绩页</h3><ul><li>bi4umd：CW 页按 <code>SCR</code>（非听抄模式）进入</li><li>s31：CW 页按 <code>Score</code> 进入</li></ul><p>每个字符一格，颜色含义：</p><table><thead><tr><th>颜色</th><th>含义</th></tr></thead><tbody><tr><td>绿</td><td>正确率 ≥ 90%</td></tr><tr><td>黄</td><td>正确率 70–89%</td></tr><tr><td>红</td><td>正确率 &lt; 70%</td></tr><tr><td>灰</td><td>尚未练习</td></tr></tbody></table><p>底部汇总：总正确率 / 答题数、TIM 分、Koch 等级。页内可直接切换字符集和自适应开关。</p><h2 id="at-命令参考">AT 命令参考</h2><table><thead><tr><th>命令</th><th>说明</th></tr></thead><tbody><tr><td><code>AT+CW?</code></td><td>查询 CW 解码路由状态</td></tr><tr><td><code>AT+CW=ON/OFF</code></td><td>CW 解码总开关（MIC + NRL）</td></tr><tr><td><code>AT+CW_RX_MIC?</code> / <code>=ON/OFF</code></td><td>MIC 通道 CW 解码</td></tr><tr><td><code>AT+CW_RX_NRL?</code> / <code>=ON/OFF</code></td><td>NRL 下行 CW 解码</td></tr><tr><td><code>AT+CWSET?</code></td><td>查询字符集、Koch 等级、WPM、自适应状态</td></tr><tr><td><code>AT+CWSET=KOCH</code></td><td>切到 Koch 解锁集合</td></tr><tr><td><code>AT+CWSET=LETTERS</code></td><td>切到纯字母</td></tr><tr><td><code>AT+CWSET=DIGITS</code></td><td>切到纯数字</td></tr><tr><td><code>AT+CWSET=CUSTOM:字符</code></td><td>设置并切到自定义集合</td></tr><tr><td><code>AT+CWADAPT?</code> / <code>=ON/OFF</code></td><td>自适应调速开关</td></tr></tbody></table><h2 id="nrl-esp32-cw-收发训练模拟器">NRL-ESP32 CW 收发训练模拟器</h2><p>无需设备，在本页面用<strong>节奏游戏</strong>的方式练 CW（冰与火之舞式单键玩法，首次点击后创建音频）：</p><ul><li><strong>跟打</strong>：音符沿 3D 轨道飞来——圆点 = 点按（嘀），长条 = 按住（嗒），到达判定线时按<strong>空格</strong>或按住画面；越准评价越高</li><li><strong>听抄</strong>：隐藏音符，机器发音，你用键把听到的图案发回去，最后判定对错</li><li><strong>文本练习</strong>：输入一段文本或呼号，整段练习或示范（字母间隔 3 嘀、单词间隔 7 嘀）；<strong>保存 WAV</strong> 可把这段文本的 CW 音频导出为 WAV 文件（8 kHz/16 bit，700 Hz 侧音，5 ms 包络防爆音）</li><li>支持鼠标 / 触屏 / 键盘；<code>示范</code> 可自动播放一遍听节奏</li></ul><!-- CW rhythm trainer fragment, injected into cw_guide.html by scripts/render_cw_guide.py -->
+<div id="cw-sim">
+  <style>
+    #cw-sim{margin:1.5em 0;user-select:none;-webkit-user-select:none}
+    #cw-sim .cw-panel{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:linear-gradient(180deg,#0b1220,#101c30)}
+    #cw-sim .cw-hud{display:flex;align-items:center;gap:18px;padding:10px 16px;color:#e6edf3;font:14px/1.4 ui-monospace,Consolas,monospace}
+    #cw-sim .cw-letter-float{position:absolute;bottom:84px;right:calc(50% - 344px);width:160px;text-align:center;font:700 64px/1 ui-monospace,Consolas,monospace;color:#ffd166;text-shadow:0 0 22px #ffd16680;pointer-events:none}
+    #cw-sim .cw-pattern-float{position:absolute;bottom:46px;right:calc(50% - 344px);width:160px;text-align:center;font:700 26px/1.2 ui-monospace,Consolas,monospace;color:#9bf6ff;text-shadow:0 0 12px #3a86ff66;letter-spacing:.12em;pointer-events:none}
+    #cw-sim .cw-judge-float{position:absolute;bottom:104px;left:calc(50% - 264px);min-width:120px;text-align:right;font:700 26px/1.2 ui-monospace,Consolas,monospace;pointer-events:none;text-shadow:0 0 12px #00000088}
+    #cw-sim .cw-spacer{flex:1}
+    #cw-sim .cw-body{display:flex}
+    #cw-sim .cw-history{width:150px;flex:none;height:380px;border-right:1px solid #ffffff14;display:flex;flex-direction:column}
+    #cw-sim .cw-hist-head{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;color:#8b98ac;font-size:12px;border-bottom:1px solid #ffffff10}
+    #cw-sim .cw-hist-clear{padding:2px 8px;font-size:12px}
+    #cw-sim .cw-hist-list{flex:1;min-height:0;overflow-y:auto;padding:4px 0;font:13px/1.9 ui-monospace,Consolas,monospace;scrollbar-width:thin;scrollbar-color:#3d5a80 transparent}
+    #cw-sim .cw-hist-list::-webkit-scrollbar{width:8px}
+    #cw-sim .cw-hist-list::-webkit-scrollbar-track{background:transparent}
+    #cw-sim .cw-hist-list::-webkit-scrollbar-thumb{background:#3d5a80;border-radius:4px}
+    #cw-sim .cw-hist-list::-webkit-scrollbar-thumb:hover{background:#58a6ff}
+    #cw-sim .cw-hist-list div{padding:0 10px;color:#c9d4e3;white-space:nowrap}
+    #cw-sim .cw-hist-list div b{color:#ffd166;margin-right:8px}
+    #cw-sim .cw-hist-list div span.p{color:#ffd166}
+    #cw-sim .cw-hist-list div span.g{color:#7ee787}
+    #cw-sim .cw-hist-list div span.m{color:#ff7b72}
+    #cw-sim .cw-stage{position:relative;height:380px;perspective:520px;overflow:hidden;cursor:pointer;touch-action:none;flex:1}
+    #cw-sim .cw-plane{position:absolute;left:50%;bottom:-140px;width:340px;height:900px;transform:translateX(-50%) rotateX(58deg);transform-origin:50% 100%;background:linear-gradient(180deg,rgba(88,166,255,.03),rgba(88,166,255,.10));border-left:1px solid rgba(88,166,255,.25);border-right:1px solid rgba(88,166,255,.25)}
+    #cw-sim .cw-hit{position:absolute;left:50%;bottom:118px;width:300px;height:0;transform:translateX(-50%);border-top:3px solid #58a6ff;box-shadow:0 0 18px #58a6ff88}
+    #cw-sim .cw-hit-ring{position:absolute;left:50%;bottom:104px;width:56px;height:56px;transform:translateX(-50%);border:3px solid #58a6ff;border-radius:50%;box-shadow:0 0 16px #58a6ff66;transition:transform .08s,background .08s}
+    #cw-sim .cw-stage.cw-down .cw-hit-ring{transform:translateX(-50%) scale(.82);background:#58a6ff55}
+    #cw-sim .cw-note{position:absolute;left:50%;transform:translateX(-50%);border-radius:10px;pointer-events:none;opacity:.95}
+    #cw-sim .cw-note.dit{width:34px;height:34px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#ffe9a8,#ffb703);box-shadow:0 0 14px #ffb703aa}
+    #cw-sim .cw-note.dah{width:34px;background:linear-gradient(180deg,#9bf6ff,#3a86ff);box-shadow:0 0 14px #3a86ffaa}
+    #cw-sim .cw-note.done{opacity:.15;transition:opacity .2s}
+    #cw-sim .cw-note.miss{opacity:.08;filter:grayscale(1)}
+    #cw-sim .cw-bar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:10px 16px;border-top:1px solid #ffffff14;color:#c9d4e3;font-size:14px}
+    #cw-sim .cw-btn{padding:7px 16px;border:1px solid #3d5a80;border-radius:8px;background:#12233a;color:#dbe7ff;cursor:pointer;font-size:14px}
+    #cw-sim .cw-btn:hover{background:#1b3355}
+    #cw-sim .cw-btn.on{background:#1d4e63;border-color:#58a6ff}
+    #cw-sim input[type=range]{width:130px;accent-color:#58a6ff}
+    #cw-sim .cw-input{flex:1;min-width:220px;padding:7px 12px;border:1px solid #3d5a80;border-radius:8px;background:#0d1a2b;color:#dbe7ff;font-size:14px;outline:none}
+    #cw-sim .cw-input:focus{border-color:#58a6ff}
+    #cw-sim .cw-hint{color:#8b98ac;font-size:12px}
+    #cw-sim .cw-links{margin-left:auto;font-size:12px;white-space:nowrap}
+    #cw-sim .cw-links a{color:#58a6ff;text-decoration:none;margin-left:12px}
+    #cw-sim .cw-links a:hover{text-decoration:underline}
+  </style>
+  <div class="cw-panel">
+    <div class="cw-hud">
+      <div style="font-weight:700;font-size:15px;color:#58a6ff;white-space:nowrap">NRL-ESP32 CW 收发训练模拟器</div>
+      <div class="cw-spacer"></div>
+      <div>COMBO <b id="cwCombo">0</b></div>
+      <div>正确 <b id="cwAcc">–</b></div>
+      <div>WPM <b id="cwWpmText">15</b></div>
+    </div>
+    <div class="cw-body">
+      <div class="cw-history">
+        <div class="cw-hist-head">练习历史<button class="cw-btn cw-hist-clear" id="cwHistClear">清除</button></div>
+        <div class="cw-hist-list" id="cwHist"></div>
+      </div>
+      <div class="cw-stage" id="cwStage">
+        <div class="cw-plane" id="cwPlane"></div>
+        <div class="cw-hit"></div>
+        <div class="cw-hit-ring"></div>
+        <div class="cw-letter-float" id="cwLetter">–</div>
+        <div class="cw-pattern-float" id="cwPattern"></div>
+        <div class="cw-judge-float" id="cwJudge"></div>
+      </div>
+    </div>
+    <div class="cw-bar">
+      <button class="cw-btn" id="cwStart">开始</button>
+      <button class="cw-btn" id="cwDemo">示范</button>
+      <button class="cw-btn on" id="cwModeFollow">跟打</button>
+      <button class="cw-btn" id="cwModeListen">听抄</button>
+      <button class="cw-btn on" id="cwGuide">导音</button>
+      <label>速度 <input type="range" id="cwWpm" min="8" max="30" value="15"></label>
+      <span class="cw-hint">空格 / 按住画面 = 电键 · 圆点=点按 长条=按住</span>
+      <span class="cw-links">
+        <a href="https://github.com/hicaoc/NRL-ESP32" target="_blank" rel="noopener">GitHub 项目</a>
+        <a href="https://ota.nrlptt.com" target="_blank" rel="noopener">OTA 升级</a>
+      </span>
+    </div>
+    <div class="cw-bar">
+      <input type="text" id="cwText" class="cw-input" placeholder="输入文本和数字，如 SOS BG4ABC" maxlength="60">
+      <button class="cw-btn" id="cwTextGo">练习文本</button>
+      <button class="cw-btn" id="cwTextDemo">示范文本</button>
+      <button class="cw-btn" id="cwWav">保存 WAV</button>
+      <span class="cw-hint">字母间隔 3 嘀、单词间隔 7 嘀，速度跟随上方 WPM</span>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  var MORSE = {A:'.-',B:'-...',C:'-.-.',D:'-..',E:'.',F:'..-.',G:'--.',H:'....',I:'..',J:'.---',K:'-.-',L:'.-..',M:'--',N:'-.',O:'---',P:'.--.',Q:'--.-',R:'.-.',S:'...',T:'-',U:'..-',V:'...-',W:'.--',X:'-..-',Y:'-.--',Z:'--..','0':'-----','1':'.----','2':'..---','3':'...--','4':'....-','5':'.....','6':'-....','7':'--...','8':'---..','9':'----.'};
+  var LETTERS = 'KMRESNUAJTGWFHLOIXPCBZQYVD5293847160'.split('');
+  var $ = function (id) { return document.getElementById(id); };
+  var stage = $('cwStage'), plane = $('cwPlane'), letterEl = $('cwLetter'), judgeEl = $('cwJudge');
+  var patternEl = $('cwPattern');
+  var comboEl = $('cwCombo'), accEl = $('cwAcc'), wpmText = $('cwWpmText');
+
+  var wpm = 15, mode = 'follow', guideOn = true;
+  var playing = false, demo = false, notes = [], t0 = 0, raf = 0, endMs = 0;
+  var letter = '', pressed = false, pressMs = 0, holdNote = null;
+  var combo = 0, judged = 0, hits = 0, phase = 'idle', userPattern = '';
+  var lastLetter = '';
+  var customChars = null, customIdx = 0; // practice queue from the text input
+
+  function dit() { return 1200 / wpm; }
+  function pxPerMs() { return 96 / dit(); }
+  function now() { return performance.now() - t0; }
+
+  // ---- audio ----
+  var ac = null, gain = null;
+  function audio() {
+    if (!ac) {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      ac = new AC();
+      var osc = ac.createOscillator();
+      osc.frequency.value = 700;
+      gain = ac.createGain();
+      gain.gain.value = 0;
+      osc.connect(gain); gain.connect(ac.destination);
+      osc.start();
+    }
+    if (ac.state === 'suspended') ac.resume();
+  }
+  function tone(on) {
+    if (!ac) return;
+    gain.gain.setTargetAtTime(on ? 0.28 : 0, ac.currentTime, 0.004);
+  }
+  // Schedule one pattern playback starting at ms-from-now (guide / demo / listen).
+  function playPattern(pattern, delayMs) {
+    var d = dit(), t = ac.currentTime + delayMs / 1000;
+    for (var i = 0; i < pattern.length; i++) {
+      var dur = (pattern[i] === '-' ? 3 : 1) * d / 1000;
+      gain.gain.setValueAtTime(0.14, t);
+      gain.gain.setTargetAtTime(0, t + dur, 0.004);
+      t += dur + d / 1000;
+    }
+  }
+
+  // ---- song building ----
+  function buildNotes(ch) {
+    var d = dit(), t = 4 * d, out = [], pattern = MORSE[ch];
+    for (var i = 0; i < pattern.length; i++) {
+      var len = (pattern[i] === '-' ? 3 : 1) * d;
+      out.push({ t0: t, t1: t + len, el: pattern[i], state: 'wait', pressJudge: '', dom: null });
+      t += len + d;
+    }
+    endMs = t + 2 * d;
+    return out;
+  }
+  function clearNotes() {
+    for (var i = 0; i < notes.length; i++) if (notes[i].dom) notes[i].dom.remove();
+    notes = [];
+  }
+  function pickLetter() {
+    var ch;
+    do { ch = LETTERS[Math.floor(Math.random() * LETTERS.length)]; } while (ch === lastLetter);
+    lastLetter = ch;
+    return ch;
+  }
+  function sanitize(text) {
+    return text.toUpperCase().replace(/[^A-Z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
+  }
+
+  // Render the text as 700 Hz CW into a 16-bit mono WAV (8 kHz, 5 ms edges).
+  function exportWav(text) {
+    if (text === '') { judge('先输入文本', '#ff7b72'); return; }
+    var sr = 8000, d = 1.2 / wpm, ramp = Math.round(0.005 * sr), amp = 0.5;
+    var segs = [], t = 0.3;
+    var words = text.split(' ');
+    for (var wi = 0; wi < words.length; wi++) {
+      if (wi > 0) t += 7 * d;
+      var word = words[wi];
+      for (var ci = 0; ci < word.length; ci++) {
+        if (ci > 0) t += 3 * d;
+        var pat = MORSE[word[ci]];
+        if (!pat) continue;
+        for (var i = 0; i < pat.length; i++) {
+          if (i > 0) t += d;
+          var len = (pat[i] === '-' ? 3 : 1) * d;
+          segs.push([t, t + len]);
+          t += len;
+        }
+      }
+    }
+    var n = Math.ceil((t + 0.3) * sr), data = new Int16Array(n), s, a, b, j;
+    for (s = 0; s < segs.length; s++) {
+      a = Math.floor(segs[s][0] * sr); b = Math.floor(segs[s][1] * sr);
+      for (j = a; j < b; j++) {
+        var env = Math.min(1, (j - a) / ramp, (b - j) / ramp);
+        data[j] = Math.round(32767 * amp * env * Math.sin(2 * Math.PI * 700 * j / sr));
+      }
+    }
+    var buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    function ws(o, str) { for (var k = 0; k < str.length; k++) v.setUint8(o + k, str.charCodeAt(k)); }
+    ws(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); ws(8, 'WAVE'); ws(12, 'fmt ');
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true);
+    v.setUint16(34, 16, true); ws(36, 'data'); v.setUint32(40, n * 2, true);
+    new Int16Array(buf, 44).set(data);
+    var aEl = document.createElement('a');
+    aEl.href = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+    aEl.download = 'cw_' + text.replace(/ /g, '_') + '.wav';
+    aEl.click();
+    setTimeout(function () { URL.revokeObjectURL(aEl.href); }, 5000);
+    judge('WAV 已保存', '#7ee787');
+  }
+
+  function judge(text, color) {
+    judgeEl.textContent = text;
+    judgeEl.style.color = color;
+    judgeEl.style.opacity = 1;
+  }
+  // Latest-first practice log in the left panel (capped at 60 rows).
+  function hist(ch, kind, cls) {
+    var list = $('cwHist');
+    var row = document.createElement('div');
+    var b = document.createElement('b');
+    b.textContent = ch;
+    var s = document.createElement('span');
+    s.className = cls;
+    s.textContent = kind;
+    row.appendChild(b);
+    row.appendChild(s);
+    list.insertBefore(row, list.firstChild);
+    while (list.children.length > 60) list.lastChild.remove();
+  }
+  // Free keying outside a practice session: decode the pattern after a
+  // 3-dit pause and log the letter.
+  var freePattern = '', freeTimer = 0;
+  function freeDecode() {
+    if (freePattern === '') return;
+    var ch = '?';
+    for (var k in MORSE) {
+      if (Object.prototype.hasOwnProperty.call(MORSE, k) && MORSE[k] === freePattern) { ch = k; break; }
+    }
+    letterEl.textContent = ch;
+    hist(ch, freePattern.split('').join(' '), ch === '?' ? 'm' : 'g');
+    freePattern = '';
+  }
+  function stats() {
+    comboEl.textContent = combo;
+    accEl.textContent = judged > 0 ? Math.round(100 * hits / judged) + '%' : '–';
+  }
+  function finishLetter() {
+    phase = 'idle';
+    if (mode === 'listen' && !demo && MORSE[letter]) {
+      var ok = userPattern === MORSE[letter];
+      judged++; if (ok) { hits++; combo++; } else combo = 0;
+      judge(ok ? '正确 ' + letter : '错误 = ' + letter, ok ? '#7ee787' : '#ff7b72');
+      hist(letter, ok ? '正确' : '错误', ok ? 'g' : 'm');
+      letterEl.textContent = letter;
+      patternEl.textContent = MORSE[letter].split('').join(' ');
+    }
+    stats();
+    setTimeout(function () { if (playing) nextRound(); else letterEl.textContent = '–'; }, 900);
+  }
+  function nextRound() {
+    clearNotes();
+    userPattern = '';
+    holdNote = null;
+    t0 = performance.now(); // each round's note timeline starts from zero
+    if (customChars !== null) {
+      if (customIdx >= customChars.length) {
+        customChars = null;
+        letterEl.textContent = '✓';
+        patternEl.textContent = '';
+        judge('完成', '#7ee787');
+        setTimeout(function () { if (playing) stop(); }, 800);
+        return;
+      }
+      letter = customChars[customIdx++];
+      if (letter === ' ') {
+        // Word gap: a quiet 7-dit round with no notes.
+        letterEl.textContent = '·';
+        patternEl.textContent = '';
+        notes = [];
+        endMs = 7 * dit();
+        phase = 'play';
+        return;
+      }
+    } else {
+      letter = pickLetter();
+    }
+    letterEl.textContent = (mode === 'listen' && !demo) ? '?' : letter;
+    patternEl.textContent = (mode === 'listen' && !demo) ? '' : MORSE[letter].split('').join(' ');
+    notes = buildNotes(letter);
+    if (mode === 'follow' || demo) {
+      for (var i = 0; i < notes.length; i++) {
+        var n = notes[i], dom = document.createElement('div');
+        dom.className = 'cw-note ' + (n.el === '-' ? 'dah' : 'dit');
+        if (n.el === '-') dom.style.height = ((n.t1 - n.t0) * pxPerMs()) + 'px';
+        plane.appendChild(dom);
+        n.dom = dom;
+      }
+    }
+    phase = (mode === 'listen' && !demo) ? 'listen' : 'play';
+    if (guideOn || demo || phase === 'listen') playPattern(MORSE[letter], 4 * dit());
+    if (demo) for (var j = 0; j < notes.length; j++) notes[j].state = 'done';
+  }
+
+  // ---- judging ----
+  function rate(err, d) {
+    if (err <= 0.4 * d) return 'perfect';
+    if (err <= d) return 'good';
+    return 'miss';
+  }
+  function applyJudge(n, kind) {
+    n.state = kind;
+    judged++;
+    if (kind === 'miss') { combo = 0; judge('错过', '#ff7b72'); }
+    else {
+      hits++; combo++;
+      judge(kind === 'perfect' ? '完美' : '良好', kind === 'perfect' ? '#ffd166' : '#7ee787');
+    }
+    hist(letter, kind === 'perfect' ? '完美' : kind === 'good' ? '良好' : '错过',
+         kind === 'perfect' ? 'p' : kind === 'good' ? 'g' : 'm');
+    if (n.dom) n.dom.className += kind === 'miss' ? ' miss' : ' done';
+    stats();
+  }
+  function press(ms) {
+    if (pressed) return;
+    pressed = true; pressMs = ms;
+    stage.classList.add('cw-down');
+    tone(true);
+    if (phase !== 'play' || demo) return;
+    var d = dit(), best = null, err = 0;
+    for (var i = 0; i < notes.length; i++) {
+      var n = notes[i];
+      if (n.state !== 'wait') continue;
+      var e = Math.abs(ms - n.t0);
+      if (e <= d && (best === null || e < err)) { best = n; err = e; }
+    }
+    if (best === null) return;
+    if (best.el === '-') {
+      best.pressJudge = rate(err, d);
+      holdNote = best;
+    } else {
+      applyJudge(best, rate(err, d));
+    }
+  }
+  function release(ms) {
+    if (!pressed) return;
+    pressed = false;
+    stage.classList.remove('cw-down');
+    tone(false);
+    var d = dit();
+    if (phase === 'answer' && !demo) {
+      userPattern += (ms - pressMs >= 2 * d) ? '-' : '.';
+      return;
+    }
+    if (phase !== 'play') {
+      // Free keying (session not started or between rounds): classify and
+      // decode after a 3-dit pause instead of judging against notes.
+      freePattern += (ms - pressMs >= 2 * d) ? '-' : '.';
+      patternEl.textContent = freePattern.split('').join(' ');
+      clearTimeout(freeTimer);
+      freeTimer = setTimeout(freeDecode, 3 * d);
+      return;
+    }
+    if (holdNote !== null) {
+      var n = holdNote; holdNote = null;
+      var r1 = n.pressJudge === 'perfect' ? 2 : n.pressJudge === 'good' ? 1 : 0;
+      var r2kind = rate(Math.abs(ms - n.t1), d);
+      var r2 = r2kind === 'perfect' ? 2 : r2kind === 'good' ? 1 : 0;
+      applyJudge(n, (r1 + r2) >= 3 ? 'perfect' : (r1 + r2) >= 2 ? 'good' : 'miss');
+    }
+  }
+
+  // ---- main loop ----
+  function frame() {
+    if (!playing) return;
+    var ms = now(), p = pxPerMs(), i, n;
+    for (i = 0; i < notes.length; i++) {
+      n = notes[i];
+      if (n.dom) {
+        var bottom = 118 + (n.t0 - ms) * p;
+        n.dom.style.bottom = bottom + 'px';
+      }
+      if (phase === 'play' && !demo && n.state === 'wait' && ms > n.t1 + dit()) {
+        applyJudge(n, 'miss');
+        if (holdNote === n) holdNote = null;
+      }
+    }
+    if (phase === 'listen' && ms > endMs) { phase = 'answer'; judge('请发码', '#58a6ff'); }
+    else if (phase === 'answer' && ms > endMs + 8 * dit()) finishLetter();
+    else if (phase === 'play' && ms > endMs) {
+      var allDone = true;
+      for (i = 0; i < notes.length; i++) if (notes[i].state === 'wait') allDone = false;
+      if (allDone || demo) finishLetter();
+    }
+    raf = requestAnimationFrame(frame);
+  }
+
+  function start(isDemo) {
+    audio();
+    demo = isDemo;
+    playing = true;
+    $('cwStart').textContent = '停止';
+    combo = 0; judged = 0; hits = 0;
+    freePattern = '';
+    clearTimeout(freeTimer);
+    stats();
+    t0 = performance.now();
+    nextRound();
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(frame);
+  }
+  function stop() {
+    playing = false;
+    cancelAnimationFrame(raf);
+    tone(false);
+    clearNotes();
+    customChars = null;
+    letterEl.textContent = '–';
+    patternEl.textContent = '';
+    judgeEl.textContent = '';
+    $('cwStart').textContent = '开始';
+    stage.classList.remove('cw-down');
+    pressed = false; holdNote = null;
+  }
+
+  // ---- events ----
+  // Keep keyboard focus off the buttons: after any button click, Space must
+  // key CW instead of re-triggering the focused button.
+  $('cw-sim').addEventListener('click', function (e) {
+    if (e.target && e.target.tagName === 'BUTTON') e.target.blur();
+  });
+  $('cwTextGo').addEventListener('click', function () {
+    var t = sanitize($('cwText').value);
+    if (t === '') { judge('先输入文本', '#ff7b72'); return; }
+    if (playing) stop();
+    customChars = t.split('');
+    customIdx = 0;
+    start(false);
+  });
+  $('cwTextDemo').addEventListener('click', function () {
+    var t = sanitize($('cwText').value);
+    if (t === '') { judge('先输入文本', '#ff7b72'); return; }
+    if (playing) stop();
+    customChars = t.split('');
+    customIdx = 0;
+    start(true);
+  });
+  $('cwWav').addEventListener('click', function () {
+    exportWav(sanitize($('cwText').value));
+  });
+  $('cwHistClear').addEventListener('click', function () {
+    $('cwHist').textContent = '';
+  });
+  $('cwText').addEventListener('input', function () {
+    if (judgeEl.textContent === '先输入文本') judgeEl.textContent = '';
+  });
+  $('cwStart').addEventListener('click', function () { playing ? stop() : start(false); });
+  $('cwDemo').addEventListener('click', function () { playing ? stop() : start(true); });
+  $('cwModeFollow').addEventListener('click', function () {
+    mode = 'follow';
+    $('cwModeFollow').classList.add('on'); $('cwModeListen').classList.remove('on');
+  });
+  $('cwModeListen').addEventListener('click', function () {
+    mode = 'listen';
+    $('cwModeListen').classList.add('on'); $('cwModeFollow').classList.remove('on');
+  });
+  $('cwGuide').addEventListener('click', function () {
+    guideOn = !guideOn;
+    $('cwGuide').classList.toggle('on', guideOn);
+  });
+  $('cwWpm').addEventListener('input', function () {
+    wpm = parseInt(this.value, 10);
+    wpmText.textContent = wpm;
+  });
+  stage.addEventListener('pointerdown', function (e) { e.preventDefault(); audio(); press(now()); });
+  window.addEventListener('pointerup', function () { release(now()); });
+  stage.addEventListener('pointerleave', function () { release(now()); });
+  window.addEventListener('keydown', function (e) {
+    if (e.code !== 'Space' || e.repeat) return;
+    var tag = (e.target && e.target.tagName) || '';
+    if (tag === 'TEXTAREA') return;
+    if (tag === 'INPUT' && (!e.target.type || e.target.type === 'text')) return;
+    e.preventDefault();
+    audio();
+    press(now());
+  });
+  window.addEventListener('keyup', function (e) {
+    if (e.code !== 'Space') return;
+    release(now());
+  });
+})();
+</script>
+<h2 id="常见问题">常见问题</h2><ul><li><strong>嘀嗒分界在哪里？</strong> 直键按住时长 ≥ 2 个嘀时长判为嗒（随当前 WPM 自适应，15 WPM 时约 160 ms）</li><li><strong>键入多久算一个字符？</strong> 最后一个元素后停顿 3 个嘀时长（15 WPM 约 240 ms）自动定型</li><li><strong>TIM 分一直是 100？</strong> 只有同时含嘀和嗒的字符才评分，先练 K（<code>−·−</code>）、R（<code>·−·</code>）试试</li><li><strong>听抄出题太快？</strong> 开启自适应调速，或先让机器解码一段慢速 CW 把 WPM 学低</li><li><strong>练习数据能清零吗？</strong> 目前无单独清零命令；擦除 NVS 的 <code>cw</code> 命名空间即可重置全部进度</li></ul><footer>Generated from cw_guide.md · NRL ESP32 Radio Bridge</footer></article></main></div></body></html>
