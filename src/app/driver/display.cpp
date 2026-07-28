@@ -2010,8 +2010,7 @@ void buildCwMenu()
     lv_obj_set_width(title, kWidth - 8);
     lv_obj_set_pos(title, 4, 2);
 #endif
-    snprintf(line, sizeof(line), "CW  %u WPM  ACC %u%%", static_cast<unsigned>(cw.wpm),
-             static_cast<unsigned>(cw.accuracy_percent));
+    snprintf(line, sizeof(line), "CW  %u WPM", static_cast<unsigned>(cw.wpm));
     lv_label_set_text(title, line);
 
     lv_obj_t *rx = makeLabel(scr, &lv_font_montserrat_16, kColorCallIdle);
@@ -2057,12 +2056,12 @@ void buildCwMenu()
         } else {
             snprintf(feedback, sizeof(feedback), "%s", menuText("listen...", "听抄..."));
         }
-        snprintf(line, sizeof(line), "COPY Lv%u/%u %u%% %s%s",
-                 static_cast<unsigned>(cw.koch_unlocked), 36u,
+        snprintf(line, sizeof(line), "COPY %u/36 %u%% %s%s",
+                 static_cast<unsigned>(cw.koch_unlocked),
                  static_cast<unsigned>(cw.accuracy_percent), feedback,
                  cw.sending ? " TX..." : "");
     } else if (cw.practice_mode == CW_PRACTICE_TX) {
-        snprintf(line, sizeof(line), "TRAIN: SEND %c  %u%%/%u TIM %u%%%s", cw.practice_target,
+        snprintf(line, sizeof(line), "SEND %c %u%%/%u TIM%u%%%s", cw.practice_target,
                  static_cast<unsigned>(cw.accuracy_percent),
                  static_cast<unsigned>(cw.practice_attempts),
                  static_cast<unsigned>(cw.timing_percent), cw.sending ? " TX..." : "");
@@ -2109,7 +2108,7 @@ void buildCwMenu()
     lv_obj_add_event_cb(key, cwKeyReleased, LV_EVENT_RELEASED, nullptr);
     lv_obj_add_event_cb(key, cwKeyReleased, LV_EVENT_PRESS_LOST, nullptr);
     lv_obj_t *key_label = makeLabel(key, menuFont(&lv_font_montserrat_16), kColorCallIdle);
-    lv_label_set_text(key_label, menuText("KEY: TAP=DIT HOLD=DAH", "电键: 轻点=嘀 按住=嗒"));
+    lv_label_set_text(key_label, menuText("KEY: TAP=DIT HOLD=DAH", "电键: 轻点=DIT 按住=DAH"));
     lv_obj_center(key_label);
 #else
     menuFooter(scr, "VOL+=DAH VOL-=DIT  PTT SEND/HOLD EXIT");
