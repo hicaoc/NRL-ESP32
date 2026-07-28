@@ -1876,6 +1876,9 @@ void cwPracticeClicked(lv_event_t *)
     CW_SERVICE_SetPracticeMode(next);
 }
 void cwReplayClicked(lv_event_t *) { CW_SERVICE_ReplayTarget(); }
+// Touch exit for buttonless boards; the PTT long-press exit only works when
+// something drives the PTT pin.
+void cwExitClicked(lv_event_t *) { Display_CwExit(); }
 // Score view: per-letter accuracy grid with charset/adaptive toggles.
 bool s_cw_show_score = false;
 void cwScoreClicked(lv_event_t *) { s_cw_show_score = true; buildMenuUi(); }
@@ -1987,9 +1990,26 @@ void buildCwMenu()
     char line[128];
 
     lv_obj_t *title = makeLabel(scr, &lv_font_montserrat_16, kColorAccent);
-    lv_obj_set_width(title, kWidth - 8);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    // Buttonless board: the PTT long-press exit is unavailable, so the title
+    // row carries a touch EXIT button and the title shrinks to make room.
+    lv_obj_t *exit_btn = lv_button_create(scr);
+    lv_obj_set_pos(exit_btn, 5, 0);
+    lv_obj_set_size(exit_btn, 48, 24);
+    lv_obj_set_style_radius(exit_btn, 6, 0);
+    lv_obj_set_style_bg_color(exit_btn, lv_color_hex(0x10212A), 0);
+    lv_obj_set_style_bg_color(exit_btn, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(exit_btn, cwExitClicked, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *exit_label = makeLabel(exit_btn, &lv_font_montserrat_14, kColorCallIdle);
+    lv_label_set_text(exit_label, menuText("EXIT", "退出"));
+    lv_obj_center(exit_label);
+    lv_obj_set_width(title, kWidth - 64);
+    lv_obj_set_pos(title, 56, 2);
+#else
+    lv_obj_set_width(title, kWidth - 8);
     lv_obj_set_pos(title, 4, 2);
+#endif
     snprintf(line, sizeof(line), "CW  %u WPM  ACC %u%%", static_cast<unsigned>(cw.wpm),
              static_cast<unsigned>(cw.accuracy_percent));
     lv_label_set_text(title, line);
