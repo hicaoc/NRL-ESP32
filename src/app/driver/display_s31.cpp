@@ -166,11 +166,10 @@ enum class Action : intptr_t {
     InstallOta,
     Aprs,
     Cw,
-    CwDit,
-    CwDah,
     CwDelete,
     CwSend,
     CwPractice,
+    CwMode,
     Ctcss,
     Mdc,
     Dtmf,
@@ -403,6 +402,9 @@ lv_obj_t *s_lbl_cw_tx = nullptr;
 lv_obj_t *s_lbl_cw_tx_code = nullptr;
 lv_obj_t *s_lbl_cw_metrics = nullptr;
 uint32_t s_cw_revision = UINT32_MAX;
+// CW touch input mode on the key zone(s): false = straight key (tap/hold),
+// true = single-paddle keyer (hold a zone for an automatic element stream).
+bool s_cw_paddle_mode = false;
 lv_obj_t *s_btn_video_tx_label = nullptr;
 CoverBitmap s_video_bmp = {};
 lv_image_dsc_t s_video_dsc = {};
@@ -1088,8 +1090,6 @@ lv_obj_t *button(lv_obj_t *parent, int x, int y, int w, int h, const char *text,
     if (id == Action::VolumeDown || id == Action::VolumeUp) {
         lv_obj_add_event_cb(btn, volumeEvent, LV_EVENT_PRESSED, user_data);
         lv_obj_add_event_cb(btn, volumeEvent, LV_EVENT_LONG_PRESSED_REPEAT, user_data);
-    } else if (id == Action::CwDit || id == Action::CwDah) {
-        lv_obj_add_event_cb(btn, action, LV_EVENT_PRESSED, user_data);
     } else {
         lv_obj_add_event_cb(btn, action, LV_EVENT_CLICKED, user_data);
     }
@@ -1711,16 +1711,39 @@ void refreshCwPage()
     snprintf(text, sizeof(text), "%s%s", cw.tx_code, cw.current_pattern);
     setLabelTextIfChanged(s_lbl_cw_tx_code, text[0] != '\0' ? text : "-");
     if (cw.practice_enabled) {
-        snprintf(text, sizeof(text), "TRAIN: key %c   %u WPM   accuracy %u%% (%u)%s",
+        snprintf(text, sizeof(text), "TRAIN: key %c   %u WPM   accuracy %u%% (%u)   timing %u%%%s",
                  cw.practice_target, static_cast<unsigned>(cw.wpm),
                  static_cast<unsigned>(cw.accuracy_percent),
-                 static_cast<unsigned>(cw.practice_attempts), cw.sending ? "   SENDING" : "");
+                 static_cast<unsigned>(cw.practice_attempts),
+                 static_cast<unsigned>(cw.timing_percent), cw.sending ? "   SENDING" : "");
     } else {
         snprintf(text, sizeof(text), "%u WPM   accuracy %u%%%s",
                  static_cast<unsigned>(cw.wpm), static_cast<unsigned>(cw.accuracy_percent),
                  cw.sending ? "   SENDING" : "");
     }
     setLabelTextIfChanged(s_lbl_cw_metrics, text);
+}
+
+// Key zone events: straight-key mode measures press duration (tap=dit,
+// hold=dah); paddle mode runs the keyer stream while a zone is held.
+// PRESS_LOST counts as release so the sidetone can never stick on.
+void cwZonePressed(lv_event_t *e)
+{
+    if (s_cw_paddle_mode) {
+        CW_SERVICE_PaddleStart(static_cast<CwElement>(
+            reinterpret_cast<intptr_t>(lv_event_get_user_data(e))));
+    } else {
+        CW_SERVICE_KeyDown();
+    }
+}
+
+void cwZoneReleased(lv_event_t *)
+{
+    if (s_cw_paddle_mode) {
+        CW_SERVICE_PaddleStop();
+    } else {
+        CW_SERVICE_KeyUp();
+    }
 }
 
 void buildCw()
@@ -1730,7 +1753,7 @@ void buildCw()
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
 
-    lv_obj_t *rx_box = panel(scr, 24, 78, 752, 112);
+    lv_obj_t *rx_box = panel(scr, 24, 76, 752, 100);
     fieldLabel(rx_box, 0, 0, "RECEIVE / 接收");
     s_lbl_cw_rx = label(rx_box, &lv_font_montserrat_28, kColorText);
     lv_obj_set_pos(s_lbl_cw_rx, 0, 24);
@@ -1741,7 +1764,7 @@ void buildCw()
     lv_obj_set_width(s_lbl_cw_rx_code, 720);
     lv_label_set_long_mode(s_lbl_cw_rx_code, LV_LABEL_LONG_CLIP);
 
-    lv_obj_t *tx_box = panel(scr, 24, 202, 752, 150);
+    lv_obj_t *tx_box = panel(scr, 24, 186, 752, 144);
     fieldLabel(tx_box, 0, 0, "TRANSMIT / 发射");
     s_lbl_cw_tx = label(tx_box, &lv_font_montserrat_28, kColorText);
     lv_obj_set_pos(s_lbl_cw_tx, 0, 24);
@@ -1755,14 +1778,39 @@ void buildCw()
     lv_obj_set_pos(s_lbl_cw_metrics, 0, 100);
     lv_obj_set_width(s_lbl_cw_metrics, 720);
 
-    button(scr, 14, 372, 105, 76, "Back", Action::Apps);
-    button(scr, 127, 372, 130, 76, ". DIT", Action::CwDit);
-    button(scr, 265, 372, 130, 76, "- DAH", Action::CwDah);
-    button(scr, 403, 372, 105, 76, "Delete", Action::CwDelete);
-    button(scr, 516, 372, 130, 76, "Send", Action::CwSend);
+    button(scr, 14, 342, 100, 56, "Back", Action::Apps);
+    button(scr, 122, 342, 100, 56, "Delete", Action::CwDelete);
+    button(scr, 230, 342, 100, 56, "Send", Action::CwSend);
     CwSnapshot cw{};
     CW_SERVICE_GetSnapshot(&cw);
-    button(scr, 654, 372, 132, 76, cw.practice_enabled ? "Train ON" : "Train", Action::CwPractice);
+    button(scr, 338, 342, 110, 56, cw.practice_enabled ? "Train ON" : "Train",
+           Action::CwPractice);
+    button(scr, 456, 342, 120, 56, s_cw_paddle_mode ? "Mode:PDL" : "Mode:KEY",
+           Action::CwMode);
+
+    auto cw_zone = [scr](int x, int w, const char *text, CwElement element) {
+        lv_obj_t *zone = lv_button_create(scr);
+        lv_obj_set_pos(zone, x, 406);
+        lv_obj_set_size(zone, w, 66);
+        lv_obj_set_style_radius(zone, 8, 0);
+        lv_obj_set_style_bg_color(zone, lv_color_hex(kColorPanel2), 0);
+        lv_obj_set_style_bg_color(zone, lv_color_hex(0x1D4E63), LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(zone, lv_color_hex(kColorBorder), 0);
+        lv_obj_set_style_border_width(zone, 1, 0);
+        lv_obj_add_event_cb(zone, cwZonePressed, LV_EVENT_PRESSED,
+                            reinterpret_cast<void *>(static_cast<intptr_t>(element)));
+        lv_obj_add_event_cb(zone, cwZoneReleased, LV_EVENT_RELEASED, nullptr);
+        lv_obj_add_event_cb(zone, cwZoneReleased, LV_EVENT_PRESS_LOST, nullptr);
+        lv_obj_t *txt = label(zone, &lv_font_montserrat_28, kColorText);
+        lv_obj_center(txt);
+        lv_label_set_text(txt, text);
+    };
+    if (s_cw_paddle_mode) {
+        cw_zone(24, 370, ". DIT  (HOLD)", CW_ELEMENT_DIT);
+        cw_zone(406, 370, "- DAH  (HOLD)", CW_ELEMENT_DAH);
+    } else {
+        cw_zone(24, 752, "KEY: TAP = DIT   HOLD = DAH", CW_ELEMENT_DIT);
+    }
     refreshCwPage();
 }
 
@@ -4317,10 +4365,9 @@ void action(lv_event_t *event)
         case Action::Ai: buildAi(); break;
         case Action::Aprs: buildAprs(); break;
         case Action::Cw: buildCw(); break;
-        case Action::CwDit: CW_SERVICE_InputElement(CW_ELEMENT_DIT); break;
-        case Action::CwDah: CW_SERVICE_InputElement(CW_ELEMENT_DAH); break;
         case Action::CwDelete: CW_SERVICE_Delete(); break;
         case Action::CwSend: (void)CW_SERVICE_Send(); break;
+        case Action::CwMode: s_cw_paddle_mode = !s_cw_paddle_mode; buildCw(); break;
         case Action::CwPractice: {
             CwSnapshot cw{};
             CW_SERVICE_GetSnapshot(&cw);

@@ -233,6 +233,10 @@ volatile bool s_menu_open_requested = false;
 volatile int s_menu_nav_pending = 0;
 volatile unsigned s_menu_confirm_pending = 0u;
 volatile bool s_cw_exit_requested = false;
+// Set while the bi4umd straight-key touch area is held; the CW page skips its
+// revision-triggered rebuild during that time so the pressed widget is not
+// destroyed under the finger.
+bool s_cw_key_down = false;
 MenuPage s_menu_page = MenuPage::Main;
 bool s_menu_chinese = true;
 size_t s_menu_index = 0u;
@@ -1845,8 +1849,20 @@ void buildProtocolMenu(bool mdc)
 }
 
 #if NRL_BOARD == NRL_BOARD_BI4UMD
-void cwDitClicked(lv_event_t *) { CW_SERVICE_InputElement(CW_ELEMENT_DIT); }
-void cwDahClicked(lv_event_t *) { CW_SERVICE_InputElement(CW_ELEMENT_DAH); }
+// Straight-key touch input: the large key area measures press duration; the
+// service classifies dit/dah and gates the sidetone. PRESS_LOST is treated as
+// release so a UI rebuild can never leave the tone stuck on.
+void cwKeyPressed(lv_event_t *)
+{
+    s_cw_key_down = true;
+    CW_SERVICE_KeyDown();
+}
+void cwKeyReleased(lv_event_t *)
+{
+    if (!s_cw_key_down) return;
+    s_cw_key_down = false;
+    CW_SERVICE_KeyUp();
+}
 void cwDeleteClicked(lv_event_t *) { CW_SERVICE_Delete(); }
 void cwSendClicked(lv_event_t *) { (void)CW_SERVICE_Send(); }
 void cwPracticeClicked(lv_event_t *)
@@ -1908,33 +1924,48 @@ void buildCwMenu()
     lv_obj_set_style_text_align(score, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_pos(score, 4, 119);
     if (cw.practice_enabled) {
-        snprintf(line, sizeof(line), "TRAIN: SEND %c  %u%%/%u%s", cw.practice_target,
+        snprintf(line, sizeof(line), "TRAIN: SEND %c  %u%%/%u TIM %u%%%s", cw.practice_target,
                  static_cast<unsigned>(cw.accuracy_percent),
-                 static_cast<unsigned>(cw.practice_attempts), cw.sending ? " TX..." : "");
+                 static_cast<unsigned>(cw.practice_attempts),
+                 static_cast<unsigned>(cw.timing_percent), cw.sending ? " TX..." : "");
     } else {
         snprintf(line, sizeof(line), "TRAIN OFF%s", cw.sending ? "  TX..." : "");
     }
     lv_label_set_text(score, line);
 
 #if NRL_BOARD == NRL_BOARD_BI4UMD
-    auto cw_button = [scr](int x, int y, int w, const char *text,
-                           lv_event_cb_t callback, bool on_press = false) {
+    auto cw_button = [scr](int x, int y, int w, int h, const char *text,
+                           lv_event_cb_t callback) {
         lv_obj_t *button = lv_button_create(scr);
         lv_obj_set_pos(button, x, y);
-        lv_obj_set_size(button, w, 42);
+        lv_obj_set_size(button, w, h);
         lv_obj_set_style_radius(button, 6, 0);
         lv_obj_set_style_bg_color(button, lv_color_hex(0x10212A), 0);
         lv_obj_set_style_bg_color(button, lv_color_hex(0x087A82), LV_STATE_PRESSED);
-        lv_obj_add_event_cb(button, callback, on_press ? LV_EVENT_PRESSED : LV_EVENT_CLICKED, nullptr);
+        lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
         lv_obj_t *label = makeLabel(button, &lv_font_montserrat_16, kColorCallIdle);
         lv_label_set_text(label, text);
         lv_obj_center(label);
     };
-    cw_button(5, 146, 54, ". DIT", cwDitClicked, true);
-    cw_button(64, 146, 54, "- DAH", cwDahClicked, true);
-    cw_button(123, 146, 54, "DEL", cwDeleteClicked);
-    cw_button(182, 146, 54, "SEND", cwSendClicked);
-    cw_button(64, 196, 112, cw.practice_enabled ? "TRAIN ON" : "TRAIN OFF", cwPracticeClicked);
+    cw_button(5, 140, 60, 32, "DEL", cwDeleteClicked);
+    cw_button(70, 140, 60, 32, "SEND", cwSendClicked);
+    cw_button(135, 140, 110, 32, cw.practice_enabled ? "TRAIN ON" : "TRAIN OFF",
+              cwPracticeClicked);
+
+    // Straight key: hold for dah, tap for dit. The whole bottom strip is the
+    // contact so rhythm keying does not depend on hitting a small button.
+    lv_obj_t *key = lv_button_create(scr);
+    lv_obj_set_pos(key, 5, 178);
+    lv_obj_set_size(key, kWidth - 10, 58);
+    lv_obj_set_style_radius(key, 8, 0);
+    lv_obj_set_style_bg_color(key, lv_color_hex(0x10212A), 0);
+    lv_obj_set_style_bg_color(key, lv_color_hex(0xB8860B), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(key, cwKeyPressed, LV_EVENT_PRESSED, nullptr);
+    lv_obj_add_event_cb(key, cwKeyReleased, LV_EVENT_RELEASED, nullptr);
+    lv_obj_add_event_cb(key, cwKeyReleased, LV_EVENT_PRESS_LOST, nullptr);
+    lv_obj_t *key_label = makeLabel(key, &lv_font_montserrat_16, kColorCallIdle);
+    lv_label_set_text(key_label, menuText("KEY: TAP=DIT HOLD=DAH", "电键: 轻点=嘀 按住=嗒"));
+    lv_obj_center(key_label);
 #else
     menuFooter(scr, "VOL+=DAH VOL-=DIT  PTT SEND/HOLD EXIT");
 #endif
@@ -3678,7 +3709,9 @@ void processMenuInput(uint32_t now)
         static uint32_t shown_cw_revision = UINT32_MAX;
         CwSnapshot cw{};
         CW_SERVICE_GetSnapshot(&cw);
-        if (cw.revision != shown_cw_revision) {
+        // Never rebuild under a held straight key: the pressed widget would be
+        // destroyed mid-press and the release event lost.
+        if (!s_cw_key_down && cw.revision != shown_cw_revision) {
             shown_cw_revision = cw.revision;
             buildMenuUi();
         }

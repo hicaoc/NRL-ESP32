@@ -18,6 +18,7 @@ struct CwSnapshot {
     char practice_target;
     uint16_t wpm;
     uint8_t accuracy_percent;
+    uint8_t timing_percent;   // key-timing quality (dit:dah ratio), practice mode
     uint16_t practice_attempts;
     uint32_t revision;
     bool practice_enabled;
@@ -28,6 +29,19 @@ void CW_SERVICE_Init(void);
 void CW_SERVICE_RecordReceived(CwSource source, char character,
                                const char *pattern, uint16_t wpm);
 void CW_SERVICE_InputElement(CwElement element);
+// Straight-key input for touch UIs: KeyDown starts the sidetone immediately,
+// KeyUp stops it and classifies the held duration into a dit/dah element
+// (threshold follows the current WPM). Durations feed the practice-mode
+// timing score. KeyUp without a preceding KeyDown is ignored.
+void CW_SERVICE_KeyDown(void);
+void CW_SERVICE_KeyUp(void);
+// Single-paddle keyer for touch UIs: while held, the service emits a stream
+// of the given element with standard 1:3:1 WPM timing and sidetone, like an
+// electronic keyer. Starting with the other element mid-stream switches it
+// (finger slide); PaddleStop finishes the current element plus space, then
+// stops. Keyer elements score as ideal timing in practice mode.
+void CW_SERVICE_PaddleStart(CwElement element);
+void CW_SERVICE_PaddleStop(void);
 void CW_SERVICE_FinishCharacter(void);
 void CW_SERVICE_Delete(void);
 bool CW_SERVICE_Send(void);
