@@ -112,6 +112,7 @@ enum class Page : uint8_t {
     About,
     Aprs,
     Cw,
+    CwScore,
 };
 
 enum class Action : intptr_t {
@@ -171,6 +172,9 @@ enum class Action : intptr_t {
     CwPractice,
     CwMode,
     CwReplay,
+    CwScore,
+    CwScoreSet,
+    CwScoreAdapt,
     Ctcss,
     Mdc,
     Dtmf,
@@ -1805,6 +1809,7 @@ void buildCw()
     button(scr, 456, 342, 120, 56, s_cw_paddle_mode ? "Mode:PDL" : "Mode:KEY",
            Action::CwMode);
     button(scr, 584, 342, 100, 56, "Replay", Action::CwReplay);
+    button(scr, 692, 342, 94, 56, "Score", Action::CwScore);
 
     auto cw_zone = [scr](int x, int w, const char *text, CwElement element) {
         lv_obj_t *zone = lv_button_create(scr);
@@ -1830,6 +1835,80 @@ void buildCw()
         cw_zone(24, 752, "KEY: TAP = DIT   HOLD = DAH", CW_ELEMENT_DIT);
     }
     refreshCwPage();
+}
+
+// Per-letter practice score grid: cell color encodes copy accuracy (green
+// >=90%, amber >=70%, red below, dim = untried); charset and adaptive-speed
+// toggles. Static page -- reopen to refresh.
+void buildCwScore()
+{
+    clearScreen();
+    s_page = Page::CwScore;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+
+    static const char *const kSetNames[] = {"KOCH", "LETTERS", "DIGITS", "CUSTOM"};
+    CwSnapshot cw{};
+    CW_SERVICE_GetSnapshot(&cw);
+    const uint8_t charset = cw.charset <= CW_CHARSET_CUSTOM ? cw.charset : 0u;
+
+    CwLetterStat stats[36];
+    const size_t count = CW_SERVICE_GetLetterStats(stats, 36u);
+    uint32_t total_attempts = 0u;
+    uint32_t total_correct = 0u;
+    for (size_t i = 0u; i < count; ++i) {
+        total_attempts += stats[i].attempts;
+        total_correct += stats[i].correct;
+    }
+
+    lv_obj_t *summary = label(scr, &lv_font_montserrat_20, kColorText);
+    lv_obj_set_pos(summary, 24, 56);
+    char line[160];
+    snprintf(line, sizeof(line),
+             "CW SCORE  %s Lv%u/36   WPM %u%s   ACC %u%% (%u)   TIM %u%%",
+             kSetNames[charset], static_cast<unsigned>(cw.koch_unlocked),
+             static_cast<unsigned>(cw.wpm), cw.adaptive_wpm ? "(A)" : "",
+             total_attempts > 0u ? static_cast<unsigned>(100u * total_correct / total_attempts)
+                                 : 100u,
+             static_cast<unsigned>(total_attempts),
+             static_cast<unsigned>(cw.timing_percent));
+    lv_label_set_text(summary, line);
+
+    for (size_t i = 0u; i < count; ++i) {
+        const int col = static_cast<int>(i % 9u);
+        const int row = static_cast<int>(i / 9u);
+        lv_obj_t *cell = lv_obj_create(scr);
+        lv_obj_set_pos(cell, 24 + col * 84, 92 + row * 72);
+        lv_obj_set_size(cell, 80, 64);
+        lv_obj_set_style_radius(cell, 6, 0);
+        lv_obj_set_style_border_width(cell, 0, 0);
+        lv_obj_set_style_pad_all(cell, 0, 0);
+        lv_obj_remove_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
+        uint32_t color = 0x20262E; // untried
+        char acc_text[12] = "-";
+        if (stats[i].attempts > 0u) {
+            const unsigned acc = (100u * stats[i].correct) / stats[i].attempts;
+            color = acc >= 90u ? 0x1E6B34 : acc >= 70u ? 0x8A6D1A : 0x7A2A2A;
+            snprintf(acc_text, sizeof(acc_text), "%u%%", acc);
+        }
+        lv_obj_set_style_bg_color(cell, lv_color_hex(color), 0);
+        lv_obj_set_style_bg_opa(cell, LV_OPA_COVER, 0);
+        lv_obj_t *letter = label(cell, &lv_font_montserrat_28, kColorText);
+        lv_obj_align(letter, LV_ALIGN_TOP_MID, 0, 2);
+        char letter_text[2] = {stats[i].letter, '\0'};
+        lv_label_set_text(letter, letter_text);
+        lv_obj_t *acc = label(cell, &lv_font_montserrat_16, kColorSub);
+        lv_obj_align(acc, LV_ALIGN_BOTTOM_MID, 0, -4);
+        lv_label_set_text(acc, acc_text);
+    }
+
+    char set_label[24];
+    char adapt_label[24];
+    snprintf(set_label, sizeof(set_label), "Set: %s", kSetNames[charset]);
+    snprintf(adapt_label, sizeof(adapt_label), "Adaptive: %s", cw.adaptive_wpm ? "ON" : "OFF");
+    button(scr, 24, 406, 150, 56, set_label, Action::CwScoreSet);
+    button(scr, 186, 406, 170, 56, adapt_label, Action::CwScoreAdapt);
+    button(scr, 652, 406, 124, 56, "Back", Action::Cw);
 }
 
 void buildConfig()
@@ -4398,6 +4477,25 @@ void action(lv_event_t *event)
             break;
         }
         case Action::CwReplay: CW_SERVICE_ReplayTarget(); break;
+        case Action::CwScore: buildCwScore(); break;
+        case Action::CwScoreSet: {
+            CwSnapshot cw{};
+            CW_SERVICE_GetSnapshot(&cw);
+            const CwCharset next =
+                cw.charset == CW_CHARSET_KOCH ? CW_CHARSET_LETTERS :
+                cw.charset == CW_CHARSET_LETTERS ? CW_CHARSET_DIGITS :
+                cw.charset == CW_CHARSET_DIGITS ? CW_CHARSET_CUSTOM : CW_CHARSET_KOCH;
+            CW_SERVICE_SetCharset(next, nullptr);
+            buildCwScore();
+            break;
+        }
+        case Action::CwScoreAdapt: {
+            CwSnapshot cw{};
+            CW_SERVICE_GetSnapshot(&cw);
+            CW_SERVICE_SetAdaptiveWpm(!cw.adaptive_wpm);
+            buildCwScore();
+            break;
+        }
         case Action::About: buildAbout(); break;
         case Action::SaveOtaUrl: (void)saveOtaUrl(true); break;
         case Action::CheckOta: checkOtaFromPage(); break;
@@ -5301,6 +5399,7 @@ void rebuildCurrentPage()
         case Page::About: buildAbout(); break;
         case Page::Aprs: buildAprs(); break;
         case Page::Cw: buildCw(); break;
+        case Page::CwScore: buildCwScore(); break;
     }
     s_last_refresh_ms = 0;
 }

@@ -9,6 +9,17 @@ enum CwElement : uint8_t { CW_ELEMENT_DIT = 0, CW_ELEMENT_DAH = 1 };
 // Practice modes: TX shows a letter to key back; RX plays a letter (from the
 // Koch-unlocked set) that must be copied and keyed back as the answer.
 enum CwPracticeMode : uint8_t { CW_PRACTICE_OFF = 0, CW_PRACTICE_TX = 1, CW_PRACTICE_RX = 2 };
+// Practice character sets: KOCH follows the persistent unlock progression;
+// LETTERS/DIGITS/CUSTOM make their whole set available immediately. CUSTOM is
+// edited over AT (AT+CWSET=CUSTOM:...).
+enum CwCharset : uint8_t { CW_CHARSET_KOCH = 0, CW_CHARSET_LETTERS = 1,
+                           CW_CHARSET_DIGITS = 2, CW_CHARSET_CUSTOM = 3 };
+
+struct CwLetterStat {
+    char letter;
+    uint16_t attempts;
+    uint16_t correct;
+};
 
 struct CwSnapshot {
     char rx_text[49];
@@ -24,6 +35,8 @@ struct CwSnapshot {
     uint8_t timing_percent;   // key-timing quality (dit:dah ratio), practice mode
     uint8_t practice_mode;    // CwPracticeMode
     uint8_t koch_unlocked;    // letters available in practice (2..36)
+    uint8_t charset;          // CwCharset
+    bool adaptive_wpm;        // practice speed follows answer accuracy
     bool copy_awaiting;       // RX: target played, waiting for the keyed answer
     char copy_revealed;       // RX: previous target revealed as feedback ('\0' = none)
     bool copy_last_correct;   // RX: previous answer result
@@ -58,4 +71,12 @@ void CW_SERVICE_SetPractice(bool enabled);   // legacy toggle: maps to TX / OFF
 void CW_SERVICE_SetPracticeMode(CwPracticeMode mode);
 // RX practice: play the current hidden target again (no-op outside RX).
 void CW_SERVICE_ReplayTarget(void);
+// Practice character set. CUSTOM copies and validates `custom` (A-Z/0-9 only,
+// deduplicated); nullptr keeps the previously stored custom set. Persists.
+void CW_SERVICE_SetCharset(CwCharset charset, const char *custom);
+void CW_SERVICE_SetAdaptiveWpm(bool enabled);
+// Per-letter practice stats in Koch order; returns entries written (<=36).
+size_t CW_SERVICE_GetLetterStats(CwLetterStat *out, size_t capacity);
+// The active custom set (empty string when unset).
+void CW_SERVICE_GetCustomCharset(char *out, size_t capacity);
 void CW_SERVICE_GetSnapshot(CwSnapshot *out);

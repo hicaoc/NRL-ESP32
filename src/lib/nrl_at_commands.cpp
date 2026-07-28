@@ -23,6 +23,7 @@
 #include "services/ota_service.h"
 #include "services/storage_service.h"
 #include "services/signaling_service.h"
+#include "services/cw_service.h"
 #include "driver/sci_serial.h"
 #include "app/main_loop_profile.h"
 
@@ -1634,6 +1635,62 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         }
         appendKeyValueLine(result->payload, sizeof(result->payload),
                            &result->payload_size, entry.command, enabled ? "ON" : "OFF");
+        return;
+    }
+
+    // CW practice configuration: character set (KOCH / LETTERS / DIGITS /
+    // CUSTOM:...) and adaptive speed. Values persist in NVS.
+    if (stringEqualsIgnoreCase(command.command, "CWSET")) {
+        if (!is_query) {
+            CwCharset charset = CW_CHARSET_KOCH;
+            const char *custom = nullptr;
+            bool valid = true;
+            if (stringEqualsIgnoreCase(command.value, "KOCH")) {
+                charset = CW_CHARSET_KOCH;
+            } else if (stringEqualsIgnoreCase(command.value, "LETTERS")) {
+                charset = CW_CHARSET_LETTERS;
+            } else if (stringEqualsIgnoreCase(command.value, "DIGITS")) {
+                charset = CW_CHARSET_DIGITS;
+            } else if (strncasecmp(command.value, "CUSTOM", 6u) == 0) {
+                charset = CW_CHARSET_CUSTOM;
+                custom = command.value[6] == ':' ? command.value + 7 : nullptr;
+            } else {
+                valid = false;
+            }
+            if (!valid) {
+                appendKeyValueLine(result->payload, sizeof(result->payload),
+                                   &result->payload_size, "ERR", "CWSET");
+                return;
+            }
+            CW_SERVICE_SetCharset(charset, custom);
+        }
+        static const char *const kCharsetNames[] = {"KOCH", "LETTERS", "DIGITS", "CUSTOM"};
+        CwSnapshot cw{};
+        CW_SERVICE_GetSnapshot(&cw);
+        char custom[40];
+        CW_SERVICE_GetCustomCharset(custom, sizeof(custom));
+        char status[128];
+        snprintf(status, sizeof(status), "%s,LV=%u,WPM=%u,ADAPT=%s,CUSTOM=%s",
+                 kCharsetNames[cw.charset <= CW_CHARSET_CUSTOM ? cw.charset : 0u],
+                 static_cast<unsigned>(cw.koch_unlocked),
+                 static_cast<unsigned>(cw.wpm),
+                 cw.adaptive_wpm ? "ON" : "OFF", custom[0] != '\0' ? custom : "-");
+        appendKeyValueLine(result->payload, sizeof(result->payload),
+                           &result->payload_size, "CWSET", status);
+        return;
+    }
+    if (stringEqualsIgnoreCase(command.command, "CWADAPT")) {
+        CwSnapshot cw{};
+        CW_SERVICE_GetSnapshot(&cw);
+        bool enabled = cw.adaptive_wpm;
+        if (!is_query && !parseBoolValue(command.value, &enabled)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload),
+                               &result->payload_size, "ERR", "CWADAPT");
+            return;
+        }
+        if (!is_query) CW_SERVICE_SetAdaptiveWpm(enabled);
+        appendKeyValueLine(result->payload, sizeof(result->payload),
+                           &result->payload_size, "CWADAPT", enabled ? "ON" : "OFF");
         return;
     }
 

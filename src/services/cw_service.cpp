@@ -12,6 +12,8 @@
 #include <nvs.h>
 
 #include <math.h>
+#include <ctype.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -55,6 +57,20 @@ char s_copy_target = '\0';    // hidden RX answer
 char s_play_pending = '\0';   // letter the worker should sound out
 bool s_save_pending = false;  // worker flushes Koch stats to NVS
 unsigned s_answers_since_save = 0u;
+// Practice charset: targets are drawn from the active set. KOCH tracks the
+// persistent unlock progression; the other sets are fully available at once.
+uint8_t s_charset = CW_CHARSET_KOCH;
+char s_custom_set[kKochCount + 1u] = {};
+char s_active_set[kKochCount + 1u] = {};
+size_t s_active_count = 0u;
+// Adaptive practice speed: after every 5 answers, >=4 correct nudges WPM up,
+// <=2 correct nudges it down (clamped); persisted with the Koch stats.
+bool s_adaptive_wpm = false;
+unsigned s_adapt_window_correct = 0u;
+unsigned s_adapt_window_count = 0u;
+uint16_t s_persisted_wpm = 0u; // loaded from NVS, applied in Init
+constexpr uint16_t kPracticeWpmMin = 10u;
+constexpr uint16_t kPracticeWpmMax = 30u;
 // Straight-key state (touch UI): key-down timestamp and per-element held
 // durations for the current character, used by the practice timing score.
 bool s_key_down = false;
@@ -69,6 +85,7 @@ int16_t s_silence_pcm[kChunkSamples] = {};
 char s_send_text[sizeof(s_snapshot.tx_text)] = {};
 
 void finishCharacterLocked();
+void rebuildActiveSetLocked();
 
 // Append one keyed element to the current pattern (caller holds s_lock).
 // Shared by the button-style InputElement and the straight-key KeyUp path.
@@ -91,17 +108,81 @@ void inputElementLocked(const CwElement element, const uint32_t now)
 // the previous target. Caller holds s_lock.
 char pickTargetLocked()
 {
-    size_t index = esp_random() % s_koch_unlocked;
-    if (s_koch_unlocked > 1u && kKochOrder[index] == s_snapshot.practice_target) {
-        index = (index + 1u) % s_koch_unlocked;
+    if (s_active_count == 0u) rebuildActiveSetLocked();
+    size_t index = esp_random() % s_active_count;
+    if (s_active_count > 1u && s_active_set[index] == s_snapshot.practice_target) {
+        index = (index + 1u) % s_active_count;
     }
-    return kKochOrder[index];
+    return s_active_set[index];
+}
+
+// The set targets are drawn from, per the charset selection. Caller holds s_lock.
+void rebuildActiveSetLocked()
+{
+    size_t n = 0u;
+    switch (s_charset) {
+        case CW_CHARSET_LETTERS:
+            for (char c = 'A'; c <= 'Z'; ++c) s_active_set[n++] = c;
+            break;
+        case CW_CHARSET_DIGITS:
+            for (char c = '0'; c <= '9'; ++c) s_active_set[n++] = c;
+            break;
+        case CW_CHARSET_CUSTOM:
+            if (s_custom_set[0] != '\0') {
+                for (const char *p = s_custom_set; *p != '\0'; ++p) s_active_set[n++] = *p;
+                break;
+            }
+            // No custom set stored yet: use the Koch progression instead.
+            [[fallthrough]];
+        case CW_CHARSET_KOCH:
+        default:
+            for (size_t i = 0u; i < s_koch_unlocked; ++i) s_active_set[n++] = kKochOrder[i];
+            break;
+    }
+    s_active_set[n] = '\0';
+    s_active_count = n;
+}
+
+void recordLetterStatLocked(const char letter, const bool correct)
+{
+    for (size_t i = 0u; i < kKochCount; ++i) {
+        if (kKochOrder[i] != letter) continue;
+        if (s_koch_attempts[i] < 0xFFFFu) ++s_koch_attempts[i];
+        if (correct && s_koch_correct[i] < 0xFFFFu) ++s_koch_correct[i];
+        return;
+    }
+}
+
+void adaptWpmLocked(const bool correct)
+{
+    if (!s_adaptive_wpm) return;
+    ++s_adapt_window_count;
+    if (correct) ++s_adapt_window_correct;
+    if (s_adapt_window_count < 5u) return;
+    const unsigned hits = s_adapt_window_correct;
+    s_adapt_window_correct = 0u;
+    s_adapt_window_count = 0u;
+    uint16_t wpm = s_snapshot.wpm == 0u ? kDefaultWpm : s_snapshot.wpm;
+    if (hits >= 4u && wpm < kPracticeWpmMax) {
+        ++wpm;
+    } else if (hits <= 2u && wpm > kPracticeWpmMin) {
+        --wpm;
+    } else {
+        return;
+    }
+    s_snapshot.wpm = wpm;
+    s_save_pending = true; // keep the learned practice speed across reboots
 }
 
 struct KochStore {
     uint8_t unlocked;
     uint16_t attempts[kKochCount];
     uint16_t correct[kKochCount];
+    // v2 fields; blobs written before the charset/adaptive update end here.
+    uint8_t charset;
+    uint8_t adaptive;
+    uint16_t practice_wpm;
+    char custom[kKochCount + 1u];
 };
 
 // Runs in the worker task (NVS writes block); snapshots the stats under lock.
@@ -112,6 +193,10 @@ void saveKoch()
     store.unlocked = s_koch_unlocked;
     memcpy(store.attempts, s_koch_attempts, sizeof(store.attempts));
     memcpy(store.correct, s_koch_correct, sizeof(store.correct));
+    store.charset = s_charset;
+    store.adaptive = s_adaptive_wpm ? 1u : 0u;
+    store.practice_wpm = s_snapshot.wpm;
+    memcpy(store.custom, s_custom_set, sizeof(store.custom));
     portEXIT_CRITICAL(&s_lock);
     nvs_handle_t handle;
     if (nvs_open("cw", NVS_READWRITE, &handle) != ESP_OK) return;
@@ -128,13 +213,22 @@ void loadKoch()
     if (nvs_open("cw", NVS_READONLY, &handle) != ESP_OK) return;
     const esp_err_t err = nvs_get_blob(handle, "koch", &store, &length);
     nvs_close(handle);
-    if (err != ESP_OK || length != sizeof(store) ||
+    const size_t v1_bytes = offsetof(KochStore, charset);
+    if (err != ESP_OK || (length != sizeof(store) && length != v1_bytes) ||
         store.unlocked < kKochInitial || store.unlocked > kKochCount) {
         return;
     }
     s_koch_unlocked = store.unlocked;
     memcpy(s_koch_attempts, store.attempts, sizeof(s_koch_attempts));
     memcpy(s_koch_correct, store.correct, sizeof(s_koch_correct));
+    if (length != sizeof(store)) return; // v1 blob: defaults for the rest
+    if (store.charset <= CW_CHARSET_CUSTOM) s_charset = store.charset;
+    s_adaptive_wpm = store.adaptive != 0u;
+    if (store.practice_wpm >= 4u && store.practice_wpm <= 60u) {
+        s_persisted_wpm = store.practice_wpm;
+    }
+    store.custom[kKochCount] = '\0';
+    memcpy(s_custom_set, store.custom, sizeof(s_custom_set));
 }
 
 void appendBounded(char *text, const size_t capacity, const char *suffix)
@@ -382,6 +476,9 @@ void finishCharacterLocked()
         if (decoded == s_snapshot.practice_target) ++s_practice_correct;
         s_snapshot.accuracy_percent = static_cast<uint8_t>(
             (static_cast<uint32_t>(s_practice_correct) * 100u) / s_snapshot.practice_attempts);
+        recordLetterStatLocked(s_snapshot.practice_target,
+                               decoded == s_snapshot.practice_target);
+        adaptWpmLocked(decoded == s_snapshot.practice_target);
         // Timing quality: compare the average dah:dit ratio of the keyed
         // elements against the ideal 3:1. Characters with only dits or only
         // dahs carry no ratio information and are skipped.
@@ -416,13 +513,8 @@ void finishCharacterLocked()
         if (correct) ++s_practice_correct;
         s_snapshot.accuracy_percent = static_cast<uint8_t>(
             (static_cast<uint32_t>(s_practice_correct) * 100u) / s_snapshot.practice_attempts);
-        for (size_t i = 0u; i < s_koch_unlocked; ++i) {
-            if (kKochOrder[i] == s_copy_target) {
-                if (s_koch_attempts[i] < 0xFFFFu) ++s_koch_attempts[i];
-                if (correct && s_koch_correct[i] < 0xFFFFu) ++s_koch_correct[i];
-                break;
-            }
-        }
+        recordLetterStatLocked(s_copy_target, correct);
+        adaptWpmLocked(correct);
         s_recent[s_recent_pos] = correct;
         s_recent_pos = (s_recent_pos + 1u) % kRecentWindow;
         if (s_recent_count < kRecentWindow) ++s_recent_count;
@@ -432,6 +524,7 @@ void finishCharacterLocked()
             if (hits >= kRecentToUnlock) {
                 ++s_koch_unlocked;
                 s_snapshot.koch_unlocked = s_koch_unlocked;
+                rebuildActiveSetLocked();
                 s_recent_pos = 0u;
                 s_recent_count = 0u;
                 s_save_pending = true;
@@ -460,9 +553,13 @@ void CW_SERVICE_Init(void)
     portENTER_CRITICAL(&s_lock);
     memset(&s_snapshot, 0, sizeof(s_snapshot));
     s_snapshot.wpm = kDefaultWpm;
+    if (s_persisted_wpm >= 4u && s_persisted_wpm <= 60u) s_snapshot.wpm = s_persisted_wpm;
     s_snapshot.accuracy_percent = 100u;
     s_snapshot.timing_percent = 100u;
     s_snapshot.koch_unlocked = s_koch_unlocked;
+    s_snapshot.charset = s_charset;
+    s_snapshot.adaptive_wpm = s_adaptive_wpm;
+    rebuildActiveSetLocked();
     portEXIT_CRITICAL(&s_lock);
     // A 10 ms block at 700 Hz contains exactly seven cycles, so it can be
     // repeated without a phase discontinuity and without calling sinf in the
@@ -644,6 +741,71 @@ void CW_SERVICE_ReplayTarget(void)
         s_copy_target != '\0') {
         s_play_pending = s_copy_target;
     }
+    portEXIT_CRITICAL(&s_lock);
+}
+
+void CW_SERVICE_SetCharset(const CwCharset charset, const char *custom)
+{
+    portENTER_CRITICAL(&s_lock);
+    if (charset == CW_CHARSET_CUSTOM && custom != nullptr) {
+        // Keep only characters the codec can encode, deduplicated.
+        size_t n = 0u;
+        for (const char *p = custom; *p != '\0' && n < kKochCount; ++p) {
+            const char c = static_cast<char>(toupper(static_cast<unsigned char>(*p)));
+            if (CW_EncodeCharacter(c) == nullptr) continue;
+            bool dup = false;
+            for (size_t i = 0u; i < n; ++i) dup = dup || s_custom_set[i] == c;
+            if (!dup) s_custom_set[n++] = c;
+        }
+        s_custom_set[n] = '\0';
+    }
+    s_charset = charset;
+    s_snapshot.charset = charset;
+    rebuildActiveSetLocked();
+    // Draw a fresh target from the new set when a practice session is live.
+    if (s_snapshot.practice_mode == CW_PRACTICE_TX) {
+        s_snapshot.practice_target = pickTargetLocked();
+    } else if (s_snapshot.practice_mode == CW_PRACTICE_RX && s_snapshot.copy_awaiting) {
+        s_copy_target = pickTargetLocked();
+        s_snapshot.practice_target = s_copy_target;
+        s_play_pending = s_copy_target;
+    }
+    s_save_pending = true;
+    ++s_snapshot.revision;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+void CW_SERVICE_SetAdaptiveWpm(const bool enabled)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_adaptive_wpm = enabled;
+    s_snapshot.adaptive_wpm = enabled;
+    s_adapt_window_correct = 0u;
+    s_adapt_window_count = 0u;
+    s_save_pending = true;
+    ++s_snapshot.revision;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+size_t CW_SERVICE_GetLetterStats(CwLetterStat *out, const size_t capacity)
+{
+    if (out == nullptr || capacity == 0u) return 0u;
+    const size_t n = capacity < kKochCount ? capacity : kKochCount;
+    portENTER_CRITICAL(&s_lock);
+    for (size_t i = 0u; i < n; ++i) {
+        out[i].letter = kKochOrder[i];
+        out[i].attempts = s_koch_attempts[i];
+        out[i].correct = s_koch_correct[i];
+    }
+    portEXIT_CRITICAL(&s_lock);
+    return n;
+}
+
+void CW_SERVICE_GetCustomCharset(char *out, const size_t capacity)
+{
+    if (out == nullptr || capacity == 0u) return;
+    portENTER_CRITICAL(&s_lock);
+    snprintf(out, capacity, "%s", s_custom_set);
     portEXIT_CRITICAL(&s_lock);
 }
 

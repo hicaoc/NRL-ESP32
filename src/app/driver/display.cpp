@@ -1876,6 +1876,101 @@ void cwPracticeClicked(lv_event_t *)
     CW_SERVICE_SetPracticeMode(next);
 }
 void cwReplayClicked(lv_event_t *) { CW_SERVICE_ReplayTarget(); }
+// Score view: per-letter accuracy grid with charset/adaptive toggles.
+bool s_cw_show_score = false;
+void cwScoreClicked(lv_event_t *) { s_cw_show_score = true; buildMenuUi(); }
+void cwScoreBackClicked(lv_event_t *) { s_cw_show_score = false; buildMenuUi(); }
+void cwScoreSetClicked(lv_event_t *)
+{
+    CwSnapshot cw{};
+    CW_SERVICE_GetSnapshot(&cw);
+    const CwCharset next =
+        cw.charset == CW_CHARSET_KOCH ? CW_CHARSET_LETTERS :
+        cw.charset == CW_CHARSET_LETTERS ? CW_CHARSET_DIGITS :
+        cw.charset == CW_CHARSET_DIGITS ? CW_CHARSET_CUSTOM : CW_CHARSET_KOCH;
+    CW_SERVICE_SetCharset(next, nullptr);
+    buildMenuUi();
+}
+void cwScoreAdaptClicked(lv_event_t *)
+{
+    CwSnapshot cw{};
+    CW_SERVICE_GetSnapshot(&cw);
+    CW_SERVICE_SetAdaptiveWpm(!cw.adaptive_wpm);
+    buildMenuUi();
+}
+
+// Per-letter accuracy grid: cell color encodes copy accuracy (green >=90%,
+// amber >=70%, red below, dim = untried); charset and adaptive-speed toggles.
+void buildCwScoreView(lv_obj_t *scr, const CwSnapshot &cw)
+{
+    static const char *const kSetNames[] = {"KOCH", "LET", "DIG", "CUST"};
+    const uint8_t charset = cw.charset <= CW_CHARSET_CUSTOM ? cw.charset : 0u;
+    char line[96];
+    lv_obj_t *title = makeLabel(scr, &lv_font_montserrat_16, kColorAccent);
+    lv_obj_set_width(title, kWidth - 8);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(title, 4, 2);
+    snprintf(line, sizeof(line), "CW %s  WPM %u%s", kSetNames[charset],
+             static_cast<unsigned>(cw.wpm), cw.adaptive_wpm ? "(A)" : "");
+    lv_label_set_text(title, line);
+
+    auto mini = [scr](int x, const char *text, lv_event_cb_t cb) {
+        lv_obj_t *button = lv_button_create(scr);
+        lv_obj_set_pos(button, x, 30);
+        lv_obj_set_size(button, 72, 28);
+        lv_obj_set_style_radius(button, 6, 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x10212A), 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+        lv_obj_add_event_cb(button, cb, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *label = makeLabel(button, &lv_font_montserrat_14, kColorCallIdle);
+        lv_label_set_text(label, text);
+        lv_obj_center(label);
+    };
+    char set_label[16];
+    char adapt_label[16];
+    snprintf(set_label, sizeof(set_label), "SET:%s", kSetNames[charset]);
+    snprintf(adapt_label, sizeof(adapt_label), "ADP:%s", cw.adaptive_wpm ? "ON" : "OFF");
+    mini(5, set_label, cwScoreSetClicked);
+    mini(82, adapt_label, cwScoreAdaptClicked);
+    mini(159, menuText("BACK", "返回"), cwScoreBackClicked);
+
+    CwLetterStat stats[36];
+    const size_t count = CW_SERVICE_GetLetterStats(stats, 36u);
+    uint32_t total_attempts = 0u;
+    uint32_t total_correct = 0u;
+    for (size_t i = 0u; i < count; ++i) {
+        total_attempts += stats[i].attempts;
+        total_correct += stats[i].correct;
+        uint32_t color = 0x20262E; // untried
+        if (stats[i].attempts > 0u) {
+            const unsigned acc = (100u * stats[i].correct) / stats[i].attempts;
+            color = acc >= 90u ? 0x1E6B34 : acc >= 70u ? 0x8A6D1A : 0x7A2A2A;
+        }
+        lv_obj_t *cell = makeLabel(scr, &lv_font_montserrat_14, kColorCallIdle);
+        lv_obj_set_pos(cell, 7 + static_cast<int>(i % 6u) * 38,
+                       66 + static_cast<int>(i / 6u) * 30);
+        lv_obj_set_size(cell, 36, 28);
+        lv_obj_set_style_radius(cell, 4, 0);
+        lv_obj_set_style_bg_color(cell, lv_color_hex(color), 0);
+        lv_obj_set_style_bg_opa(cell, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_align(cell, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_pad_top(cell, 4, 0);
+        char letter[2] = {stats[i].letter, '\0'};
+        lv_label_set_text(cell, letter);
+    }
+
+    lv_obj_t *foot = makeLabel(scr, &lv_font_montserrat_14, kColorCaption);
+    lv_obj_set_width(foot, kWidth - 8);
+    lv_obj_set_style_text_align(foot, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(foot, 4, 250);
+    snprintf(line, sizeof(line), "ACC %u%%/%u  TIM %u%%  Lv%u/36",
+             total_attempts > 0u ? static_cast<unsigned>(100u * total_correct / total_attempts)
+                                 : 100u,
+             static_cast<unsigned>(total_attempts),
+             static_cast<unsigned>(cw.timing_percent),
+             static_cast<unsigned>(cw.koch_unlocked));
+    lv_label_set_text(foot, line);
+}
 #endif
 
 void buildCwMenu()
@@ -1883,6 +1978,12 @@ void buildCwMenu()
     lv_obj_t *scr = prepareContent();
     CwSnapshot cw{};
     CW_SERVICE_GetSnapshot(&cw);
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    if (s_cw_show_score) {
+        buildCwScoreView(scr, cw);
+        return;
+    }
+#endif
     char line[128];
 
     lv_obj_t *title = makeLabel(scr, &lv_font_montserrat_16, kColorAccent);
@@ -1964,10 +2065,14 @@ void buildCwMenu()
         lv_label_set_text(label, text);
         lv_obj_center(label);
     };
-    cw_button(5, 140, 60, 32, "DEL", cwDeleteClicked);
-    cw_button(70, 140, 60, 32, "SEND", cwSendClicked);
-    cw_button(135, 140, 60, 32, "RPT", cwReplayClicked);
-    cw_button(200, 140, 105, 32,
+    cw_button(5, 140, 50, 32, "DEL", cwDeleteClicked);
+    cw_button(60, 140, 50, 32, "SEND", cwSendClicked);
+    if (cw.practice_mode == CW_PRACTICE_RX) {
+        cw_button(115, 140, 50, 32, "RPT", cwReplayClicked);
+    } else {
+        cw_button(115, 140, 50, 32, "SCR", cwScoreClicked);
+    }
+    cw_button(170, 140, 65, 32,
               cw.practice_mode == CW_PRACTICE_TX ? "TRN TX" :
               cw.practice_mode == CW_PRACTICE_RX ? "TRN RX" : "TRAIN",
               cwPracticeClicked);
@@ -3617,6 +3722,7 @@ void processMenuInput(uint32_t now)
         s_menu_active = false;
         s_menu_message[0] = '\0';
 #if NRL_BOARD == NRL_BOARD_BI4UMD
+        s_cw_show_score = false;
         s_bi4umd_page = Bi4umdPage::Radio;
 #endif
         buildHomeContent();
