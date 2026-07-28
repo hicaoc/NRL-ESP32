@@ -1925,7 +1925,7 @@ void buildCwScoreView(lv_obj_t *scr, const CwSnapshot &cw)
         lv_obj_set_style_bg_color(button, lv_color_hex(0x10212A), 0);
         lv_obj_set_style_bg_color(button, lv_color_hex(0x087A82), LV_STATE_PRESSED);
         lv_obj_add_event_cb(button, cb, LV_EVENT_CLICKED, nullptr);
-        lv_obj_t *label = makeLabel(button, &lv_font_montserrat_14, kColorCallIdle);
+        lv_obj_t *label = makeLabel(button, menuFont(&lv_font_montserrat_14), kColorCallIdle);
         lv_label_set_text(label, text);
         lv_obj_center(label);
     };
@@ -2001,7 +2001,7 @@ void buildCwMenu()
     lv_obj_set_style_bg_color(exit_btn, lv_color_hex(0x10212A), 0);
     lv_obj_set_style_bg_color(exit_btn, lv_color_hex(0x087A82), LV_STATE_PRESSED);
     lv_obj_add_event_cb(exit_btn, cwExitClicked, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t *exit_label = makeLabel(exit_btn, &lv_font_montserrat_14, kColorCallIdle);
+    lv_obj_t *exit_label = makeLabel(exit_btn, menuFont(&lv_font_montserrat_14), kColorCallIdle);
     lv_label_set_text(exit_label, menuText("EXIT", "退出"));
     lv_obj_center(exit_label);
     lv_obj_set_width(title, kWidth - 64);
@@ -2044,7 +2044,7 @@ void buildCwMenu()
     snprintf(line, sizeof(line), "%s%s", cw.tx_code, cw.current_pattern);
     lv_label_set_text(tx_code, line[0] != '\0' ? line : "KEY:  . DIT   - DAH");
 
-    lv_obj_t *score = makeLabel(scr, &lv_font_montserrat_14,
+    lv_obj_t *score = makeLabel(scr, menuFont(&lv_font_montserrat_14),
                                 cw.practice_enabled ? kColorGood : kColorCaption);
     lv_obj_set_width(score, kWidth - 8);
     lv_obj_set_style_text_align(score, LV_TEXT_ALIGN_CENTER, 0);
@@ -2108,7 +2108,7 @@ void buildCwMenu()
     lv_obj_add_event_cb(key, cwKeyPressed, LV_EVENT_PRESSED, nullptr);
     lv_obj_add_event_cb(key, cwKeyReleased, LV_EVENT_RELEASED, nullptr);
     lv_obj_add_event_cb(key, cwKeyReleased, LV_EVENT_PRESS_LOST, nullptr);
-    lv_obj_t *key_label = makeLabel(key, &lv_font_montserrat_16, kColorCallIdle);
+    lv_obj_t *key_label = makeLabel(key, menuFont(&lv_font_montserrat_16), kColorCallIdle);
     lv_label_set_text(key_label, menuText("KEY: TAP=DIT HOLD=DAH", "电键: 轻点=嘀 按住=嗒"));
     lv_obj_center(key_label);
 #else
