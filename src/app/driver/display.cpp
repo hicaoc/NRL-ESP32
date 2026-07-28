@@ -1869,8 +1869,13 @@ void cwPracticeClicked(lv_event_t *)
 {
     CwSnapshot snapshot{};
     CW_SERVICE_GetSnapshot(&snapshot);
-    CW_SERVICE_SetPractice(!snapshot.practice_enabled);
+    // Cycle OFF -> TX (key the shown letter) -> RX (copy the sounded letter).
+    const CwPracticeMode next =
+        snapshot.practice_mode == CW_PRACTICE_OFF ? CW_PRACTICE_TX :
+        snapshot.practice_mode == CW_PRACTICE_TX ? CW_PRACTICE_RX : CW_PRACTICE_OFF;
+    CW_SERVICE_SetPracticeMode(next);
 }
+void cwReplayClicked(lv_event_t *) { CW_SERVICE_ReplayTarget(); }
 #endif
 
 void buildCwMenu()
@@ -1923,7 +1928,19 @@ void buildCwMenu()
     lv_obj_set_width(score, kWidth - 8);
     lv_obj_set_style_text_align(score, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_pos(score, 4, 119);
-    if (cw.practice_enabled) {
+    if (cw.practice_mode == CW_PRACTICE_RX) {
+        char feedback[20];
+        if (cw.copy_revealed != '\0') {
+            snprintf(feedback, sizeof(feedback), "= %c %s", cw.copy_revealed,
+                     cw.copy_last_correct ? "OK" : "X");
+        } else {
+            snprintf(feedback, sizeof(feedback), "%s", menuText("listen...", "听抄..."));
+        }
+        snprintf(line, sizeof(line), "COPY Lv%u/%u %u%% %s%s",
+                 static_cast<unsigned>(cw.koch_unlocked), 36u,
+                 static_cast<unsigned>(cw.accuracy_percent), feedback,
+                 cw.sending ? " TX..." : "");
+    } else if (cw.practice_mode == CW_PRACTICE_TX) {
         snprintf(line, sizeof(line), "TRAIN: SEND %c  %u%%/%u TIM %u%%%s", cw.practice_target,
                  static_cast<unsigned>(cw.accuracy_percent),
                  static_cast<unsigned>(cw.practice_attempts),
@@ -1949,7 +1966,10 @@ void buildCwMenu()
     };
     cw_button(5, 140, 60, 32, "DEL", cwDeleteClicked);
     cw_button(70, 140, 60, 32, "SEND", cwSendClicked);
-    cw_button(135, 140, 110, 32, cw.practice_enabled ? "TRAIN ON" : "TRAIN OFF",
+    cw_button(135, 140, 60, 32, "RPT", cwReplayClicked);
+    cw_button(200, 140, 105, 32,
+              cw.practice_mode == CW_PRACTICE_TX ? "TRN TX" :
+              cw.practice_mode == CW_PRACTICE_RX ? "TRN RX" : "TRAIN",
               cwPracticeClicked);
 
     // Straight key: hold for dah, tap for dit. The whole bottom strip is the

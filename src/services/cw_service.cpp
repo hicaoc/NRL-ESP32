@@ -4,10 +4,12 @@
 #include "lib/cw_codec.h"
 
 #include <esp_log.h>
+#include <esp_random.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+#include <nvs.h>
 
 #include <math.h>
 #include <stdio.h>
@@ -21,7 +23,14 @@ constexpr uint16_t kDefaultWpm = 15u;
 constexpr uint16_t kToneHz = 700u;
 constexpr size_t kChunkSamples = 160u;
 constexpr uint32_t kTxTaskStackBytes = 8192u;
-constexpr char kPracticeCharacters[] = "ETIANMSURWDKGOHVF?L?PJBXCYZQ1234567890";
+// Koch learn-order over the codec's alphabet (A-Z, 0-9): start with K and M,
+// each new letter joins the practice set once the recent window shows mastery.
+constexpr char kKochOrder[] = "KMRSUAPTLOWINJEFYVGQHZXCBD5293847160";
+constexpr size_t kKochCount = sizeof(kKochOrder) - 1u; // 36
+constexpr uint8_t kKochInitial = 2u;
+constexpr size_t kRecentWindow = 20u;      // rolling answers per level
+constexpr unsigned kRecentToUnlock = 18u;  // 90% to unlock the next letter
+constexpr unsigned kAnswersPerSave = 5u;   // NVS write throttle
 
 enum class CommandType : uint8_t { Element, Send, ToneStart, ToneStop, PaddleStart, PaddleStop };
 struct Command { CommandType type; CwElement element; };
@@ -32,9 +41,20 @@ QueueHandle_t s_queue = nullptr;
 TaskHandle_t s_task = nullptr;
 uint32_t s_last_element_ms = 0u;
 uint16_t s_practice_correct = 0u;
-size_t s_practice_index = 0u;
 uint32_t s_practice_timing_sum = 0u;
 uint16_t s_practice_timing_samples = 0u;
+// Koch progression: per-letter copy stats persist in NVS; the recent-answer
+// ring decides when the next letter unlocks.
+uint8_t s_koch_unlocked = kKochInitial;
+uint16_t s_koch_attempts[kKochCount] = {};
+uint16_t s_koch_correct[kKochCount] = {};
+bool s_recent[kRecentWindow] = {};
+size_t s_recent_pos = 0u;
+size_t s_recent_count = 0u;
+char s_copy_target = '\0';    // hidden RX answer
+char s_play_pending = '\0';   // letter the worker should sound out
+bool s_save_pending = false;  // worker flushes Koch stats to NVS
+unsigned s_answers_since_save = 0u;
 // Straight-key state (touch UI): key-down timestamp and per-element held
 // durations for the current character, used by the practice timing score.
 bool s_key_down = false;
@@ -65,6 +85,56 @@ void inputElementLocked(const CwElement element, const uint32_t now)
         ++s_snapshot.revision;
     }
     s_last_element_ms = now;
+}
+
+// Random target from the unlocked Koch set, avoiding an immediate repeat of
+// the previous target. Caller holds s_lock.
+char pickTargetLocked()
+{
+    size_t index = esp_random() % s_koch_unlocked;
+    if (s_koch_unlocked > 1u && kKochOrder[index] == s_snapshot.practice_target) {
+        index = (index + 1u) % s_koch_unlocked;
+    }
+    return kKochOrder[index];
+}
+
+struct KochStore {
+    uint8_t unlocked;
+    uint16_t attempts[kKochCount];
+    uint16_t correct[kKochCount];
+};
+
+// Runs in the worker task (NVS writes block); snapshots the stats under lock.
+void saveKoch()
+{
+    KochStore store{};
+    portENTER_CRITICAL(&s_lock);
+    store.unlocked = s_koch_unlocked;
+    memcpy(store.attempts, s_koch_attempts, sizeof(store.attempts));
+    memcpy(store.correct, s_koch_correct, sizeof(store.correct));
+    portEXIT_CRITICAL(&s_lock);
+    nvs_handle_t handle;
+    if (nvs_open("cw", NVS_READWRITE, &handle) != ESP_OK) return;
+    (void)nvs_set_blob(handle, "koch", &store, sizeof(store));
+    (void)nvs_commit(handle);
+    nvs_close(handle);
+}
+
+void loadKoch()
+{
+    KochStore store{};
+    size_t length = sizeof(store);
+    nvs_handle_t handle;
+    if (nvs_open("cw", NVS_READONLY, &handle) != ESP_OK) return;
+    const esp_err_t err = nvs_get_blob(handle, "koch", &store, &length);
+    nvs_close(handle);
+    if (err != ESP_OK || length != sizeof(store) ||
+        store.unlocked < kKochInitial || store.unlocked > kKochCount) {
+        return;
+    }
+    s_koch_unlocked = store.unlocked;
+    memcpy(s_koch_attempts, store.attempts, sizeof(s_koch_attempts));
+    memcpy(s_koch_correct, store.correct, sizeof(s_koch_correct));
 }
 
 void appendBounded(char *text, const size_t capacity, const char *suffix)
@@ -224,13 +294,31 @@ void worker(void *)
                 }
             }
             const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+            char play = '\0';
+            bool save = false;
             portENTER_CRITICAL(&s_lock);
             const uint16_t wpm = s_snapshot.wpm == 0u ? kDefaultWpm : s_snapshot.wpm;
             if (s_snapshot.current_pattern[0] != '\0' && s_last_element_ms != 0u &&
                 now - s_last_element_ms >= static_cast<uint32_t>(3600u / wpm)) {
                 finishCharacterLocked();
             }
+            play = s_play_pending;
+            s_play_pending = '\0';
+            save = s_save_pending;
+            s_save_pending = false;
             portEXIT_CRITICAL(&s_lock);
+            // RX practice prompt/replay: sound out one letter on the same
+            // tone path as keyed elements.
+            if (play != '\0') {
+                const uint16_t dit_ms = static_cast<uint16_t>(1200u / wpm);
+                const char *pattern = CW_EncodeCharacter(play);
+                if (pattern != nullptr) {
+                    for (const char *e = pattern; *e != '\0'; ++e) {
+                        playElement(*e == '-' ? CW_ELEMENT_DAH : CW_ELEMENT_DIT, dit_ms);
+                    }
+                }
+            }
+            if (save) saveKoch();
             continue;
         }
         if (command.type == CommandType::ToneStart) {
@@ -289,7 +377,7 @@ void finishCharacterLocked()
     appendBounded(s_snapshot.tx_text, sizeof(s_snapshot.tx_text), character);
     appendLearningCell(s_snapshot.tx_letters, s_snapshot.tx_code,
                        sizeof(s_snapshot.tx_code), decoded, s_snapshot.current_pattern);
-    if (s_snapshot.practice_enabled) {
+    if (s_snapshot.practice_mode == CW_PRACTICE_TX) {
         ++s_snapshot.practice_attempts;
         if (decoded == s_snapshot.practice_target) ++s_practice_correct;
         s_snapshot.accuracy_percent = static_cast<uint8_t>(
@@ -320,10 +408,44 @@ void finishCharacterLocked()
             s_snapshot.timing_percent = static_cast<uint8_t>(
                 s_practice_timing_sum / s_practice_timing_samples);
         }
-        do {
-            s_practice_index = (s_practice_index + 1u) % (sizeof(kPracticeCharacters) - 1u);
-            s_snapshot.practice_target = kPracticeCharacters[s_practice_index];
-        } while (s_snapshot.practice_target == '?');
+        s_snapshot.practice_target = pickTargetLocked();
+    } else if (s_snapshot.practice_mode == CW_PRACTICE_RX && s_snapshot.copy_awaiting) {
+        // RX copy: the keyed character is the answer to the sounded target.
+        const bool correct = decoded == s_copy_target;
+        ++s_snapshot.practice_attempts;
+        if (correct) ++s_practice_correct;
+        s_snapshot.accuracy_percent = static_cast<uint8_t>(
+            (static_cast<uint32_t>(s_practice_correct) * 100u) / s_snapshot.practice_attempts);
+        for (size_t i = 0u; i < s_koch_unlocked; ++i) {
+            if (kKochOrder[i] == s_copy_target) {
+                if (s_koch_attempts[i] < 0xFFFFu) ++s_koch_attempts[i];
+                if (correct && s_koch_correct[i] < 0xFFFFu) ++s_koch_correct[i];
+                break;
+            }
+        }
+        s_recent[s_recent_pos] = correct;
+        s_recent_pos = (s_recent_pos + 1u) % kRecentWindow;
+        if (s_recent_count < kRecentWindow) ++s_recent_count;
+        if (s_recent_count >= kRecentWindow && s_koch_unlocked < kKochCount) {
+            unsigned hits = 0u;
+            for (size_t i = 0u; i < kRecentWindow; ++i) hits += s_recent[i] ? 1u : 0u;
+            if (hits >= kRecentToUnlock) {
+                ++s_koch_unlocked;
+                s_snapshot.koch_unlocked = s_koch_unlocked;
+                s_recent_pos = 0u;
+                s_recent_count = 0u;
+                s_save_pending = true;
+            }
+        }
+        if (++s_answers_since_save >= kAnswersPerSave) {
+            s_answers_since_save = 0u;
+            s_save_pending = true;
+        }
+        s_snapshot.copy_revealed = s_copy_target;
+        s_snapshot.copy_last_correct = correct;
+        s_copy_target = pickTargetLocked();
+        s_snapshot.practice_target = s_copy_target;
+        s_play_pending = s_copy_target;
     }
     s_element_count = 0u;
     s_snapshot.current_pattern[0] = '\0';
@@ -334,12 +456,13 @@ void finishCharacterLocked()
 
 void CW_SERVICE_Init(void)
 {
+    loadKoch();
     portENTER_CRITICAL(&s_lock);
     memset(&s_snapshot, 0, sizeof(s_snapshot));
     s_snapshot.wpm = kDefaultWpm;
     s_snapshot.accuracy_percent = 100u;
     s_snapshot.timing_percent = 100u;
-    s_snapshot.practice_target = 'E';
+    s_snapshot.koch_unlocked = s_koch_unlocked;
     portEXIT_CRITICAL(&s_lock);
     // A 10 ms block at 700 Hz contains exactly seven cycles, so it can be
     // repeated without a phase discontinuity and without calling sinf in the
@@ -483,17 +606,44 @@ void CW_SERVICE_Clear(void)
 
 void CW_SERVICE_SetPractice(const bool enabled)
 {
+    CW_SERVICE_SetPracticeMode(enabled ? CW_PRACTICE_TX : CW_PRACTICE_OFF);
+}
+
+void CW_SERVICE_SetPracticeMode(const CwPracticeMode mode)
+{
     portENTER_CRITICAL(&s_lock);
-    s_snapshot.practice_enabled = enabled;
+    s_snapshot.practice_mode = mode;
+    s_snapshot.practice_enabled = mode != CW_PRACTICE_OFF;
     s_snapshot.practice_attempts = 0u;
     s_snapshot.accuracy_percent = 100u;
     s_snapshot.timing_percent = 100u;
     s_practice_correct = 0u;
-    s_practice_index = 0u;
     s_practice_timing_sum = 0u;
     s_practice_timing_samples = 0u;
-    s_snapshot.practice_target = 'E';
+    s_snapshot.copy_awaiting = false;
+    s_snapshot.copy_revealed = '\0';
+    s_snapshot.copy_last_correct = false;
+    if (mode == CW_PRACTICE_TX) {
+        s_snapshot.practice_target = pickTargetLocked();
+    } else if (mode == CW_PRACTICE_RX) {
+        s_copy_target = pickTargetLocked();
+        s_snapshot.practice_target = s_copy_target;
+        s_snapshot.copy_awaiting = true;
+        s_play_pending = s_copy_target;
+    } else {
+        s_save_pending = true; // flush copy stats when leaving practice
+    }
     ++s_snapshot.revision;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+void CW_SERVICE_ReplayTarget(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    if (s_snapshot.practice_mode == CW_PRACTICE_RX && s_snapshot.copy_awaiting &&
+        s_copy_target != '\0') {
+        s_play_pending = s_copy_target;
+    }
     portEXIT_CRITICAL(&s_lock);
 }
 

@@ -6,6 +6,9 @@
 
 enum CwSource : uint8_t { CW_SOURCE_MIC = 0, CW_SOURCE_NRL = 1 };
 enum CwElement : uint8_t { CW_ELEMENT_DIT = 0, CW_ELEMENT_DAH = 1 };
+// Practice modes: TX shows a letter to key back; RX plays a letter (from the
+// Koch-unlocked set) that must be copied and keyed back as the answer.
+enum CwPracticeMode : uint8_t { CW_PRACTICE_OFF = 0, CW_PRACTICE_TX = 1, CW_PRACTICE_RX = 2 };
 
 struct CwSnapshot {
     char rx_text[49];
@@ -15,10 +18,15 @@ struct CwSnapshot {
     char tx_letters[97];
     char tx_code[97];
     char current_pattern[8];
-    char practice_target;
+    char practice_target;       // TX: shown letter. RX: hidden answer -- never display it.
     uint16_t wpm;
     uint8_t accuracy_percent;
     uint8_t timing_percent;   // key-timing quality (dit:dah ratio), practice mode
+    uint8_t practice_mode;    // CwPracticeMode
+    uint8_t koch_unlocked;    // letters available in practice (2..36)
+    bool copy_awaiting;       // RX: target played, waiting for the keyed answer
+    char copy_revealed;       // RX: previous target revealed as feedback ('\0' = none)
+    bool copy_last_correct;   // RX: previous answer result
     uint16_t practice_attempts;
     uint32_t revision;
     bool practice_enabled;
@@ -46,5 +54,8 @@ void CW_SERVICE_FinishCharacter(void);
 void CW_SERVICE_Delete(void);
 bool CW_SERVICE_Send(void);
 void CW_SERVICE_Clear(void);
-void CW_SERVICE_SetPractice(bool enabled);
+void CW_SERVICE_SetPractice(bool enabled);   // legacy toggle: maps to TX / OFF
+void CW_SERVICE_SetPracticeMode(CwPracticeMode mode);
+// RX practice: play the current hidden target again (no-op outside RX).
+void CW_SERVICE_ReplayTarget(void);
 void CW_SERVICE_GetSnapshot(CwSnapshot *out);

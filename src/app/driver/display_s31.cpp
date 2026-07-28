@@ -170,6 +170,7 @@ enum class Action : intptr_t {
     CwSend,
     CwPractice,
     CwMode,
+    CwReplay,
     Ctcss,
     Mdc,
     Dtmf,
@@ -1710,7 +1711,21 @@ void refreshCwPage()
     setLabelTextIfChanged(s_lbl_cw_tx, text[0] != '\0' ? text : "-");
     snprintf(text, sizeof(text), "%s%s", cw.tx_code, cw.current_pattern);
     setLabelTextIfChanged(s_lbl_cw_tx_code, text[0] != '\0' ? text : "-");
-    if (cw.practice_enabled) {
+    if (cw.practice_mode == CW_PRACTICE_RX) {
+        char feedback[24];
+        if (cw.copy_revealed != '\0') {
+            snprintf(feedback, sizeof(feedback), "= %c  %s", cw.copy_revealed,
+                     cw.copy_last_correct ? "correct" : "wrong");
+        } else {
+            snprintf(feedback, sizeof(feedback), "listening...");
+        }
+        snprintf(text, sizeof(text),
+                 "RX-COPY level %u/36   %u WPM   accuracy %u%% (%u)   %s%s",
+                 static_cast<unsigned>(cw.koch_unlocked), static_cast<unsigned>(cw.wpm),
+                 static_cast<unsigned>(cw.accuracy_percent),
+                 static_cast<unsigned>(cw.practice_attempts), feedback,
+                 cw.sending ? "   SENDING" : "");
+    } else if (cw.practice_mode == CW_PRACTICE_TX) {
         snprintf(text, sizeof(text), "TRAIN: key %c   %u WPM   accuracy %u%% (%u)   timing %u%%%s",
                  cw.practice_target, static_cast<unsigned>(cw.wpm),
                  static_cast<unsigned>(cw.accuracy_percent),
@@ -1783,10 +1798,13 @@ void buildCw()
     button(scr, 230, 342, 100, 56, "Send", Action::CwSend);
     CwSnapshot cw{};
     CW_SERVICE_GetSnapshot(&cw);
-    button(scr, 338, 342, 110, 56, cw.practice_enabled ? "Train ON" : "Train",
+    button(scr, 338, 342, 110, 56,
+           cw.practice_mode == CW_PRACTICE_TX ? "Train TX" :
+           cw.practice_mode == CW_PRACTICE_RX ? "Train RX" : "Train",
            Action::CwPractice);
     button(scr, 456, 342, 120, 56, s_cw_paddle_mode ? "Mode:PDL" : "Mode:KEY",
            Action::CwMode);
+    button(scr, 584, 342, 100, 56, "Replay", Action::CwReplay);
 
     auto cw_zone = [scr](int x, int w, const char *text, CwElement element) {
         lv_obj_t *zone = lv_button_create(scr);
@@ -4371,10 +4389,15 @@ void action(lv_event_t *event)
         case Action::CwPractice: {
             CwSnapshot cw{};
             CW_SERVICE_GetSnapshot(&cw);
-            CW_SERVICE_SetPractice(!cw.practice_enabled);
+            // Cycle OFF -> TX (key the shown letter) -> RX (copy the sounded one).
+            const CwPracticeMode next =
+                cw.practice_mode == CW_PRACTICE_OFF ? CW_PRACTICE_TX :
+                cw.practice_mode == CW_PRACTICE_TX ? CW_PRACTICE_RX : CW_PRACTICE_OFF;
+            CW_SERVICE_SetPracticeMode(next);
             buildCw();
             break;
         }
+        case Action::CwReplay: CW_SERVICE_ReplayTarget(); break;
         case Action::About: buildAbout(); break;
         case Action::SaveOtaUrl: (void)saveOtaUrl(true); break;
         case Action::CheckOta: checkOtaFromPage(); break;
