@@ -50,10 +50,11 @@ constexpr size_t kOutputBufferBytes = 128 * 1024;
 // ahead. The refill chunk is large so a drained ring recovers in fewer filler
 // iterations (each source read is still split to ~1.2 KB inside smb_vfs).
 constexpr size_t kRingBytes = 2 * 1024 * 1024;
-// The dedicated SMB stream fills this request with a pipeline of single-frame
-// reads; local USB/TF files perform one normal sequential VFS read. Both paths
-// commit into the same PSRAM ring without changing their decoders.
-constexpr size_t kRingFillChunk = 32 * 1024;
+// The dedicated SMB stream fills this request with a single 64 KB pread (see
+// kWireReadBytes in smb_stream.cpp); local USB/TF files perform one normal
+// sequential VFS read. Both paths commit into the same PSRAM ring without
+// changing their decoders.
+constexpr size_t kRingFillChunk = 64 * 1024;
 // Direct HTTP radio is paced by the remote server. Accumulate one compressed
 // input chunk before decoding so short Wi-Fi/TCP stalls do not immediately
 // drain the tiny high-rate I2S DMA queue into audible gaps/noise. At 64 kbps
@@ -143,6 +144,13 @@ struct MediaDecoder {
     const volatile bool *external_stop;
     bool ring_wait_full;         // block for a full read (file semantics)
     size_t ring_prebuffer_bytes; // compressed bytes required before playback starts
+    // Underrun telemetry: the ring ran dry while the decoder still needed
+    // bytes (audible gap on I2S). Counted per event, logged at 1 Hz at most,
+    // summarized on close.
+    unsigned underrun_events;
+    unsigned underrun_total_ms;
+    int64_t underrun_start_us;
+    int64_t underrun_last_log_us;
 };
 
 namespace {
@@ -205,8 +213,25 @@ static size_t read_source(MediaDecoder *d, uint8_t *dst, const size_t size)
             if (!d->ring_wait_full && got > 0u) {
                 break; // live stream: hand over what we have
             }
+            if (d->underrun_start_us == 0) {
+                d->underrun_start_us = esp_timer_get_time();
+                ++d->underrun_events;
+            }
             vTaskDelay(pdMS_TO_TICKS(5));
             continue;
+        }
+        if (d->underrun_start_us != 0) {
+            // Recovered from starvation: account the gap, then log at 1 Hz at
+            // most (a drip-fed ring would otherwise spam one line per poll).
+            const int64_t now_us = esp_timer_get_time();
+            d->underrun_total_ms +=
+                static_cast<unsigned>((now_us - d->underrun_start_us) / 1000LL);
+            d->underrun_start_us = 0;
+            if (now_us - d->underrun_last_log_us >= 1000000LL) {
+                d->underrun_last_log_us = now_us;
+                ESP_LOGW(TAG, "underrun: ring dry (event #%u, total %u ms)",
+                         d->underrun_events, d->underrun_total_ms);
+            }
         }
         size_t chunk = kRingBytes - tail; // contiguous run up to the wrap
         if (chunk > used) {
@@ -1123,6 +1148,10 @@ extern "C" void MEDIA_DECODER_Close(MediaDecoder *d)
 {
     if (d == nullptr) {
         return;
+    }
+    if (d->underrun_events > 0u) {
+        ESP_LOGI(TAG, "underrun summary: %u events, %u ms dry total",
+                 d->underrun_events, d->underrun_total_ms);
     }
     // Stop the read-ahead filler before touching the sources it reads from.
     if (d->ring != nullptr) {

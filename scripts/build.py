@@ -15,9 +15,13 @@ Examples:
     
     python scripts/build.py bh4tdv fullclean
     python scripts/build.py gezipai menuconfig
+    python scripts/build.py all               # build every board, summarize
 
 Boards: gezipai, bi4umd, gezipai_4g, bh4tdv, s31_korvo,
 s31_function_coreboard. If you omit the idf.py args it defaults to `build`.
+The special board name `all` builds every board in sequence (build action
+only); one board failing does not stop the rest, and the exit code is
+non-zero if any board failed.
 
 Each board gets its own build directory (build/<board>) and sdkconfig
 (build/<board>/sdkconfig), so you can switch boards without a reconfigure or
@@ -145,13 +149,34 @@ def patch_managed_components():
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in BOARDS:
+    if len(sys.argv) < 2 or (sys.argv[1] not in BOARDS and sys.argv[1] != "all"):
         print(__doc__)
-        print(f"error: first arg must be one of: {', '.join(BOARDS)}")
+        print(f"error: first arg must be one of: {', '.join(BOARDS)}, all")
         sys.exit(2)
 
-    board = sys.argv[1]
     passthrough = sys.argv[2:] or ["build"]
+
+    if sys.argv[1] == "all":
+        if passthrough != ["build"]:
+            print("error: 'all' only supports the default build action")
+            sys.exit(2)
+        failed = []
+        for name in BOARDS:
+            print(f"\n===== [{name}] =====", flush=True)
+            if build_board(name, passthrough) != 0:
+                failed.append(name)
+        print("\n===== summary =====")
+        for name in BOARDS:
+            print(f"  {name}: {'FAILED' if name in failed else 'ok'}")
+        if failed:
+            sys.exit(1)
+        print("all boards built successfully")
+        sys.exit(0)
+
+    sys.exit(build_board(sys.argv[1], passthrough))
+
+
+def build_board(board: str, passthrough: list[str]) -> int:
     cfg = BOARDS[board]
 
     if cfg["lvgl"]:
@@ -164,7 +189,7 @@ def main():
     if not idf_path:
         print("error: IDF_PATH is not set. Source the ESP-IDF 6.2 environment "
               "first (export.ps1 / export.sh), then re-run.")
-        sys.exit(2)
+        return 2
     idf_root = Path(idf_path)
     idf_py = idf_root / "tools" / "idf.py"
     python = idf_python()
@@ -202,7 +227,7 @@ def main():
         publish = [sys.executable, str(REPO / "scripts" / "publish_ota.py"), board]
         print("+ " + " ".join(publish), flush=True)
         result = subprocess.run(publish, cwd=REPO)
-    sys.exit(result.returncode)
+    return result.returncode
 
 
 if __name__ == "__main__":

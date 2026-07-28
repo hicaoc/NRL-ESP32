@@ -26,17 +26,20 @@ namespace {
 // read, so allow TCP five seconds to finish before reconnecting.
 constexpr int kCommandTimeoutMs = 5000;
 // One larger request sustains lossless audio without concurrent operations on
-// a libsmb2 context. The enlarged lwIP receive window allows this response to
-// span multiple TCP segments; the old 1200-byte workaround was stable but too
-// latency-bound for FLAC.
-constexpr uint32_t kWireReadBytes = 16u * 1024u;
+// a libsmb2 context. Each pread is a synchronous round-trip (request -> RTT +
+// server + local parsing -> response), so the request size directly sets how
+// much of the link's idle turnaround is amortized: 64 KB reads quarter the
+// round-trips of the original 16 KB, and TCP streams the multi-segment
+// response continuously through the enlarged lwIP receive window. The old
+// 1200-byte workaround was stable but too latency-bound for FLAC.
+constexpr uint32_t kWireReadBytes = 64u * 1024u;
 constexpr size_t kLaneCount = 1;
 constexpr size_t kConfigTextBytes = 128;
 constexpr size_t kPathBytes = 512;
 constexpr uint32_t kRetryReadBytes[] = {
+    64u * 1024u,
+    32u * 1024u,
     16u * 1024u,
-    8u * 1024u,
-    4u * 1024u,
     1200u,
 };
 constexpr unsigned kReconnectAttempts =
