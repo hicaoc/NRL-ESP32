@@ -2,7 +2,9 @@
 
 #include <esp_jpeg_common.h>
 #include <esp_jpeg_dec.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_memory_utils.h>
 
 #include <string.h>
 
@@ -30,17 +32,39 @@ extern "C" bool COVER_DecodeJpeg(const uint8_t *jpeg, const size_t jpeg_size,
         return false;
     }
 
-    // The decoder requires a 16-byte-aligned input buffer; the metadata
-    // parser's heap allocation gives no such guarantee, so copy.
-    uint8_t *inbuf = static_cast<uint8_t *>(jpeg_calloc_align(jpeg_size, 16));
+    // The decoder requires a 16-byte-aligned input buffer, but it does not
+    // require internal RAM. Borrow aligned callers' buffers directly. For
+    // legacy/misaligned callers, make the compatibility copy in PSRAM first
+    // so a cover or map tile cannot consume the small internal-RAM heap.
+    bool input_borrowed = (reinterpret_cast<uintptr_t>(jpeg) & 0x0Fu) == 0u;
+#if CONFIG_SPIRAM
+    // On PSRAM-equipped targets, alignment alone is not sufficient: borrowing
+    // a large internal buffer would defeat the decoder's external-memory rule.
+    input_borrowed = input_borrowed &&
+                     esp_ptr_external_ram(jpeg) &&
+                     esp_ptr_external_ram(jpeg + jpeg_size - 1u);
+#endif
+    bool input_uses_jpeg_allocator = false;
+    uint8_t *inbuf = input_borrowed ? const_cast<uint8_t *>(jpeg) : nullptr;
     if (inbuf == nullptr) {
-        return false;
+#if CONFIG_SPIRAM
+        inbuf = static_cast<uint8_t *>(heap_caps_aligned_alloc(
+            16u, jpeg_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+#else
+        // Preserve operation on targets that genuinely have no PSRAM.
+        inbuf = static_cast<uint8_t *>(jpeg_calloc_align(jpeg_size, 16));
+        input_uses_jpeg_allocator = inbuf != nullptr;
+#endif
+        if (inbuf == nullptr) {
+            return false;
+        }
+        memcpy(inbuf, jpeg, jpeg_size);
     }
-    memcpy(inbuf, jpeg, jpeg_size);
 
     bool ok = false;
     jpeg_dec_handle_t dec = nullptr;
     uint8_t *outbuf = nullptr;
+    bool outbuf_uses_jpeg_allocator = false;
 
     do {
         // First pass: parse the header only, to compute the scale target.
@@ -92,7 +116,13 @@ extern "C" bool COVER_DecodeJpeg(const uint8_t *jpeg, const size_t jpeg_size,
         if (jpeg_dec_get_outbuf_len(dec, &outbuf_len) != JPEG_ERR_OK || outbuf_len <= 0) {
             break;
         }
+#if CONFIG_SPIRAM
+        outbuf = static_cast<uint8_t *>(heap_caps_aligned_alloc(
+            16u, static_cast<size_t>(outbuf_len), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+#else
         outbuf = static_cast<uint8_t *>(jpeg_calloc_align(static_cast<size_t>(outbuf_len), 16));
+        outbuf_uses_jpeg_allocator = outbuf != nullptr;
+#endif
         if (outbuf == nullptr) {
             ESP_LOGW(TAG, "cover outbuf %d alloc failed", outbuf_len);
             break;
@@ -117,6 +147,7 @@ extern "C" bool COVER_DecodeJpeg(const uint8_t *jpeg, const size_t jpeg_size,
         out->height = out_h;
         out->rgb565 = outbuf;
         out->bytes = static_cast<size_t>(outbuf_len);
+        out->rgb565_uses_jpeg_allocator = outbuf_uses_jpeg_allocator;
         outbuf = nullptr; // ownership moved to caller
         ok = true;
         ESP_LOGI(TAG, "cover decoded %ux%u (%u bytes)",
@@ -129,9 +160,19 @@ extern "C" bool COVER_DecodeJpeg(const uint8_t *jpeg, const size_t jpeg_size,
         jpeg_dec_close(dec);
     }
     if (outbuf != nullptr) {
-        jpeg_free_align(outbuf);
+        if (outbuf_uses_jpeg_allocator) {
+            jpeg_free_align(outbuf);
+        } else {
+            heap_caps_free(outbuf);
+        }
     }
-    jpeg_free_align(inbuf);
+    if (!input_borrowed) {
+        if (input_uses_jpeg_allocator) {
+            jpeg_free_align(inbuf);
+        } else {
+            heap_caps_free(inbuf);
+        }
+    }
     return ok;
 }
 
@@ -141,7 +182,11 @@ extern "C" void COVER_Free(CoverBitmap *bitmap)
         return;
     }
     if (bitmap->rgb565 != nullptr) {
-        jpeg_free_align(bitmap->rgb565);
+        if (bitmap->rgb565_uses_jpeg_allocator) {
+            jpeg_free_align(bitmap->rgb565);
+        } else {
+            heap_caps_free(bitmap->rgb565);
+        }
     }
     memset(bitmap, 0, sizeof(*bitmap));
 }

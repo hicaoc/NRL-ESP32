@@ -111,7 +111,11 @@ if(IDF_TARGET STREQUAL "esp32s31")
         # Kconfig, while S31 exposes only the L1 DCache line size. They are both
         # 64 bytes on this board, so provide the missing alias for LVGL only.
         target_compile_definitions(${lvgl_lib} PRIVATE
-            CONFIG_CACHE_L2_CACHE_LINE_SIZE=CONFIG_CACHE_L1_DCACHE_LINE_SIZE)
+            CONFIG_CACHE_L2_CACHE_LINE_SIZE=CONFIG_CACHE_L1_DCACHE_LINE_SIZE
+            # PNG inflate/conversion uses several large scratch allocations.
+            # Keep those out of S31's small internal-DRAM heap; the final
+            # lv_draw_buf pixel storage is separately checked by map_tiles.cpp.
+            LODEPNG_NO_COMPILE_ALLOCATORS)
         target_compile_options(${lvgl_lib} PRIVATE -Wno-unused-variable)
         # The vendored LVGL ESP CMake helper declares these for PPA, but this
         # project consumes LVGL as a plain IDF component, so provide them here.
@@ -126,6 +130,18 @@ if(IDF_TARGET STREQUAL "esp32s31")
         endif()
     endif()
 
+endif()
+
+# Both map-capable boards have PSRAM. Use the application-provided lodepng
+# allocators so PNG inflate/conversion scratch never consumes internal RAM.
+# The final lv_draw_buf allocation is forced through a PSRAM image handler in
+# map_tiles.cpp as well.
+if(NRL_BOARD_ID STREQUAL "NRL_BOARD_BI4UMD" AND
+   EXISTS "${CMAKE_CURRENT_LIST_DIR}/components/lvgl/lvgl.h")
+    idf_component_get_property(lvgl_lib lvgl COMPONENT_LIB)
+    if(lvgl_lib)
+        target_compile_definitions(${lvgl_lib} PRIVATE LODEPNG_NO_COMPILE_ALLOCATORS)
+    endif()
 endif()
 
 # libsmb2 is used on every board in 0.7.8. Compile its legacy C sources with

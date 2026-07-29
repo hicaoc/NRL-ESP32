@@ -3989,6 +3989,18 @@ void buildMap()
         s_map_marker_labels[i] = tag;
     }
 
+    // Required visible attribution for tile.openstreetmap.org. Keep it above
+    // the tile widgets while allowing drag gestures to pass through.
+    lv_obj_t *attribution = label(s_map_view, &lv_font_montserrat_14, kColorText);
+    lv_label_set_text(attribution,
+                      "(c) OpenStreetMap contributors\nopenstreetmap.org/copyright");
+    lv_obj_set_style_text_align(attribution, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_bg_color(attribution, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(attribution, LV_OPA_60, 0);
+    lv_obj_set_style_pad_all(attribution, 2, 0);
+    lv_obj_align(attribution, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
+    lv_obj_remove_flag(attribution, LV_OBJ_FLAG_CLICKABLE);
+
     button(scr, 724, 70, 64, 56, "+", Action::MapZoomIn);
     button(scr, 724, 134, 64, 56, "-", Action::MapZoomOut);
     s_map_lbl_zoom = label(scr, &lv_font_montserrat_20, kColorSub);

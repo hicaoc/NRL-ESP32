@@ -2461,6 +2461,17 @@ void buildMapMenu()
         s_map_marker_labels[i] = tag;
     }
 
+    // Required visible attribution for tile.openstreetmap.org.
+    lv_obj_t *attribution = makeLabel(s_map_view, &lv_font_montserrat_14, kColorCallIdle);
+    lv_label_set_text(attribution,
+                      "(c) OpenStreetMap contributors\nopenstreetmap.org/copyright");
+    lv_obj_set_style_text_align(attribution, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_bg_color(attribution, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(attribution, LV_OPA_60, 0);
+    lv_obj_set_style_pad_all(attribution, 1, 0);
+    lv_obj_align(attribution, LV_ALIGN_BOTTOM_RIGHT, -2, -2);
+    lv_obj_remove_flag(attribution, LV_OBJ_FLAG_CLICKABLE);
+
     auto zoom_button = [scr](int x, const char *text, lv_event_cb_t callback) {
         lv_obj_t *button = lv_button_create(scr);
         lv_obj_set_pos(button, x, 212);

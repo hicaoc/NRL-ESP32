@@ -62,6 +62,8 @@ namespace
         {
         case WIFI_REASON_AUTH_EXPIRE:
             return "AUTH_EXPIRE";
+        case WIFI_REASON_AUTH_LEAVE:
+            return "AUTH_LEAVE";
         case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
             return "4WAY_HANDSHAKE_TIMEOUT(wrong pass?)";
         case WIFI_REASON_NO_AP_FOUND:

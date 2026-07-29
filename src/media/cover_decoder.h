@@ -19,6 +19,7 @@ typedef struct {
     uint16_t height;
     uint8_t *rgb565;   // 16-byte-aligned allocation owned by this module
     size_t bytes;
+    bool rgb565_uses_jpeg_allocator; // false for the normal PSRAM path
 } CoverBitmap;
 
 // Decode `jpeg` scaled to fit within max_dim x max_dim (aspect kept,
