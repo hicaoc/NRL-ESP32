@@ -53,6 +53,7 @@
 #include "../../services/ota_service.h"
 #include "../../services/radio_favorites.h"
 #include "../../services/storage_service.h"
+#include "../../services/sstv_service.h"
 #include "../../services/signaling_service.h"
 #include "../../lib/nrl_version.h"
 #include "external_radio.h"
@@ -66,6 +67,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <dirent.h>
 
 #include <driver/gpio.h>
 #include <driver/spi_master.h>
@@ -229,6 +232,20 @@ uint8_t s_map_zoom = kMapZoomDefault;
 bool s_map_centered = false; // initial center picked once (GPS/default/station)
 uint32_t s_map_tile_rev = 0u;
 uint32_t s_map_station_rev = UINT32_MAX;
+
+// SSTV TX page: SD-card JPEG picker + mode toggle + send/progress.
+constexpr size_t kSstvMaxFiles = 24u;
+constexpr size_t kSstvNameLen = 48u;
+constexpr size_t kSstvRows = 7u;
+char s_sstv_files[kSstvMaxFiles][kSstvNameLen] = {};
+size_t s_sstv_file_count = 0u;
+size_t s_sstv_page = 0u;
+int s_sstv_selected = -1;
+SSTV_Mode s_sstv_mode = SSTV_MODE_ROBOT36;
+lv_obj_t *s_sstv_lbl_status = nullptr;
+lv_obj_t *s_sstv_btn_send = nullptr;
+uint32_t s_sstv_rev = UINT32_MAX;
+volatile bool s_sstv_exit_requested = false;
 #endif
 
 adc_oneshot_unit_handle_t s_adc = nullptr;
@@ -255,6 +272,7 @@ enum class MenuPage : uint8_t {
     Dtmf,
     Cw,
     Map,
+    Sstv,
 };
 
 // Written by STATUS_IO_Poll() and consumed only by Display_Poll(). Keeping
@@ -759,6 +777,8 @@ void addBi4umdMenuButtons()
     if (s_menu_page == MenuPage::Cw) return;
     // The map page is fully touch-driven (drag + zoom/EXIT buttons).
     if (s_menu_page == MenuPage::Map) return;
+    // The SSTV page is touch-driven too (picker + SEND/STOP buttons).
+    if (s_menu_page == MenuPage::Sstv) return;
     auto menu_button = [](int x, const char *text, lv_event_cb_t callback) {
         lv_obj_t *button = lv_button_create(s_content);
         lv_obj_set_pos(button, x,
@@ -1425,6 +1445,7 @@ void buildMainMenu()
         menuText("ABOUT", "关于"),
 #if NRL_BOARD == NRL_BOARD_BI4UMD
         menuText("MAP", "地图"),
+        "SSTV",
 #endif
     };
     constexpr size_t kItemCount = sizeof(items) / sizeof(items[0]);
@@ -2460,6 +2481,178 @@ void buildMapMenu()
     s_map_tile_rev = MAP_TILES_Revision();
     s_map_station_rev = APRS_SERVICE_GetStationRevision();
 }
+
+// ---- SSTV TX page ------------------------------------------------------------
+
+void sstvExitClicked(lv_event_t *) { s_sstv_exit_requested = true; }
+
+void sstvScanFiles()
+{
+    s_sstv_file_count = 0u;
+    s_sstv_page = 0u;
+    s_sstv_selected = -1;
+    if (!STORAGE_SdMounted()) return;
+    char dir_path[96];
+    snprintf(dir_path, sizeof(dir_path), "%s", STORAGE_SdMountPoint());
+    DIR *dir = opendir(dir_path);
+    if (dir == nullptr) return;
+    struct dirent *entry = nullptr;
+    while (s_sstv_file_count < kSstvMaxFiles &&
+           (entry = readdir(dir)) != nullptr) {
+        const char *name = entry->d_name;
+        const size_t len = strlen(name);
+        if (entry->d_type != DT_REG || len < 5u || len >= kSstvNameLen) continue;
+        const char *ext = name + len - 4u;
+        const bool jpg = strcasecmp(ext, ".jpg") == 0 ||
+                         (len >= 5u && strcasecmp(name + len - 5u, ".jpeg") == 0);
+        if (!jpg) continue;
+        snprintf(s_sstv_files[s_sstv_file_count], kSstvNameLen, "%s", name);
+        ++s_sstv_file_count;
+    }
+    closedir(dir);
+    // Insertion sort so the picker is deterministic.
+    for (size_t i = 1u; i < s_sstv_file_count; ++i) {
+        char key[kSstvNameLen];
+        snprintf(key, sizeof(key), "%s", s_sstv_files[i]);
+        size_t j = i;
+        while (j > 0u && strcmp(s_sstv_files[j - 1u], key) > 0) {
+            snprintf(s_sstv_files[j], kSstvNameLen, "%s", s_sstv_files[j - 1u]);
+            --j;
+        }
+        snprintf(s_sstv_files[j], kSstvNameLen, "%s", key);
+    }
+}
+
+void sstvFileClicked(lv_event_t *event)
+{
+    s_sstv_selected = static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(event)));
+    buildMenuUi();
+}
+
+void sstvPageClicked(lv_event_t *event)
+{
+    const int dir = static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(event)));
+    const size_t pages = (s_sstv_file_count + kSstvRows - 1u) / kSstvRows;
+    if (pages == 0u) return;
+    if (dir < 0) {
+        s_sstv_page = s_sstv_page == 0u ? pages - 1u : s_sstv_page - 1u;
+    } else {
+        s_sstv_page = (s_sstv_page + 1u) % pages;
+    }
+    buildMenuUi();
+}
+
+void sstvModeClicked(lv_event_t *)
+{
+    s_sstv_mode = s_sstv_mode == SSTV_MODE_ROBOT36 ? SSTV_MODE_MARTIN_M1 : SSTV_MODE_ROBOT36;
+    buildMenuUi();
+}
+
+void sstvSendClicked(lv_event_t *)
+{
+    SstvSnapshot snap{};
+    SSTV_SERVICE_GetSnapshot(&snap);
+    if (snap.state == SSTV_STATE_PREPARING || snap.state == SSTV_STATE_SENDING) {
+        (void)SSTV_SERVICE_Stop();
+        return;
+    }
+    if (s_sstv_selected < 0 || static_cast<size_t>(s_sstv_selected) >= s_sstv_file_count) return;
+    char path[128];
+    snprintf(path, sizeof(path), "%s/%s", STORAGE_SdMountPoint(), s_sstv_files[s_sstv_selected]);
+    (void)SSTV_SERVICE_SendJpeg(path, s_sstv_mode);
+}
+
+void buildSstvMenu()
+{
+    lv_obj_t *scr = prepareContent();
+    SstvSnapshot snap{};
+    SSTV_SERVICE_GetSnapshot(&snap);
+    const bool busy = snap.state == SSTV_STATE_PREPARING || snap.state == SSTV_STATE_SENDING;
+
+    lv_obj_t *exit_btn = lv_button_create(scr);
+    lv_obj_set_pos(exit_btn, 5, 0);
+    lv_obj_set_size(exit_btn, 48, 24);
+    lv_obj_set_style_radius(exit_btn, 6, 0);
+    lv_obj_set_style_bg_color(exit_btn, lv_color_hex(0x10212A), 0);
+    lv_obj_set_style_bg_color(exit_btn, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(exit_btn, sstvExitClicked, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *exit_label = makeLabel(exit_btn, menuFont(&lv_font_montserrat_14), kColorCallIdle);
+    lv_label_set_text(exit_label, menuText("EXIT", "退出"));
+    lv_obj_center(exit_label);
+
+    lv_obj_t *title = makeLabel(scr, menuFont(&lv_font_montserrat_16), kColorAccent);
+    lv_obj_set_width(title, kWidth - 64);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(title, 56, 2);
+    lv_label_set_text(title, "SSTV");
+
+    // JPEG picker: 7 rows, paged; tap selects (highlighted).
+    const size_t first = s_sstv_page * kSstvRows;
+    for (size_t row = 0u; row < kSstvRows; ++row) {
+        const size_t idx = first + row;
+        if (idx >= s_sstv_file_count && row != 0u) break;
+        lv_obj_t *item = lv_button_create(scr);
+        lv_obj_set_pos(item, 5, 30 + static_cast<int>(row) * 27);
+        lv_obj_set_size(item, kWidth - 10, 25);
+        lv_obj_set_style_radius(item, 4, 0);
+        const bool selected = static_cast<int>(idx) == s_sstv_selected;
+        lv_obj_set_style_bg_color(item, lv_color_hex(selected ? 0x1D4E63 : 0x10212A), 0);
+        lv_obj_set_style_bg_color(item, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+        if (idx < s_sstv_file_count) {
+            lv_obj_add_event_cb(item, sstvFileClicked, LV_EVENT_CLICKED,
+                                reinterpret_cast<void *>(static_cast<intptr_t>(idx)));
+        }
+        lv_obj_t *label = makeLabel(item, &lv_font_montserrat_14, kColorCallIdle);
+        lv_obj_align(label, LV_ALIGN_LEFT_MID, 6, 0);
+        lv_label_set_text(label, idx < s_sstv_file_count ? s_sstv_files[idx]
+                          : (!STORAGE_SdMounted() ? menuText("NO SD CARD", "无TF卡")
+                                                  : menuText("NO JPEG", "无图片")));
+    }
+
+    s_sstv_lbl_status = makeLabel(scr, &lv_font_montserrat_14, kColorCaption);
+    lv_obj_set_width(s_sstv_lbl_status, kWidth - 8);
+    lv_obj_set_style_text_align(s_sstv_lbl_status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_sstv_lbl_status, 4, 224);
+    char line[96];
+    if (busy) {
+        snprintf(line, sizeof(line), "TX %s %u%%",
+                 snap.mode == SSTV_MODE_ROBOT36 ? "R36" : "M1",
+                 static_cast<unsigned>(snap.progress_percent));
+    } else if (snap.state == SSTV_STATE_DONE) {
+        snprintf(line, sizeof(line), "%s", menuText("DONE", "发送完成"));
+    } else if (snap.state == SSTV_STATE_ERROR) {
+        snprintf(line, sizeof(line), "ERR %.24s", snap.error);
+    } else {
+        snprintf(line, sizeof(line), "%s",
+                 s_sstv_selected >= 0 ? s_sstv_files[s_sstv_selected]
+                                      : menuText("SELECT FILE", "选择图片"));
+    }
+    lv_label_set_text(s_sstv_lbl_status, line);
+
+    auto small_button = [scr](int x, int w, const char *text,
+                              lv_event_cb_t callback, void *user_data) {
+        lv_obj_t *button = lv_button_create(scr);
+        lv_obj_set_pos(button, x, 246);
+        lv_obj_set_size(button, w, 32);
+        lv_obj_set_style_radius(button, 6, 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x10212A), 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+        lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, user_data);
+        lv_obj_t *label = makeLabel(button, &lv_font_montserrat_14, kColorCallIdle);
+        lv_label_set_text(label, text);
+        lv_obj_center(label);
+        return button;
+    };
+    small_button(5, 40, "<", sstvPageClicked, reinterpret_cast<void *>(static_cast<intptr_t>(-1)));
+    small_button(50, 40, ">", sstvPageClicked, reinterpret_cast<void *>(static_cast<intptr_t>(1)));
+    small_button(95, 60, s_sstv_mode == SSTV_MODE_ROBOT36 ? "R36" : "M1",
+                 sstvModeClicked, nullptr);
+    s_sstv_btn_send = small_button(160, 75, busy ? "STOP" : "SEND", sstvSendClicked, nullptr);
+    if (busy) {
+        lv_obj_set_style_bg_color(s_sstv_btn_send, lv_color_hex(0x7A2A2A), 0);
+    }
+    s_sstv_rev = snap.revision;
+}
 #endif // NRL_BOARD == NRL_BOARD_BI4UMD
 
 void buildMenuUi()
@@ -2481,6 +2674,7 @@ void buildMenuUi()
     else if (s_menu_page == MenuPage::Cw) buildCwMenu();
 #if NRL_BOARD == NRL_BOARD_BI4UMD
     else if (s_menu_page == MenuPage::Map) buildMapMenu();
+    else if (s_menu_page == MenuPage::Sstv) buildSstvMenu();
 #endif
     else buildMainMenu();
 #if NRL_BOARD == NRL_BOARD_BI4UMD
@@ -3779,8 +3973,9 @@ void refreshOtaNotice()
 size_t menuItemCount()
 {
 #if NRL_BOARD == NRL_BOARD_BI4UMD
-    if (s_menu_page == MenuPage::Main) return 11u;
+    if (s_menu_page == MenuPage::Main) return 12u;
     if (s_menu_page == MenuPage::Map) return 1u;
+    if (s_menu_page == MenuPage::Sstv) return 1u;
 #else
     if (s_menu_page == MenuPage::Main) return 10u;
 #endif
@@ -3889,6 +4084,12 @@ void confirmMainMenu()
         case 10:
             s_menu_page = MenuPage::Map;
             s_menu_index = 0u;
+            buildMenuUi();
+            break;
+        case 11:
+            s_menu_page = MenuPage::Sstv;
+            s_menu_index = 0u;
+            sstvScanFiles();
             buildMenuUi();
             break;
 #endif
@@ -4118,6 +4319,14 @@ void processMenuInput(uint32_t now)
         buildHomeContent();
         return;
     }
+    if (s_sstv_exit_requested) {
+        s_sstv_exit_requested = false;
+        s_menu_active = false;
+        s_menu_message[0] = '\0';
+        s_bi4umd_page = Bi4umdPage::Radio;
+        buildHomeContent();
+        return;
+    }
 #endif
     if (s_menu_open_requested) {
         s_menu_open_requested = false;
@@ -4240,6 +4449,15 @@ void processMenuInput(uint32_t now)
     if (s_menu_page == MenuPage::Map) {
         refreshMapMenu();
     }
+    if (s_menu_page == MenuPage::Sstv) {
+        SstvSnapshot snap{};
+        SSTV_SERVICE_GetSnapshot(&snap);
+        if (snap.revision != s_sstv_rev) {
+            // Progress/state changed mid-transmission: repaint the page so the
+            // status line and SEND/STOP button track the service.
+            buildMenuUi();
+        }
+    }
 #endif
 }
 
@@ -4267,6 +4485,8 @@ extern "C" void Display_MenuNavigate(const int direction)
     }
     // Map page pans/zooms by touch only; VOL swipe would rebuild it.
     if (s_menu_page == MenuPage::Map) return;
+    // SSTV page is touch-only as well.
+    if (s_menu_page == MenuPage::Sstv) return;
     int pending = s_menu_nav_pending + (direction > 0 ? 1 : -1);
     if (pending > 8) pending = 8;
     if (pending < -8) pending = -8;
