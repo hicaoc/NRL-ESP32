@@ -27,11 +27,12 @@ extern "C" {
 
 #define SSTV_SAMPLE_RATE_HZ 16000u
 #define SSTV_CHUNK_SAMPLES 160u // 10 ms per push tick
-#define SSTV_IMAGE_WIDTH 320u
+#define SSTV_IMAGE_WIDTH 320u   // Robot 36 / Martin M1; PD120 is 640
 
 typedef enum {
     SSTV_MODE_ROBOT36 = 0, // 320x240, ~36.6 s airtime
     SSTV_MODE_MARTIN_M1,   // 320x256, ~114.9 s airtime
+    SSTV_MODE_PD120,       // 640x496, ~126.7 s airtime
 } SSTV_Mode;
 
 // Reset the generator for a new frame. No audio comes out before
@@ -39,8 +40,9 @@ typedef enum {
 void SSTV_TxInit(SSTV_Mode mode);
 
 // Hand over the frame buffer (RGB565, owned by the caller, must outlive the
-// transmission). Expected geometry: 320x240 (Robot 36) or 320x256 (Martin
-// M1); anything else is rejected and the generator stays silent.
+// transmission). Expected geometry: 320x240 (Robot 36), 320x256 (Martin M1)
+// or 640x496 (PD120); anything else is rejected and the generator stays
+// silent.
 bool SSTV_TxSetImage(const uint16_t *rgb565, uint16_t width, uint16_t height);
 
 // Fill `out` with the next SSTV_CHUNK_SAMPLES of modulated audio. Returns

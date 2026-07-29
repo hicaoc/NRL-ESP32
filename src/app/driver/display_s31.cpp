@@ -34,6 +34,8 @@
 #include "i2c1.h"
 #include "status_io.h"
 
+#include <bsp/camera.h>
+
 #include <dirent.h>
 #include <math.h>
 #include <stdint.h>
@@ -196,6 +198,12 @@ enum class Action : intptr_t {
     SstvRxSource,
     SstvRxToggle,
     SstvSave,
+    SstvCam,
+    SstvLog,
+    SstvLogPrev,
+    SstvLogNext,
+    SstvLogView,
+    SstvLogBack,
 };
 
 enum class AudioControl : intptr_t {
@@ -477,6 +485,17 @@ size_t s_sstv_file_index = 0u;
 uint32_t s_sstv_img_rev = 0u;
 char s_sstv_msg[96] = {};       // transient save/status message
 uint32_t s_sstv_msg_ms = 0u;
+
+// RX log viewer (sub-page of the SSTV page): saved frames at
+// /sdcard/sstv_rx_*.jpg, static rebuild-on-action like the CW score page.
+constexpr size_t kSstvLogMax = 32u;
+uint8_t s_sstv_view = 0u; // 0 = main SSTV page, 1 = RX log list, 2 = log viewer
+char s_sstv_log_files[kSstvLogMax][kSstvNameChars] = {};
+size_t s_sstv_log_count = 0u;
+size_t s_sstv_log_index = 0u;
+CoverBitmap s_sstv_log_bmp = {};
+lv_image_dsc_t s_sstv_log_dsc = {};
+lv_obj_t *s_img_sstv_log = nullptr;
 lv_obj_t *s_btn_video_tx_label = nullptr;
 CoverBitmap s_video_bmp = {};
 lv_image_dsc_t s_video_dsc = {};
@@ -846,6 +865,13 @@ const TrEntry kTr[] = {
     {"TX error: %s", "发送错误：%s"},
     {"TX idle (%s)", "发送空闲（%s）"},
     {"RX off", "接收关闭"},
+    {"camera busy (video TX)", "摄像头忙（视频通话中）"},
+    {"camera capture failed", "拍照失败"},
+    {"no saved frames", "没有已保存的图像"},
+    {"decode failed", "解码失败"},
+    {"Up", "上一个"},
+    {"Down", "下一个"},
+    {"View", "查看"},
     {"Station", "台站"},
     {"Audio", "音频"},
     {"BT", "蓝牙"},
@@ -3988,6 +4014,12 @@ void buildMap()
 
 void refreshSstvPage();
 
+const char *sstvModeName(SSTV_Mode mode)
+{
+    return mode == SSTV_MODE_ROBOT36 ? "ROBOT36" : mode == SSTV_MODE_MARTIN_M1 ? "MARTIN1"
+                                                                              : "PD120";
+}
+
 void scanSstvFiles()
 {
     s_sstv_file_count = 0u;
@@ -4060,6 +4092,179 @@ void saveSstvFromPage()
     refreshSstvPage();
 }
 
+// Capture one OV3660 frame and queue it as the TX image. Runs on the UI
+// task and blocks about a second while the sensor's AEC/AWB settles.
+void camSstvFromPage()
+{
+    if (VIDEO_TxEnabled()) {
+        snprintf(s_sstv_msg, sizeof(s_sstv_msg), "%s", tr("camera busy (video TX)"));
+        s_sstv_msg_ms = millis();
+        refreshSstvPage();
+        return;
+    }
+    bsp_camera_config_t cfg = BSP_CAMERA_DEFAULT_CONFIG();
+    bsp_camera_t *cam = nullptr;
+    bool sent = false;
+    if (bsp_camera_open(&cfg, &cam) == ESP_OK && cam != nullptr) {
+        (void)bsp_camera_set_jpeg_quality(cam, 10);
+        if (bsp_camera_start(cam) == ESP_OK) {
+            for (int i = 0; i < 8 && !sent; ++i) {
+                bsp_camera_frame_t frame = {};
+                if (bsp_camera_get_frame(cam, &frame) == ESP_OK && frame.data != nullptr) {
+                    if (i >= 5) { // first frames: exposure/white-balance settling
+                        sent = SSTV_SERVICE_SendJpegBuffer(
+                            static_cast<const uint8_t *>(frame.data), frame.size,
+                            s_sstv_tx_mode);
+                    }
+                    (void)bsp_camera_return_frame(cam, &frame);
+                }
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
+            (void)bsp_camera_stop(cam);
+        }
+        (void)bsp_camera_close(cam);
+    }
+    if (!sent) {
+        snprintf(s_sstv_msg, sizeof(s_sstv_msg), "%s", tr("camera capture failed"));
+        s_sstv_msg_ms = millis();
+    }
+    refreshSstvPage();
+}
+
+// ---- RX log (saved frames) ---------------------------------------------------
+
+void scanSstvLogFiles()
+{
+    s_sstv_log_count = 0u;
+    if (!STORAGE_SdMounted()) {
+        return;
+    }
+    DIR *dir = opendir(STORAGE_SdMountPoint());
+    if (dir == nullptr) {
+        return;
+    }
+    while (s_sstv_log_count < kSstvLogMax) {
+        const struct dirent *ent = readdir(dir);
+        if (ent == nullptr) {
+            break;
+        }
+        const size_t len = strlen(ent->d_name);
+        if (len < 13u || len >= kSstvNameChars) {
+            continue;
+        }
+        if (strncasecmp(ent->d_name, "sstv_rx_", 8u) != 0 ||
+            strcasecmp(ent->d_name + len - 4u, ".jpg") != 0) {
+            continue;
+        }
+        snprintf(s_sstv_log_files[s_sstv_log_count], kSstvNameChars, "%s", ent->d_name);
+        ++s_sstv_log_count;
+    }
+    closedir(dir);
+    // Insertion sort; the tick suffix is zero-padded by snprintf only per
+    // value, so this is rough chronological order -- good enough for a log.
+    for (size_t i = 1u; i < s_sstv_log_count; ++i) {
+        char key[kSstvNameChars];
+        snprintf(key, sizeof(key), "%s", s_sstv_log_files[i]);
+        size_t j = i;
+        while (j > 0u && strcmp(s_sstv_log_files[j - 1u], key) > 0) {
+            snprintf(s_sstv_log_files[j], kSstvNameChars, "%s", s_sstv_log_files[j - 1u]);
+            --j;
+        }
+        snprintf(s_sstv_log_files[j], kSstvNameChars, "%s", key);
+    }
+    if (s_sstv_log_index >= s_sstv_log_count) {
+        s_sstv_log_index = 0u;
+    }
+}
+
+void buildSstvLog()
+{
+    clearScreen();
+    s_page = Page::Sstv;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+    scanSstvLogFiles();
+
+    lv_obj_t *box = panel(scr, 24, 76, 752, 288);
+    fieldLabel(box, 0, 0, "RX LOG (/sdcard/sstv_rx_*.jpg)");
+    constexpr size_t kRows = 8u;
+    if (s_sstv_log_count == 0u) {
+        lv_obj_t *lbl = label(box, &lv_font_montserrat_20, kColorSub);
+        lv_obj_set_pos(lbl, 0, 40);
+        lv_label_set_text(lbl, tr("no saved frames"));
+    } else {
+        const size_t start = s_sstv_log_index >= kRows ? s_sstv_log_index - kRows + 1u : 0u;
+        for (size_t r = 0u; r < kRows && start + r < s_sstv_log_count; ++r) {
+            const size_t i = start + r;
+            lv_obj_t *row = label(box, &lv_font_montserrat_20,
+                                  i == s_sstv_log_index ? kColorAccent : kColorText);
+            lv_obj_set_pos(row, 0, 28 + static_cast<int>(r) * 27);
+            char line[56];
+            snprintf(line, sizeof(line), "%s %s", i == s_sstv_log_index ? ">" : " ",
+                     s_sstv_log_files[i]);
+            lv_label_set_text(row, line);
+        }
+    }
+    button(scr, 24, 384, 120, 64, "Up", Action::SstvLogPrev);
+    button(scr, 152, 384, 120, 64, "Down", Action::SstvLogNext);
+    button(scr, 280, 384, 120, 64, "View", Action::SstvLogView);
+    button(scr, 610, 384, 170, 64, "Back", Action::SstvLogBack);
+}
+
+void buildSstvLogView()
+{
+    clearScreen();
+    s_page = Page::Sstv;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+
+    bool shown = false;
+    if (s_sstv_log_count > 0u && STORAGE_SdMounted()) {
+        char path[128];
+        snprintf(path, sizeof(path), "%s/%s", STORAGE_SdMountPoint(),
+                 s_sstv_log_files[s_sstv_log_index]);
+        FILE *file = fopen(path, "rb");
+        if (file != nullptr && fseek(file, 0, SEEK_END) == 0) {
+            const long size = ftell(file);
+            uint8_t *jpeg = static_cast<uint8_t *>(heap_caps_malloc(
+                static_cast<size_t>(size > 0 ? size : 1), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            if (jpeg != nullptr && size > 0 && fseek(file, 0, SEEK_SET) == 0 &&
+                fread(jpeg, 1, static_cast<size_t>(size), file) == static_cast<size_t>(size)) {
+                shown = COVER_DecodeJpeg(jpeg, static_cast<size_t>(size), 480u,
+                                         &s_sstv_log_bmp);
+            }
+            if (jpeg != nullptr) {
+                heap_caps_free(jpeg);
+            }
+            fclose(file);
+        } else if (file != nullptr) {
+            fclose(file);
+        }
+    }
+    if (shown && s_sstv_log_bmp.rgb565 != nullptr) {
+        s_img_sstv_log = lv_image_create(scr);
+        lv_obj_set_size(s_img_sstv_log, s_sstv_log_bmp.width, s_sstv_log_bmp.height);
+        lv_obj_set_pos(s_img_sstv_log, (kWidth - s_sstv_log_bmp.width) / 2, 76);
+        memset(&s_sstv_log_dsc, 0, sizeof(s_sstv_log_dsc));
+        s_sstv_log_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+        s_sstv_log_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+        s_sstv_log_dsc.header.w = s_sstv_log_bmp.width;
+        s_sstv_log_dsc.header.h = s_sstv_log_bmp.height;
+        s_sstv_log_dsc.header.stride = static_cast<uint32_t>(s_sstv_log_bmp.width) * 2u;
+        s_sstv_log_dsc.data = s_sstv_log_bmp.rgb565;
+        s_sstv_log_dsc.data_size = s_sstv_log_bmp.bytes;
+        lv_image_set_src(s_img_sstv_log, &s_sstv_log_dsc);
+        lv_obj_t *name = label(scr, &lv_font_montserrat_16, kColorSub);
+        lv_obj_set_pos(name, 24, 360);
+        lv_label_set_text(name, s_sstv_log_files[s_sstv_log_index]);
+    } else {
+        lv_obj_t *lbl = label(scr, &lv_font_montserrat_20, kColorSub);
+        lv_obj_set_pos(lbl, 24, 96);
+        lv_label_set_text(lbl, tr("decode failed"));
+    }
+    button(scr, 610, 396, 170, 68, "Back", Action::SstvLogBack);
+}
+
 void refreshSstvPage()
 {
     if (s_sstv_lbl_tx == nullptr) {
@@ -4089,8 +4294,7 @@ void refreshSstvPage()
     } else if (snap.state == SSTV_STATE_ERROR) {
         snprintf(text, sizeof(text), tr("TX error: %s"), snap.error);
     } else {
-        snprintf(text, sizeof(text), tr("TX idle (%s)"),
-                 s_sstv_tx_mode == SSTV_MODE_ROBOT36 ? "ROBOT36" : "MARTIN1");
+        snprintf(text, sizeof(text), tr("TX idle (%s)"), sstvModeName(s_sstv_tx_mode));
     }
     setLabelTextIfChanged(s_sstv_lbl_tx, text);
 
@@ -4118,8 +4322,7 @@ void refreshSstvPage()
     }
     setLabelTextIfChanged(s_sstv_lbl_rx2, text);
 
-    setLabelTextIfChanged(s_sstv_mode_label,
-                          s_sstv_tx_mode == SSTV_MODE_ROBOT36 ? "ROBOT36" : "MARTIN1");
+    setLabelTextIfChanged(s_sstv_mode_label, sstvModeName(s_sstv_tx_mode));
     setLabelTextIfChanged(s_sstv_src_label,
                           s_sstv_rx_source == SSTV_SOURCE_MIC ? "Src:MIC" : "Src:NRL");
     setLabelTextIfChanged(s_sstv_rx_toggle_label, snap.rx_active ? tr("Stop") : tr("Start"));
@@ -4137,6 +4340,16 @@ void refreshSstvPage()
 
 void buildSstv()
 {
+    COVER_Free(&s_sstv_log_bmp); // the log viewer owns one decoded frame
+    s_img_sstv_log = nullptr;
+    if (s_sstv_view == 1u) {
+        buildSstvLog();
+        return;
+    }
+    if (s_sstv_view == 2u) {
+        buildSstvLogView();
+        return;
+    }
     clearScreen();
     s_page = Page::Sstv;
     lv_obj_t *scr = lv_screen_active();
@@ -4148,22 +4361,24 @@ void buildSstv()
     lv_obj_set_pos(s_sstv_lbl_file, 0, 24);
     lv_obj_set_width(s_sstv_lbl_file, 380);
     lv_label_set_long_mode(s_sstv_lbl_file, LV_LABEL_LONG_DOT);
-    button(tx, 0, 56, 84, 44, "<", Action::SstvFilePrev);
-    button(tx, 92, 56, 84, 44, ">", Action::SstvFileNext);
-    lv_obj_t *mode_btn = button(tx, 184, 56, 116, 44, "ROBOT36", Action::SstvTxMode);
+    button(tx, 0, 56, 64, 44, "<", Action::SstvFilePrev);
+    button(tx, 72, 56, 64, 44, ">", Action::SstvFileNext);
+    button(tx, 144, 56, 72, 44, "CAM", Action::SstvCam);
+    lv_obj_t *mode_btn = button(tx, 224, 56, 96, 44, "ROBOT36", Action::SstvTxMode);
     s_sstv_mode_label = lv_obj_get_child(mode_btn, 0);
-    button(tx, 308, 56, 80, 44, "Send", Action::SstvSend);
+    button(tx, 328, 56, 60, 44, "Send", Action::SstvSend);
     s_sstv_lbl_tx = label(tx, &lv_font_montserrat_16, kColorSub);
     lv_obj_set_pos(s_sstv_lbl_tx, 0, 112);
     lv_obj_set_width(s_sstv_lbl_tx, 380);
 
     lv_obj_t *rx = panel(scr, 24, 264, 420, 192);
     fieldLabel(rx, 0, 0, "RX RECEIVE");
-    lv_obj_t *src_btn = button(rx, 0, 24, 116, 44, "Src:MIC", Action::SstvRxSource);
+    lv_obj_t *src_btn = button(rx, 0, 24, 100, 44, "Src:MIC", Action::SstvRxSource);
     s_sstv_src_label = lv_obj_get_child(src_btn, 0);
-    lv_obj_t *toggle_btn = button(rx, 124, 24, 116, 44, "Start", Action::SstvRxToggle);
+    lv_obj_t *toggle_btn = button(rx, 108, 24, 100, 44, "Start", Action::SstvRxToggle);
     s_sstv_rx_toggle_label = lv_obj_get_child(toggle_btn, 0);
-    button(rx, 248, 24, 100, 44, "Save", Action::SstvSave);
+    button(rx, 216, 24, 84, 44, "Save", Action::SstvSave);
+    button(rx, 308, 24, 80, 44, "Log", Action::SstvLog);
     s_sstv_lbl_rx1 = label(rx, &lv_font_montserrat_16, kColorSub);
     lv_obj_set_pos(s_sstv_lbl_rx1, 0, 80);
     lv_obj_set_width(s_sstv_lbl_rx1, 380);
@@ -5061,10 +5276,11 @@ void action(lv_event_t *event)
         case Action::Map: buildMap(); break;
         case Action::MapZoomIn: mapZoomStep(1); break;
         case Action::MapZoomOut: mapZoomStep(-1); break;
-        case Action::Sstv: buildSstv(); break;
+        case Action::Sstv: s_sstv_view = 0u; buildSstv(); break;
         case Action::SstvTxMode:
-            s_sstv_tx_mode = s_sstv_tx_mode == SSTV_MODE_ROBOT36 ? SSTV_MODE_MARTIN_M1
-                                                                 : SSTV_MODE_ROBOT36;
+            s_sstv_tx_mode = s_sstv_tx_mode == SSTV_MODE_ROBOT36 ? SSTV_MODE_MARTIN_M1 :
+                             s_sstv_tx_mode == SSTV_MODE_MARTIN_M1 ? SSTV_MODE_PD120
+                                                                   : SSTV_MODE_ROBOT36;
             refreshSstvPage();
             break;
         case Action::SstvFilePrev: stepSstvFile(-1); break;
@@ -5093,6 +5309,35 @@ void action(lv_event_t *event)
             break;
         }
         case Action::SstvSave: saveSstvFromPage(); break;
+        case Action::SstvCam: camSstvFromPage(); break;
+        case Action::SstvLog:
+            s_sstv_view = 1u;
+            s_sstv_log_index = 0u;
+            buildSstv();
+            break;
+        case Action::SstvLogPrev:
+            if (s_sstv_log_count > 0u) {
+                s_sstv_log_index =
+                    (s_sstv_log_index + s_sstv_log_count - 1u) % s_sstv_log_count;
+            }
+            buildSstv();
+            break;
+        case Action::SstvLogNext:
+            if (s_sstv_log_count > 0u) {
+                s_sstv_log_index = (s_sstv_log_index + 1u) % s_sstv_log_count;
+            }
+            buildSstv();
+            break;
+        case Action::SstvLogView:
+            if (s_sstv_log_count > 0u) {
+                s_sstv_view = 2u;
+            }
+            buildSstv();
+            break;
+        case Action::SstvLogBack:
+            s_sstv_view = s_sstv_view == 2u ? 1u : 0u; // viewer -> list -> main
+            buildSstv();
+            break;
         case Action::Cw: buildCw(); break;
         case Action::CwDelete: CW_SERVICE_Delete(); break;
         case Action::CwSend: (void)CW_SERVICE_Send(); break;

@@ -19,6 +19,11 @@
 //     (320 px), separator 0.572 ms 1500 Hz, blue scan, separator, red scan,
 //     separator.
 //
+//   PD120, per 2-line group (Y0 / R-Y / B-Y / Y1, no separators; VIS 95):
+//     sync 20 ms 1200 Hz, porch 2.08 ms 1500 Hz, then four components of
+//     121.6 ms each (640 px). Chroma: full horizontal resolution, vertical
+//     average of the group's two lines (classicsstv.com/pdmodes).
+//
 // All durations are converted to exact sample counts at 16 kHz below; scans
 // that do not divide evenly distribute their pixels over the segment length
 // (pixel boundaries computed from the segment-relative sample index).
@@ -45,6 +50,7 @@ constexpr uint16_t kFreqChromaCenter = 1900u;
 
 constexpr uint8_t kVisRobot36 = 8u;
 constexpr uint8_t kVisMartinM1 = 44u;
+constexpr uint8_t kVisPd120 = 95u;
 
 // Scan channels (s_seg_channel).
 constexpr uint8_t kChY = 0u;  // Robot 36 luminance
@@ -60,6 +66,7 @@ bool s_sin_ready = false;
 SSTV_Mode s_mode = SSTV_MODE_ROBOT36;
 const uint16_t *s_image = nullptr;
 uint16_t s_img_height = 0u;
+uint16_t s_img_width = 0u; // 320 (Robot/Martin) or 640 (PD120)
 uint8_t s_vis_code = 0u;
 uint32_t s_total = 0u;
 uint32_t s_elapsed = 0u;
@@ -115,7 +122,7 @@ uint16_t chromaToFreq(int value)
 
 void pixelRgb(uint16_t x, uint16_t y, uint8_t *r, uint8_t *g, uint8_t *b)
 {
-    const uint16_t px = s_image[static_cast<uint32_t>(y) * SSTV_IMAGE_WIDTH + x];
+    const uint16_t px = s_image[static_cast<uint32_t>(y) * s_img_width + x];
     *r = static_cast<uint8_t>((px >> 8u) & 0xF8u);
     *g = static_cast<uint8_t>((px >> 3u) & 0xFCu);
     *b = static_cast<uint8_t>((px << 3u) & 0xF8u);
@@ -132,6 +139,31 @@ uint8_t luma(uint8_t r, uint8_t g, uint8_t b)
 uint16_t scanFreq()
 {
     const uint32_t px = s_seg_pos * s_seg_pixels / s_seg_len;
+    if (s_mode == SSTV_MODE_PD120) {
+        if (s_seg_channel == kChY) {
+            uint8_t r, g, b;
+            pixelRgb(static_cast<uint16_t>(px), s_seg_line, &r, &g, &b);
+            return levelToFreq(luma(r, g, b));
+        }
+        // PD chroma: full horizontal resolution, vertical average of the
+        // group's two lines.
+        uint32_t r_sum = 0u, g_sum = 0u, b_sum = 0u;
+        const uint16_t row = static_cast<uint16_t>(s_seg_line * 2u);
+        for (uint16_t dy = 0u; dy < 2u; ++dy) {
+            uint8_t r, g, b;
+            pixelRgb(static_cast<uint16_t>(px), static_cast<uint16_t>(row + dy), &r, &g, &b);
+            r_sum += r;
+            g_sum += g;
+            b_sum += b;
+        }
+        const uint8_t r_avg = static_cast<uint8_t>(r_sum >> 1u);
+        const uint8_t g_avg = static_cast<uint8_t>(g_sum >> 1u);
+        const uint8_t b_avg = static_cast<uint8_t>(b_sum >> 1u);
+        const int y_avg = luma(r_avg, g_avg, b_avg);
+        const int diff = (s_seg_channel == kChRy) ? static_cast<int>(r_avg) - y_avg
+                                                  : static_cast<int>(b_avg) - y_avg;
+        return chromaToFreq(diff);
+    }
     if (s_mode == SSTV_MODE_ROBOT36) {
         if (s_seg_channel == kChY) {
             uint8_t r, g, b;
@@ -197,7 +229,28 @@ bool advanceSegment()
             s_line_seg = 0u;
         }
     } else if (s_stage == 1u) {
-        if (s_mode == SSTV_MODE_ROBOT36) {
+        if (s_mode == SSTV_MODE_PD120) {
+            // PD120 (classicsstv.com/pdmodes): 20 ms sync + 2.08 ms porch,
+            // then Y0 / R-Y / B-Y / Y1 with NO separators; every component is
+            // 121.6 ms (640 px). 248 double-lines.
+            if (s_line >= 248u) {
+                s_stage = 2u;
+                return false;
+            }
+            const uint16_t group = s_line;
+            switch (s_line_seg) {
+                case 0: toneSegment(kFreqSync, 320u); break;  // 20 ms sync
+                case 1: toneSegment(kFreqBlack, 33u); break;  // 2.08 ms porch
+                case 2: scanSegment(kChY, static_cast<uint16_t>(group * 2u), 640u, 1946u); break;
+                case 3: scanSegment(kChRy, group, 640u, 1946u); break;
+                case 4: scanSegment(kChBy, group, 640u, 1946u); break;
+                default: scanSegment(kChY, static_cast<uint16_t>(group * 2u + 1u), 640u, 1946u); break;
+            }
+            if (++s_line_seg >= 6u) {
+                s_line_seg = 0u;
+                ++s_line;
+            }
+        } else if (s_mode == SSTV_MODE_ROBOT36) {
             if (s_line >= 120u) {
                 s_stage = 2u;
                 return false;
@@ -263,10 +316,13 @@ void SSTV_TxInit(SSTV_Mode mode)
     s_mode = mode;
     s_image = nullptr;
     s_img_height = 0u;
-    s_vis_code = (mode == SSTV_MODE_ROBOT36) ? kVisRobot36 : kVisMartinM1;
+    s_img_width = 0u;
+    s_vis_code = (mode == SSTV_MODE_ROBOT36) ? kVisRobot36 :
+                 (mode == SSTV_MODE_MARTIN_M1) ? kVisMartinM1 : kVisPd120;
     // VIS header: 4800 + 10 x 480 samples. Robot: 120 groups x 4800 samples;
-    // Martin: 256 lines x 7143 samples.
-    s_total = 9600u + ((mode == SSTV_MODE_ROBOT36) ? 120u * 4800u : 256u * 7143u);
+    // Martin: 256 lines x 7143; PD120: 248 double-lines x 8137.
+    s_total = 9600u + ((mode == SSTV_MODE_ROBOT36) ? 120u * 4800u :
+                       (mode == SSTV_MODE_MARTIN_M1) ? 256u * 7143u : 248u * 8137u);
     s_elapsed = 0u;
     s_phase = 0u;
     s_active = false;
@@ -281,13 +337,16 @@ void SSTV_TxInit(SSTV_Mode mode)
 
 bool SSTV_TxSetImage(const uint16_t *rgb565, uint16_t width, uint16_t height)
 {
-    const uint16_t expected = (s_mode == SSTV_MODE_ROBOT36) ? 240u : 256u;
-    if (rgb565 == nullptr || width != SSTV_IMAGE_WIDTH || height != expected) {
+    const uint16_t exp_w = (s_mode == SSTV_MODE_PD120) ? 640u : SSTV_IMAGE_WIDTH;
+    const uint16_t exp_h = (s_mode == SSTV_MODE_ROBOT36) ? 240u :
+                           (s_mode == SSTV_MODE_MARTIN_M1) ? 256u : 496u;
+    if (rgb565 == nullptr || width != exp_w || height != exp_h) {
         s_active = false;
         return false;
     }
     s_image = rgb565;
     s_img_height = height;
+    s_img_width = width;
     s_active = true;
     return true;
 }

@@ -23,8 +23,20 @@ namespace {
 
 constexpr size_t kTaskStackBytes = 8192u;
 constexpr size_t kJpegCap = 2u * 1024u * 1024u; // input JPEG read cap
-constexpr uint32_t kDecodeMaxDim = 640u;        // plenty for a 320px frame
+constexpr size_t kCamJpegCap = 192u * 1024u;    // camera JPEG request buffer
+constexpr uint32_t kDecodeMaxDim = 640u;        // PD120 needs the full 640 px
 constexpr uint16_t kFrameWidth = SSTV_IMAGE_WIDTH;
+
+// TX frame geometry per mode (RX is always 320 wide).
+uint16_t frameWidth(SSTV_Mode mode)
+{
+    return mode == SSTV_MODE_PD120 ? 640u : 320u;
+}
+
+uint16_t frameHeight(SSTV_Mode mode)
+{
+    return mode == SSTV_MODE_ROBOT36 ? 240u : (mode == SSTV_MODE_MARTIN_M1) ? 256u : 496u;
+}
 
 SemaphoreHandle_t s_lock = nullptr;
 TaskHandle_t s_task = nullptr;
@@ -32,8 +44,11 @@ SstvSnapshot s_snap = {};
 
 // Latched request for the worker.
 bool s_stop_requested = false;
+bool s_req_from_buffer = false;
 SSTV_Mode s_req_mode = SSTV_MODE_ROBOT36;
 char s_req_path[sizeof(s_snap.path)] = {};
+uint8_t *s_req_jpeg = nullptr; // kCamJpegCap, allocated once (camera frames)
+size_t s_req_jpeg_size = 0u;
 
 // Frame buffer, allocated once (160 KB): PSRAM where available.
 uint16_t *s_image = nullptr;
@@ -89,13 +104,59 @@ void setState(SstvState state)
     ++s_snap.revision;
 }
 
+// Decode a JPEG from memory and cover-crop-scale it into s_image at the
+// mode's frame geometry. Runs in the worker task WITHOUT s_lock held.
+bool prepareImageBuffer(const uint8_t *jpeg, size_t jpeg_size, SSTV_Mode mode,
+                        const char *label, const char **error)
+{
+    const uint16_t target_w = frameWidth(mode);
+    const uint16_t target_h = frameHeight(mode);
+    CoverBitmap bmp = {};
+    const bool decoded = COVER_DecodeJpeg(jpeg, jpeg_size, kDecodeMaxDim, &bmp);
+    if (!decoded || bmp.rgb565 == nullptr || bmp.width == 0u || bmp.height == 0u) {
+        COVER_Free(&bmp);
+        *error = "DECODE";
+        return false;
+    }
+    if (s_image == nullptr) {
+        COVER_Free(&bmp);
+        *error = "NOMEM";
+        return false;
+    }
+
+    // Cover-crop: scale so the source covers the frame, then center-sample.
+    const float scale = (static_cast<float>(target_w) / bmp.width >
+                         static_cast<float>(target_h) / bmp.height)
+                            ? static_cast<float>(target_w) / bmp.width
+                            : static_cast<float>(target_h) / bmp.height;
+    const float view_w = static_cast<float>(target_w) / scale;
+    const float view_h = static_cast<float>(target_h) / scale;
+    const float x0 = (static_cast<float>(bmp.width) - view_w) * 0.5f;
+    const float y0 = (static_cast<float>(bmp.height) - view_h) * 0.5f;
+    for (uint16_t y = 0u; y < target_h; ++y) {
+        int sy = static_cast<int>(y0 + (static_cast<float>(y) + 0.5f) * view_h / target_h);
+        if (sy < 0) sy = 0;
+        if (sy >= bmp.height) sy = bmp.height - 1u;
+        for (uint16_t x = 0u; x < target_w; ++x) {
+            int sx = static_cast<int>(x0 + (static_cast<float>(x) + 0.5f) * view_w / target_w);
+            if (sx < 0) sx = 0;
+            if (sx >= bmp.width) sx = bmp.width - 1u;
+            s_image[static_cast<uint32_t>(y) * target_w + x] =
+                reinterpret_cast<const uint16_t *>(bmp.rgb565)[static_cast<uint32_t>(sy) * bmp.width + sx];
+        }
+    }
+    ESP_LOGI(TAG, "prepared %ux%u frame from %ux%u (%s)", target_w, target_h,
+             bmp.width, bmp.height, label);
+    COVER_Free(&bmp);
+    return true;
+}
+
 // Decode `path` and cover-crop-scale it into s_image at the mode's frame
 // geometry. Runs in the worker task WITHOUT s_lock held; on failure it
 // returns false with a short reason in `error` (the caller files it into the
 // snapshot under the lock).
 bool prepareImage(const char *path, SSTV_Mode mode, const char **error)
 {
-    const uint16_t target_h = (mode == SSTV_MODE_ROBOT36) ? 240u : 256u;
     FILE *file = fopen(path, "rb");
     if (file == nullptr) {
         *error = "OPEN";
@@ -122,46 +183,9 @@ bool prepareImage(const char *path, SSTV_Mode mode, const char **error)
         *error = "READ";
         return false;
     }
-
-    CoverBitmap bmp = {};
-    const bool decoded = COVER_DecodeJpeg(jpeg, jpeg_size, kDecodeMaxDim, &bmp);
+    const bool ok = prepareImageBuffer(jpeg, jpeg_size, mode, path, error);
     heap_caps_free(jpeg);
-    if (!decoded || bmp.rgb565 == nullptr || bmp.width == 0u || bmp.height == 0u) {
-        COVER_Free(&bmp);
-        *error = "DECODE";
-        return false;
-    }
-    if (s_image == nullptr) {
-        COVER_Free(&bmp);
-        *error = "NOMEM";
-        return false;
-    }
-
-    // Cover-crop: scale so the source covers the frame, then center-sample.
-    const float scale = (static_cast<float>(kFrameWidth) / bmp.width >
-                         static_cast<float>(target_h) / bmp.height)
-                            ? static_cast<float>(kFrameWidth) / bmp.width
-                            : static_cast<float>(target_h) / bmp.height;
-    const float view_w = static_cast<float>(kFrameWidth) / scale;
-    const float view_h = static_cast<float>(target_h) / scale;
-    const float x0 = (static_cast<float>(bmp.width) - view_w) * 0.5f;
-    const float y0 = (static_cast<float>(bmp.height) - view_h) * 0.5f;
-    for (uint16_t y = 0u; y < target_h; ++y) {
-        int sy = static_cast<int>(y0 + (static_cast<float>(y) + 0.5f) * view_h / target_h);
-        if (sy < 0) sy = 0;
-        if (sy >= bmp.height) sy = bmp.height - 1u;
-        for (uint16_t x = 0u; x < kFrameWidth; ++x) {
-            int sx = static_cast<int>(x0 + (static_cast<float>(x) + 0.5f) * view_w / kFrameWidth);
-            if (sx < 0) sx = 0;
-            if (sx >= bmp.width) sx = bmp.width - 1u;
-            s_image[static_cast<uint32_t>(y) * kFrameWidth + x] =
-                reinterpret_cast<const uint16_t *>(bmp.rgb565)[static_cast<uint32_t>(sy) * bmp.width + sx];
-        }
-    }
-    ESP_LOGI(TAG, "prepared %ux%u frame from %ux%u (%s)", kFrameWidth, target_h,
-             bmp.width, bmp.height, path);
-    COVER_Free(&bmp);
-    return true;
+    return ok;
 }
 
 void worker(void *)
@@ -172,18 +196,23 @@ void worker(void *)
 
         xSemaphoreTake(s_lock, portMAX_DELAY);
         const SSTV_Mode mode = s_req_mode;
+        const bool from_buffer = s_req_from_buffer;
         char path[sizeof(s_req_path)] = {};
         snprintf(path, sizeof(path), "%s", s_req_path);
         s_stop_requested = false;
         s_snap.mode = mode;
         s_snap.progress_percent = 0u;
         s_snap.error[0] = '\0';
-        snprintf(s_snap.path, sizeof(s_snap.path), "%s", path);
+        snprintf(s_snap.path, sizeof(s_snap.path), "%s",
+                 from_buffer ? "(camera)" : path);
         setState(SSTV_STATE_PREPARING);
         xSemaphoreGive(s_lock);
 
         const char *error = nullptr;
-        const bool ready = prepareImage(path, mode, &error);
+        const bool ready = from_buffer
+                               ? prepareImageBuffer(s_req_jpeg, s_req_jpeg_size, mode,
+                                                    "camera", &error)
+                               : prepareImage(path, mode, &error);
 
         xSemaphoreTake(s_lock, portMAX_DELAY);
         const bool stopped = s_stop_requested;
@@ -199,8 +228,7 @@ void worker(void *)
         bool completed = false;
         if (ready && !stopped) {
             SSTV_TxInit(mode);
-            (void)SSTV_TxSetImage(s_image, kFrameWidth,
-                                  (mode == SSTV_MODE_ROBOT36) ? 240u : 256u);
+            (void)SSTV_TxSetImage(s_image, frameWidth(mode), frameHeight(mode));
             for (;;) {
                 const bool more = SSTV_TxFillChunk(chunk);
                 AudioRouter_PushFrame(AUDIO_SRC_SSTV_NRL, SSTV_SAMPLE_RATE_HZ, chunk,
@@ -253,14 +281,19 @@ void SSTV_SERVICE_Init(void)
         return;
     }
     s_image = static_cast<uint16_t *>(heap_caps_malloc(
-        static_cast<size_t>(kFrameWidth) * 256u * sizeof(uint16_t),
+        static_cast<size_t>(640u) * 496u * sizeof(uint16_t), // largest frame: PD120
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (s_image == nullptr) {
         s_image = static_cast<uint16_t *>(heap_caps_malloc(
-            static_cast<size_t>(kFrameWidth) * 256u * sizeof(uint16_t), MALLOC_CAP_8BIT));
+            static_cast<size_t>(640u) * 496u * sizeof(uint16_t), MALLOC_CAP_8BIT));
     }
     if (s_image == nullptr) {
         ESP_LOGE(TAG, "no frame buffer");
+    }
+    s_req_jpeg = static_cast<uint8_t *>(
+        heap_caps_malloc(kCamJpegCap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (s_req_jpeg == nullptr) {
+        ESP_LOGW(TAG, "no camera request buffer, SendJpegBuffer disabled");
     }
     s_rx_image = static_cast<uint16_t *>(heap_caps_malloc(
         static_cast<size_t>(kFrameWidth) * 256u * sizeof(uint16_t),
@@ -298,6 +331,28 @@ bool SSTV_SERVICE_SendJpeg(const char *path, SSTV_Mode mode)
         return false;
     }
     snprintf(s_req_path, sizeof(s_req_path), "%s", path);
+    s_req_mode = mode;
+    s_req_from_buffer = false;
+    xSemaphoreGive(s_lock);
+    xTaskNotifyGive(s_task);
+    return true;
+}
+
+bool SSTV_SERVICE_SendJpegBuffer(const uint8_t *jpeg, size_t jpeg_size, SSTV_Mode mode)
+{
+    if (jpeg == nullptr || jpeg_size == 0u || jpeg_size > kCamJpegCap ||
+        s_lock == nullptr || s_task == nullptr || s_req_jpeg == nullptr) {
+        return false;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_snap.state == SSTV_STATE_PREPARING || s_snap.state == SSTV_STATE_SENDING ||
+        s_snap.rx_active) {
+        xSemaphoreGive(s_lock);
+        return false;
+    }
+    memcpy(s_req_jpeg, jpeg, jpeg_size);
+    s_req_jpeg_size = jpeg_size;
+    s_req_from_buffer = true;
     s_req_mode = mode;
     xSemaphoreGive(s_lock);
     xTaskNotifyGive(s_task);

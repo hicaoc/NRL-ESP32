@@ -2638,6 +2638,7 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     // SSTV picture transmission:
     //   AT+SSTV=ROBOT36,<path>   start a Robot 36 frame (320x240, ~37 s)
     //   AT+SSTV=MARTIN1,<path>   start a Martin M1 frame (320x256, ~115 s)
+    //   AT+SSTV=PD120,<path>     start a PD120 frame (640x496, ~127 s)
     //   AT+SSTV?                 state / mode / progress
     //   AT+SSTV=STOP             abort the running frame
     //   AT+SSTV=RX,MIC|NRL       start receiving from the mic tap / NRL downlink
@@ -2653,7 +2654,8 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             else if (snap.state == SSTV_STATE_ERROR) state = "ERROR";
             char status[192];
             snprintf(status, sizeof(status), "%s,MODE=%s,PROGRESS=%u%%,PATH=%s,ERR=%s",
-                     state, snap.mode == SSTV_MODE_ROBOT36 ? "ROBOT36" : "MARTIN1",
+                     state, snap.mode == SSTV_MODE_ROBOT36 ? "ROBOT36" :
+                             snap.mode == SSTV_MODE_MARTIN_M1 ? "MARTIN1" : "PD120",
                      static_cast<unsigned>(snap.progress_percent), snap.path, snap.error);
             appendKeyValueLine(result->payload, sizeof(result->payload),
                                &result->payload_size, "SSTV", status);
@@ -2717,6 +2719,8 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         } else if ((mode_len == 7u && strncasecmp(command.value, "MARTIN1", 7u) == 0) ||
                    (mode_len == 9u && strncasecmp(command.value, "MARTIN_M1", 9u) == 0)) {
             mode = SSTV_MODE_MARTIN_M1;
+        } else if (mode_len == 5u && strncasecmp(command.value, "PD120", 5u) == 0) {
+            mode = SSTV_MODE_PD120;
         } else {
             appendKeyValueLine(result->payload, sizeof(result->payload),
                                &result->payload_size, "ERR", "SSTV_MODE");

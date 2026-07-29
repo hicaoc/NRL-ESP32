@@ -64,6 +64,10 @@ void SSTV_SERVICE_Init(void);
 // arguments are unusable; decode errors surface later via the snapshot.
 bool SSTV_SERVICE_SendJpeg(const char *path, SSTV_Mode mode);
 
+// Same, from an in-memory JPEG (e.g. a camera frame). The bytes are copied
+// out before returning, so the caller's buffer can be recycled immediately.
+bool SSTV_SERVICE_SendJpegBuffer(const uint8_t *jpeg, size_t jpeg_size, SSTV_Mode mode);
+
 // Abort the running/queued transmission. Returns false when nothing was
 // active.
 bool SSTV_SERVICE_Stop(void);

@@ -108,6 +108,26 @@ int8_t s_chroma[2][160];    // [0]=R-Y, [1]=B-Y
 uint8_t s_rgb[3][kWidth];   // Martin G, B, R
 uint16_t s_row[kWidth];     // composed output row
 
+// Robot odd/even slip recovery: Y pixels stage here until the separator
+// after the scan (1500 Hz even / 2300 Hz odd) confirms which group half the
+// line really is -- a missed sync would otherwise shift every later line.
+uint8_t s_ystage[kWidth];
+bool s_half_valid[2] = {false, false};
+bool s_commit_pending = false; // Y scan done, separator not judged yet
+uint32_t s_sep_win = 0u;       // separator window start (Y scan end)
+float s_sep_acc = 0.0f;
+uint16_t s_sep_count = 0u;
+
+// Slant/clock-drift correction: incremental least squares over sync leading
+// edges, measured position m ~= a + b*n with n = half-line (Robot) or line
+// (Martin) sequence number. O(1) memory; double accumulators keep the
+// products exact enough over a frame (n < 500, m < 2M).
+double s_lsq_count = 0.0;
+double s_lsq_sx = 0.0;
+double s_lsq_sxx = 0.0;
+double s_lsq_sy = 0.0;
+double s_lsq_sxy = 0.0;
+
 float clampf(float v, float lo, float hi)
 {
     return v < lo ? lo : (v > hi ? hi : v);
@@ -164,10 +184,73 @@ void emitRobotGroup(uint16_t group)
     }
 }
 
+// Nominal samples per sync sequence step (Robot: half line, Martin: line).
+uint32_t seqPeriod()
+{
+    return (s_mode == SSTV_MODE_ROBOT36) ? s_timing->line_period / 2u
+                                         : s_timing->line_period;
+}
+
+uint32_t seqNumber()
+{
+    return (s_mode == SSTV_MODE_ROBOT36) ? static_cast<uint32_t>(s_group) * 2u + s_half
+                                         : s_group;
+}
+
+void lsqAdd(double n, double m)
+{
+    s_lsq_count += 1.0;
+    s_lsq_sx += n;
+    s_lsq_sxx += n * n;
+    s_lsq_sy += m;
+    s_lsq_sxy += n * m;
+}
+
+// Signal lost and reacquired: drop the fit and restart it from this point.
+void lsqReset(double n, double m)
+{
+    s_lsq_count = 0.0;
+    s_lsq_sx = 0.0;
+    s_lsq_sxx = 0.0;
+    s_lsq_sy = 0.0;
+    s_lsq_sxy = 0.0;
+    lsqAdd(n, m);
+}
+
+// Fitted sync position for sequence n; false while the fit is too young
+// (<10 points) so the caller falls back to the raw per-line anchor.
+bool lsqPredict(double n, double *out)
+{
+    if (s_lsq_count < 10.0) {
+        return false;
+    }
+    const double denom = s_lsq_count * s_lsq_sxx - s_lsq_sx * s_lsq_sx;
+    if (denom <= 0.0) {
+        return false;
+    }
+    const double b = (s_lsq_count * s_lsq_sxy - s_lsq_sx * s_lsq_sy) / denom;
+    const double a = (s_lsq_sy - b * s_lsq_sx) / s_lsq_count;
+    *out = a + b * n;
+    return true;
+}
+
 void finishLineSet()
 {
     if (s_mode == SSTV_MODE_ROBOT36) {
         if (s_half == 1u) {
+            // A sync lost mid-group leaves one half unsampled: repeat the
+            // sibling luminance with neutral chroma instead of shifting the
+            // whole frame by one line.
+            if (!s_half_valid[0]) {
+                memcpy(s_ybuf[0], s_ybuf[1], kWidth);
+                memset(s_chroma[0], 0, 160u);
+            }
+            if (!s_half_valid[1]) {
+                memcpy(s_ybuf[1], s_ybuf[0], kWidth);
+                memset(s_chroma[1], 0, 160u);
+            }
+            s_half_valid[0] = false;
+            s_half_valid[1] = false;
             emitRobotGroup(s_group);
             s_lines_received = static_cast<uint16_t>(s_lines_received + 2u);
             s_half = 0u;
@@ -200,7 +283,7 @@ void storePixel(uint8_t dest, uint16_t px)
     if (s_mode == SSTV_MODE_ROBOT36) {
         if (dest == 0u) {
             if (px < kWidth) {
-                s_ybuf[s_half][px] = freqToLevel(mean);
+                s_ystage[px] = freqToLevel(mean); // committed after the separator check
             }
         } else if (px < 160u) {
             s_chroma[s_half][px] = freqToChroma(mean);
@@ -208,6 +291,47 @@ void storePixel(uint8_t dest, uint16_t px)
     } else if (px < kWidth) {
         s_rgb[dest][px] = freqToLevel(mean);
     }
+}
+
+// The Y scan of a Robot half-line just ended and the separator was measured:
+// 1500 Hz = even half (R-Y follows), 2300 Hz = odd half (B-Y follows). Only a
+// confident reading overrides the expected half; on a flip the Y staging is
+// committed to the corrected half and a skipped group boundary is caught up.
+void commitRobotHalf()
+{
+    if (s_sep_count > 0u) {
+        const float sep = s_sep_acc / s_sep_count;
+        uint8_t actual = s_half;
+        if (sep < 1750.0f) {
+            actual = 0u;
+        } else if (sep > 2050.0f) {
+            actual = 1u;
+        }
+        if (actual != s_half) {
+            if (actual == 0u) {
+                // Expected the odd half of group g but this is the even half
+                // of g+1: a whole group boundary was missed. Emit g first
+                // when its even half arrived (odd half gets the sibling fill)
+                // so the missed sync costs nothing but one copied line.
+                if (s_half_valid[0]) {
+                    memcpy(s_ybuf[1], s_ybuf[0], kWidth);
+                    memset(s_chroma[1], 0, 160u);
+                    s_half_valid[0] = false;
+                    s_half_valid[1] = false;
+                    emitRobotGroup(s_group);
+                    s_lines_received = static_cast<uint16_t>(s_lines_received + 2u);
+                }
+                if (s_group + 1u < s_timing->groups) {
+                    ++s_group;
+                }
+            }
+            s_half = actual;
+        }
+    }
+    memcpy(s_ybuf[s_half], s_ystage, kWidth);
+    s_half_valid[s_half] = true;
+    s_sep_acc = 0.0f;
+    s_sep_count = 0u;
 }
 
 void startLines(SSTV_Mode mode)
@@ -222,14 +346,21 @@ void startLines(SSTV_Mode mode)
     // after slot 0, so the first line can be planned deterministically; its
     // sync tone is usually still merged with the leader/stop tone in the
     // Goertzel and could not anchor cleanly anyway. Later lines re-anchor on
-    // their own syncs.
+    // their own syncs. This synthetic point also seeds the slant fit.
+    lsqReset(0.0, static_cast<double>(s_leader_end + 4800u));
+    s_half_valid[0] = false;
+    s_half_valid[1] = false;
     s_sampling = true;
     s_plan_pos = 0u;
     s_last_sync = s_leader_end + 4800u;
     s_seg_begin = s_last_sync + s_timing->sync_len + s_timing->porch_len;
+    s_sep_win = s_seg_begin + s_timing->scan_len;
     s_px = 0u;
     s_px_acc = 0.0f;
     s_px_count = 0u;
+    s_sep_acc = 0.0f;
+    s_sep_count = 0u;
+    s_commit_pending = false;
     if (s_on_vis != nullptr) {
         s_on_vis(mode, s_user);
     }
@@ -351,17 +482,46 @@ void processSample(const int16_t x)
             } else if (s_tone &&
                        s_index - s_tone_begin >= (s_timing->sync_len * 2u) / 3u &&
                        s_index - s_tone_begin < s_timing->line_period) {
-                // Anchored: plan the scans right after sync + porch.
+                // Anchored. With a mature slant fit (>=10 syncs) the fitted
+                // position wins while the residual is small; a huge residual
+                // means the signal was lost and reacquired, so the fit
+                // restarts there.
+                const double n = static_cast<double>(seqNumber());
+                const double m = static_cast<double>(s_tone_begin);
+                uint32_t anchor = s_tone_begin;
+                double pred = 0.0;
+                if (lsqPredict(n, &pred)) {
+                    const double resid = m - pred;
+                    if (resid > -40.0 && resid < 40.0) {
+                        anchor = static_cast<uint32_t>(pred + 0.5);
+                    } else if (resid > seqPeriod() / 4.0 || resid < -(seqPeriod() / 4.0)) {
+                        lsqReset(n, m);
+                    }
+                }
+                lsqAdd(n, m);
                 s_sampling = true;
                 s_plan_pos = 0u;
-                s_seg_begin = s_tone_begin + s_timing->sync_len + s_timing->porch_len;
+                s_seg_begin = anchor + s_timing->sync_len + s_timing->porch_len;
+                s_sep_win = s_seg_begin + s_timing->scan_len;
                 s_px = 0u;
                 s_px_acc = 0.0f;
                 s_px_count = 0u;
+                s_sep_acc = 0.0f;
+                s_sep_count = 0u;
                 s_last_sync = s_tone_begin;
             }
         } else {
             const bool robot = s_mode == SSTV_MODE_ROBOT36;
+            if (robot && s_commit_pending && s_index >= s_seg_begin) {
+                commitRobotHalf(); // separator read; before the first chroma pixel
+                s_commit_pending = false;
+            }
+            if (robot && s_index >= s_sep_win && s_index < s_sep_win + 72u) {
+                // Separator between the Y scan and the chroma scan: 72 samples
+                // of 1500 Hz (even half) or 2300 Hz (odd half).
+                s_sep_acc += s_freq;
+                ++s_sep_count;
+            }
             const uint32_t scan_len = (robot && s_plan_pos == 1u) ? s_timing->chroma_len
                                                                   : s_timing->scan_len;
             const uint16_t npx = (robot && s_plan_pos == 1u) ? 160u : kWidth;
@@ -381,6 +541,9 @@ void processSample(const int16_t x)
                 storePixel(s_plan_pos, s_px);
                 const uint8_t plan_count = robot ? 2u : 3u;
                 if (s_plan_pos + 1u < plan_count) {
+                    if (robot && s_plan_pos == 0u) {
+                        s_commit_pending = true; // judge the separator at chroma start
+                    }
                     ++s_plan_pos;
                     s_seg_begin += scan_len + s_timing->skip_len;
                     s_px = 0u;
@@ -432,6 +595,16 @@ void SSTV_RX_Reset(void)
     s_px = 0u;
     s_px_acc = 0.0f;
     s_px_count = 0u;
+    s_sep_acc = 0.0f;
+    s_sep_count = 0u;
+    s_commit_pending = false;
+    s_half_valid[0] = false;
+    s_half_valid[1] = false;
+    s_lsq_count = 0.0;
+    s_lsq_sx = 0.0;
+    s_lsq_sxx = 0.0;
+    s_lsq_sy = 0.0;
+    s_lsq_sxy = 0.0;
     s_last_sync = s_index;
 }
 
