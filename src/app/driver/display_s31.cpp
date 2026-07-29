@@ -18,6 +18,7 @@
 #include "../../services/cw_service.h"
 #include "../../services/display_notice.h"
 #include "../../services/espnow_link.h"
+#include "../../services/map_tiles.h"
 #include "../../services/music_player.h"
 #include "../../services/music_playlist.h"
 #include "../../services/nanny.h"
@@ -113,6 +114,7 @@ enum class Page : uint8_t {
     Aprs,
     Cw,
     CwScore,
+    Map,
 };
 
 enum class Action : intptr_t {
@@ -181,6 +183,9 @@ enum class Action : intptr_t {
     SaveMdc,
     SaveDtmf,
     Provisioning,
+    Map,
+    MapZoomIn,
+    MapZoomOut,
 };
 
 enum class AudioControl : intptr_t {
@@ -410,6 +415,35 @@ uint32_t s_cw_revision = UINT32_MAX;
 // CW touch input mode on the key zone(s): false = straight key (tap/hold),
 // true = single-paddle keyer (hold a zone for an automatic element stream).
 bool s_cw_paddle_mode = false;
+
+// Map page (slippy tiles + APRS station overlay). The viewport is the area
+// below the top bar; a 4x3 grid of 256 px tiles covers it at any sub-tile
+// pan offset (3x2 would leave a gap: 3*256 < 800).
+constexpr int kMapCols = 4;
+constexpr int kMapRows = 3;
+constexpr int kMapTilePx = 256;
+constexpr int kMapTop = 56;                 // below the top bar
+constexpr int kMapViewH = kHeight - kMapTop; // 424
+constexpr uint8_t kMapZoomMin = 3u;
+constexpr uint8_t kMapZoomMax = 17u;
+constexpr uint8_t kMapZoomDefault = 12u;
+constexpr size_t kMapMarkerMax = 24u;
+lv_obj_t *s_map_view = nullptr;             // clipping container for tiles + markers
+lv_obj_t *s_map_tiles[kMapCols * kMapRows] = {};
+lv_image_dsc_t s_map_dsc[kMapCols * kMapRows] = {};
+int32_t s_map_tile_x[kMapCols * kMapRows] = {}; // tile each widget currently shows
+int32_t s_map_tile_y[kMapCols * kMapRows] = {};
+bool s_map_tile_filled[kMapCols * kMapRows] = {};
+lv_obj_t *s_map_markers[kMapMarkerMax] = {};
+lv_obj_t *s_map_marker_labels[kMapMarkerMax] = {};
+lv_obj_t *s_map_center_dot = nullptr;
+lv_obj_t *s_map_lbl_zoom = nullptr;
+double s_map_cx = 0.0; // viewport center in global pixels at s_map_zoom
+double s_map_cy = 0.0;
+uint8_t s_map_zoom = kMapZoomDefault;
+bool s_map_centered = false; // initial center picked once (GPS/default/station)
+uint32_t s_map_tile_rev = 0u;
+uint32_t s_map_station_rev = UINT32_MAX;
 lv_obj_t *s_btn_video_tx_label = nullptr;
 CoverBitmap s_video_bmp = {};
 lv_image_dsc_t s_video_dsc = {};
@@ -762,6 +796,7 @@ const TrEntry kTr[] = {
     {"Radio", "电台"},
     {"Video", "视频"},
     {"Tetris", "方块"},
+    {"Map", "地图"},
     {"Station", "台站"},
     {"Audio", "音频"},
     {"BT", "蓝牙"},
@@ -1296,6 +1331,16 @@ void clearScreen()
     s_lbl_cw_tx_code = nullptr;
     s_lbl_cw_metrics = nullptr;
     s_cw_revision = UINT32_MAX;
+    s_map_view = nullptr;
+    for (size_t i = 0u; i < sizeof(s_map_tiles) / sizeof(s_map_tiles[0]); ++i) {
+        s_map_tiles[i] = nullptr;
+    }
+    for (size_t i = 0u; i < kMapMarkerMax; ++i) {
+        s_map_markers[i] = nullptr;
+        s_map_marker_labels[i] = nullptr;
+    }
+    s_map_center_dot = nullptr;
+    s_map_lbl_zoom = nullptr;
     s_lbl_provision_ip = nullptr;
     s_lbl_provision_ssid = nullptr;
     s_notice_panel = nullptr;
@@ -1653,13 +1698,15 @@ void buildApps()
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
     // ESP-NOW lives under Config (it's a settings entry, not an app).
-    button(scr, 24, 84, 102, 120, "Music", Action::Music);
-    button(scr, 132, 84, 102, 120, "Radio", Action::Radio);
-    button(scr, 240, 84, 102, 120, "Video", Action::Video);
-    button(scr, 348, 84, 102, 120, "AI", Action::Ai);
-    button(scr, 456, 84, 102, 120, "Tetris", Action::Game);
-    button(scr, 564, 84, 102, 120, "APRS", Action::Aprs);
-    button(scr, 672, 84, 102, 120, "CW", Action::Cw);
+    // Two rows of four; Map opens the offline tile viewer with APRS overlay.
+    button(scr, 24, 84, 176, 60, "Music", Action::Music);
+    button(scr, 208, 84, 176, 60, "Radio", Action::Radio);
+    button(scr, 392, 84, 176, 60, "Video", Action::Video);
+    button(scr, 576, 84, 176, 60, "AI", Action::Ai);
+    button(scr, 24, 148, 176, 60, "Tetris", Action::Game);
+    button(scr, 208, 148, 176, 60, "APRS", Action::Aprs);
+    button(scr, 392, 148, 176, 60, "CW", Action::Cw);
+    button(scr, 576, 148, 176, 60, "Map", Action::Map);
 
     // Shared playback target: one setting for everything the music player
     // outputs (music / nanny beacon / net radio), so it lives here next to
@@ -3605,6 +3652,277 @@ void refreshAprsPage()
     }
 }
 
+// ---- map page ---------------------------------------------------------------
+// Slippy-Map viewport: a kMapCols x kMapRows grid of 256 px lv_image widgets
+// fed by MAP_TILES (TF card first, HTTP download otherwise). Dragging pans
+// (sub-tile offsets move the widgets), +/- buttons zoom, APRS stations plot
+// as dots with callsign labels. Tiles/widgets live in a clipping container
+// below the top bar; missing tiles show the widget's dark placeholder.
+
+void layoutMapTiles();
+void layoutMapMarkers();
+
+void clampMapCenter()
+{
+    const double world = ldexp(256.0, s_map_zoom);
+    while (s_map_cx < 0.0) {
+        s_map_cx += world;
+    }
+    while (s_map_cx >= world) {
+        s_map_cx -= world;
+    }
+    if (s_map_cy < 0.0) {
+        s_map_cy = 0.0;
+    }
+    if (s_map_cy > world) {
+        s_map_cy = world;
+    }
+}
+
+void mapSetCenterLonLat(double lon, double lat)
+{
+    MAP_TILES_LonLatToPixel(lon, lat, s_map_zoom, &s_map_cx, &s_map_cy);
+    clampMapCenter();
+}
+
+// Position every widget from the current center and (re)bind tile sources.
+// A widget re-queries its tile while it shows the placeholder, so tiles that
+// finish downloading appear without any explicit invalidation.
+void layoutMapTiles()
+{
+    if (s_map_tiles[0] == nullptr) {
+        return;
+    }
+    const double left = s_map_cx - kWidth / 2.0;
+    const double top = s_map_cy - kMapViewH / 2.0;
+    const int32_t zlimit = 1 << s_map_zoom;
+    const int32_t tx0 = static_cast<int32_t>(floor(left / kMapTilePx));
+    const int32_t ty0 = static_cast<int32_t>(floor(top / kMapTilePx));
+    const int frac_x = static_cast<int>(floor(left - static_cast<double>(tx0) * kMapTilePx));
+    const int frac_y = static_cast<int>(floor(top - static_cast<double>(ty0) * kMapTilePx));
+    for (int r = 0; r < kMapRows; ++r) {
+        for (int c = 0; c < kMapCols; ++c) {
+            const int i = r * kMapCols + c;
+            lv_obj_set_pos(s_map_tiles[i], c * kMapTilePx - frac_x, r * kMapTilePx - frac_y);
+            int32_t tx = (tx0 + c) % zlimit; // longitude wraps around the world
+            if (tx < 0) {
+                tx += zlimit;
+            }
+            const int32_t ty = ty0 + r;
+            const bool valid = ty >= 0 && ty < zlimit;
+            if (valid && s_map_tile_x[i] == tx && s_map_tile_y[i] == ty &&
+                s_map_tile_filled[i]) {
+                continue; // already showing this tile
+            }
+            const uint8_t *pixels = valid ? MAP_TILES_Get(s_map_zoom, tx, ty) : nullptr;
+            s_map_tile_x[i] = tx;
+            s_map_tile_y[i] = ty;
+            s_map_tile_filled[i] = pixels != nullptr;
+            if (pixels != nullptr) {
+                memset(&s_map_dsc[i], 0, sizeof(s_map_dsc[i]));
+                s_map_dsc[i].header.magic = LV_IMAGE_HEADER_MAGIC;
+                s_map_dsc[i].header.cf = LV_COLOR_FORMAT_RGB565;
+                s_map_dsc[i].header.w = kMapTilePx;
+                s_map_dsc[i].header.h = kMapTilePx;
+                s_map_dsc[i].header.stride = kMapTilePx * 2u;
+                s_map_dsc[i].data = pixels;
+                s_map_dsc[i].data_size = kMapTilePx * kMapTilePx * 2u;
+                lv_image_set_src(s_map_tiles[i], &s_map_dsc[i]);
+            } else {
+                lv_image_set_src(s_map_tiles[i], nullptr); // dark placeholder
+            }
+        }
+    }
+}
+
+void layoutMapMarkers()
+{
+    if (s_map_markers[0] == nullptr) {
+        return;
+    }
+    // Static: the station struct carries a 220-byte comment, so a snapshot
+    // array would blow the UI task's stack.
+    static AprsStationInfo stations[kMapMarkerMax];
+    const size_t count = APRS_SERVICE_GetStations(stations, kMapMarkerMax);
+    const double left = s_map_cx - kWidth / 2.0;
+    const double top = s_map_cy - kMapViewH / 2.0;
+    size_t used = 0u;
+    for (size_t i = 0u; i < count && used < kMapMarkerMax; ++i) {
+        double px = 0.0;
+        double py = 0.0;
+        MAP_TILES_LonLatToPixel(stations[i].lon, stations[i].lat, s_map_zoom, &px, &py);
+        const int sx = static_cast<int>(px - left);
+        const int sy = static_cast<int>(py - top);
+        // Skip stations outside the viewport (the label sticks out right/up).
+        if (sx < -64 || sx >= kWidth + 8 || sy < -16 || sy >= kMapViewH + 8) {
+            continue;
+        }
+        lv_obj_set_pos(s_map_markers[used], sx - 4, sy - 4);
+        lv_obj_set_pos(s_map_marker_labels[used], sx + 7, sy - 10);
+        setLabelTextIfChanged(s_map_marker_labels[used], stations[i].name);
+        lv_obj_remove_flag(s_map_markers[used], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_map_marker_labels[used], LV_OBJ_FLAG_HIDDEN);
+        ++used;
+    }
+    for (size_t i = used; i < kMapMarkerMax; ++i) {
+        lv_obj_add_flag(s_map_markers[i], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_map_marker_labels[i], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// Drag panning: the pressed tile widget gets PRESSING on every indev read;
+// the vect is the pixel delta since the previous read.
+void mapPanEvent(lv_event_t *event)
+{
+    lv_indev_t *indev = lv_event_get_indev(event);
+    if (indev == nullptr) {
+        return;
+    }
+    lv_point_t vect = {};
+    lv_indev_get_vect(indev, &vect);
+    if (vect.x == 0 && vect.y == 0) {
+        return;
+    }
+    s_map_cx -= vect.x;
+    s_map_cy -= vect.y;
+    clampMapCenter();
+    layoutMapTiles();
+    layoutMapMarkers();
+}
+
+void mapZoomStep(int delta)
+{
+    const int next = static_cast<int>(s_map_zoom) + delta;
+    if (next < kMapZoomMin || next > kMapZoomMax) {
+        return;
+    }
+    // Keep the geographic center across the scale change.
+    double lon = 0.0;
+    double lat = 0.0;
+    MAP_TILES_PixelToLonLat(s_map_cx, s_map_cy, s_map_zoom, &lon, &lat);
+    s_map_zoom = static_cast<uint8_t>(next);
+    mapSetCenterLonLat(lon, lat);
+    for (size_t i = 0u; i < sizeof(s_map_tiles) / sizeof(s_map_tiles[0]); ++i) {
+        s_map_tile_x[i] = INT32_MIN; // force tile reassignment
+        s_map_tile_filled[i] = false;
+    }
+    layoutMapTiles();
+    layoutMapMarkers();
+    char text[8];
+    snprintf(text, sizeof(text), "z%u", static_cast<unsigned>(s_map_zoom));
+    setLabelTextIfChanged(s_map_lbl_zoom, text);
+}
+
+void refreshMapPage()
+{
+    const uint32_t tile_rev = MAP_TILES_Revision();
+    const uint32_t station_rev = APRS_SERVICE_GetStationRevision();
+    if (tile_rev == s_map_tile_rev && station_rev == s_map_station_rev) {
+        return;
+    }
+    s_map_tile_rev = tile_rev;
+    s_map_station_rev = station_rev;
+    layoutMapTiles();
+    layoutMapMarkers();
+}
+
+void buildMap()
+{
+    clearScreen();
+    s_page = Page::Map;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+
+    // First visit: center on the GPS fix, else the configured APRS default
+    // position, else the first heard station, else the world origin.
+    if (!s_map_centered) {
+        double lat = 0.0;
+        double lon = 0.0;
+        bool have = APRS_SERVICE_GetOwnPosition(&lat, &lon, nullptr);
+        if (!have) {
+            // No live fix: the getter already fell back to the configured
+            // default; 0/0 means none is configured.
+            have = lat != 0.0 || lon != 0.0;
+        }
+        if (!have) {
+            AprsStationInfo first = {};
+            if (APRS_SERVICE_GetStations(&first, 1u) > 0u) {
+                lat = first.lat;
+                lon = first.lon;
+                have = true;
+            }
+        }
+        s_map_zoom = kMapZoomDefault;
+        mapSetCenterLonLat(lon, lat);
+        s_map_centered = true;
+    }
+
+    s_map_view = lv_obj_create(scr);
+    lv_obj_remove_style_all(s_map_view);
+    lv_obj_set_pos(s_map_view, 0, kMapTop);
+    lv_obj_set_size(s_map_view, kWidth, kMapViewH);
+    lv_obj_set_style_bg_color(s_map_view, lv_color_hex(kColorPanel), 0);
+    lv_obj_set_style_bg_opa(s_map_view, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(s_map_view, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(s_map_view, LV_OBJ_FLAG_OVERFLOW_VISIBLE); // clip panning tiles
+
+    for (int i = 0; i < kMapCols * kMapRows; ++i) {
+        lv_obj_t *img = lv_image_create(s_map_view);
+        lv_obj_set_size(img, kMapTilePx, kMapTilePx);
+        lv_obj_set_style_bg_color(img, lv_color_hex(kColorPanel2), 0);
+        lv_obj_set_style_bg_opa(img, LV_OPA_COVER, 0);
+        lv_obj_add_flag(img, LV_OBJ_FLAG_CLICKABLE); // receives the drag PRESSING
+        lv_obj_remove_flag(img, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(img, mapPanEvent, LV_EVENT_PRESSING, nullptr);
+        s_map_tiles[i] = img;
+        s_map_tile_x[i] = INT32_MIN;
+        s_map_tile_filled[i] = false;
+    }
+
+    // Own-position reticle at the viewport center.
+    s_map_center_dot = lv_obj_create(s_map_view);
+    lv_obj_remove_style_all(s_map_center_dot);
+    lv_obj_set_size(s_map_center_dot, 9, 9);
+    lv_obj_set_style_radius(s_map_center_dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(s_map_center_dot, lv_color_hex(kColorAccent), 0);
+    lv_obj_set_style_bg_opa(s_map_center_dot, LV_OPA_COVER, 0);
+    lv_obj_set_pos(s_map_center_dot, kWidth / 2 - 4, kMapViewH / 2 - 4);
+
+    for (size_t i = 0u; i < kMapMarkerMax; ++i) {
+        lv_obj_t *dot = lv_obj_create(s_map_view);
+        lv_obj_remove_style_all(dot);
+        lv_obj_set_size(dot, 9, 9);
+        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(dot, lv_color_hex(kColorBad), 0);
+        lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+        lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN);
+        s_map_markers[i] = dot;
+
+        lv_obj_t *tag = label(s_map_view, &lv_font_montserrat_16, kColorText);
+        lv_obj_set_style_bg_color(tag, lv_color_hex(0x000000), 0);
+        lv_obj_set_style_bg_opa(tag, LV_OPA_50, 0);
+        lv_obj_set_style_pad_all(tag, 2, 0);
+        lv_obj_add_flag(tag, LV_OBJ_FLAG_HIDDEN);
+        s_map_marker_labels[i] = tag;
+    }
+
+    button(scr, 724, 70, 64, 56, "+", Action::MapZoomIn);
+    button(scr, 724, 134, 64, 56, "-", Action::MapZoomOut);
+    s_map_lbl_zoom = label(scr, &lv_font_montserrat_20, kColorSub);
+    lv_obj_set_pos(s_map_lbl_zoom, 724, 202);
+    lv_obj_set_width(s_map_lbl_zoom, 64);
+    lv_obj_set_style_text_align(s_map_lbl_zoom, LV_TEXT_ALIGN_CENTER, 0);
+    char text[8];
+    snprintf(text, sizeof(text), "z%u", static_cast<unsigned>(s_map_zoom));
+    lv_label_set_text(s_map_lbl_zoom, text);
+    button(scr, 12, 420, 88, 52, "Back", Action::Apps);
+
+    layoutMapTiles();
+    layoutMapMarkers();
+    s_map_tile_rev = MAP_TILES_Revision();
+    s_map_station_rev = APRS_SERVICE_GetStationRevision();
+}
+
 void buildAprs()
 {
     clearScreen();
@@ -4461,6 +4779,9 @@ void action(lv_event_t *event)
         case Action::Game: buildGame(); break;
         case Action::Ai: buildAi(); break;
         case Action::Aprs: buildAprs(); break;
+        case Action::Map: buildMap(); break;
+        case Action::MapZoomIn: mapZoomStep(1); break;
+        case Action::MapZoomOut: mapZoomStep(-1); break;
         case Action::Cw: buildCw(); break;
         case Action::CwDelete: CW_SERVICE_Delete(); break;
         case Action::CwSend: (void)CW_SERVICE_Send(); break;
@@ -5370,6 +5691,9 @@ void refresh()
     if (s_page == Page::Cw) {
         refreshCwPage();
     }
+    if (s_page == Page::Map) {
+        refreshMapPage();
+    }
 }
 
 // Rebuild the active page so a font-engine switch takes effect on every
@@ -5400,6 +5724,7 @@ void rebuildCurrentPage()
         case Page::Aprs: buildAprs(); break;
         case Page::Cw: buildCw(); break;
         case Page::CwScore: buildCwScore(); break;
+        case Page::Map: buildMap(); break;
     }
     s_last_refresh_ms = 0;
 }

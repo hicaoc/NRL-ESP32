@@ -17,6 +17,7 @@ set(app_sources
     services/display_notice.cpp
     services/espnow_link.cpp
     services/lan_discovery.cpp
+    services/map_tiles.cpp
     services/music_player.cpp
     services/music_playlist.cpp
     services/nanny.cpp

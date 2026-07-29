@@ -47,6 +47,7 @@
 #include "../../services/espnow_link.h"
 #include "../../services/display_notice.h"
 #include "../../services/cw_service.h"
+#include "../../services/map_tiles.h"
 #include "../../services/music_player.h"
 #include "../../services/music_playlist.h"
 #include "../../services/ota_service.h"
@@ -199,6 +200,35 @@ size_t s_music_tap_index = SIZE_MAX;
 uint32_t s_music_tap_ms = 0u;
 lv_obj_t *s_music_tap_row = nullptr;
 bool s_bi4umd_aprs_from_settings = false;
+
+// Map page (slippy tiles + APRS station overlay, touch-driven). The viewport
+// sits between the EXIT/title row and the zoom button row; a 2x2 grid of
+// 256 px tiles covers it at any sub-tile pan offset (240x180 + 255 px of
+// offset fits inside 512x512).
+constexpr int kMapCols = 2;
+constexpr int kMapRows = 2;
+constexpr int kMapTilePx = 256;
+constexpr int kMapViewY = 28;   // below the EXIT/title row
+constexpr int kMapViewH = 180;  // leaves the zoom button row at y=212
+constexpr uint8_t kMapZoomMin = 3u;
+constexpr uint8_t kMapZoomMax = 17u;
+constexpr uint8_t kMapZoomDefault = 12u;
+constexpr size_t kMapMarkerMax = 12u;
+lv_obj_t *s_map_view = nullptr; // clipping container for tiles + markers
+lv_obj_t *s_map_tiles[kMapCols * kMapRows] = {};
+lv_image_dsc_t s_map_dsc[kMapCols * kMapRows] = {};
+int32_t s_map_tile_x[kMapCols * kMapRows] = {}; // tile each widget currently shows
+int32_t s_map_tile_y[kMapCols * kMapRows] = {};
+bool s_map_tile_filled[kMapCols * kMapRows] = {};
+lv_obj_t *s_map_markers[kMapMarkerMax] = {};
+lv_obj_t *s_map_marker_labels[kMapMarkerMax] = {};
+lv_obj_t *s_map_lbl_title = nullptr;
+double s_map_cx = 0.0; // viewport center in global pixels at s_map_zoom
+double s_map_cy = 0.0;
+uint8_t s_map_zoom = kMapZoomDefault;
+bool s_map_centered = false; // initial center picked once (GPS/default/station)
+uint32_t s_map_tile_rev = 0u;
+uint32_t s_map_station_rev = UINT32_MAX;
 #endif
 
 adc_oneshot_unit_handle_t s_adc = nullptr;
@@ -224,6 +254,7 @@ enum class MenuPage : uint8_t {
     Mdc,
     Dtmf,
     Cw,
+    Map,
 };
 
 // Written by STATUS_IO_Poll() and consumed only by Display_Poll(). Keeping
@@ -233,6 +264,10 @@ volatile bool s_menu_open_requested = false;
 volatile int s_menu_nav_pending = 0;
 volatile unsigned s_menu_confirm_pending = 0u;
 volatile bool s_cw_exit_requested = false;
+// bi4umd map page touch EXIT; same deferred-teardown pattern as the CW exit
+// (rebuilding inside the button's own CLICKED event would free the pressed
+// widget mid-dispatch).
+volatile bool s_map_exit_requested = false;
 // Set while the bi4umd straight-key touch area is held; the CW page skips its
 // revision-triggered rebuild during that time so the pressed widget is not
 // destroyed under the finger.
@@ -722,6 +757,8 @@ void addBi4umdMenuButtons()
 #if NRL_BOARD == NRL_BOARD_BI4UMD
     if (s_content == nullptr) return;
     if (s_menu_page == MenuPage::Cw) return;
+    // The map page is fully touch-driven (drag + zoom/EXIT buttons).
+    if (s_menu_page == MenuPage::Map) return;
     auto menu_button = [](int x, const char *text, lv_event_cb_t callback) {
         lv_obj_t *button = lv_button_create(s_content);
         lv_obj_set_pos(button, x,
@@ -1386,6 +1423,9 @@ void buildMainMenu()
         "APRS",
         menuText("LANGUAGE", "语言"),
         menuText("ABOUT", "关于"),
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+        menuText("MAP", "地图"),
+#endif
     };
     constexpr size_t kItemCount = sizeof(items) / sizeof(items[0]);
 #if NRL_BOARD == NRL_BOARD_BI4UMD
@@ -2115,6 +2155,313 @@ void buildCwMenu()
 #endif
 }
 
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+// ---- map page ---------------------------------------------------------------
+// Slippy-Map viewport fed by MAP_TILES (TF card first, HTTP download
+// otherwise): a kMapCols x kMapRows grid of 256 px lv_image widgets inside a
+// clipping container. The container itself is the drag target (tiles and
+// markers are not clickable, so PRESSING always lands here). Missing tiles
+// show the widget's dark placeholder until the worker delivers them.
+
+void layoutMapTiles();
+void layoutMapMarkers();
+
+void clampMapCenter()
+{
+    const double world = ldexp(256.0, s_map_zoom);
+    while (s_map_cx < 0.0) {
+        s_map_cx += world;
+    }
+    while (s_map_cx >= world) {
+        s_map_cx -= world;
+    }
+    if (s_map_cy < 0.0) {
+        s_map_cy = 0.0;
+    }
+    if (s_map_cy > world) {
+        s_map_cy = world;
+    }
+}
+
+void mapSetCenterLonLat(double lon, double lat)
+{
+    MAP_TILES_LonLatToPixel(lon, lat, s_map_zoom, &s_map_cx, &s_map_cy);
+    clampMapCenter();
+}
+
+void mapUpdateTitle()
+{
+    if (s_map_lbl_title == nullptr) {
+        return;
+    }
+    char line[24];
+    snprintf(line, sizeof(line), menuText("MAP  z%u", "地图  z%u"),
+             static_cast<unsigned>(s_map_zoom));
+    lv_label_set_text(s_map_lbl_title, line);
+}
+
+// Position every widget from the current center and (re)bind tile sources.
+// A widget re-queries its tile while it shows the placeholder, so tiles that
+// finish downloading appear without any explicit invalidation.
+void layoutMapTiles()
+{
+    if (s_map_tiles[0] == nullptr) {
+        return;
+    }
+    const double left = s_map_cx - kWidth / 2.0;
+    const double top = s_map_cy - kMapViewH / 2.0;
+    const int32_t zlimit = 1 << s_map_zoom;
+    const int32_t tx0 = static_cast<int32_t>(floor(left / kMapTilePx));
+    const int32_t ty0 = static_cast<int32_t>(floor(top / kMapTilePx));
+    const int frac_x = static_cast<int>(floor(left - static_cast<double>(tx0) * kMapTilePx));
+    const int frac_y = static_cast<int>(floor(top - static_cast<double>(ty0) * kMapTilePx));
+    for (int r = 0; r < kMapRows; ++r) {
+        for (int c = 0; c < kMapCols; ++c) {
+            const int i = r * kMapCols + c;
+            lv_obj_set_pos(s_map_tiles[i], c * kMapTilePx - frac_x, r * kMapTilePx - frac_y);
+            int32_t tx = (tx0 + c) % zlimit; // longitude wraps around the world
+            if (tx < 0) {
+                tx += zlimit;
+            }
+            const int32_t ty = ty0 + r;
+            const bool valid = ty >= 0 && ty < zlimit;
+            if (valid && s_map_tile_x[i] == tx && s_map_tile_y[i] == ty &&
+                s_map_tile_filled[i]) {
+                continue; // already showing this tile
+            }
+            const uint8_t *pixels = valid ? MAP_TILES_Get(s_map_zoom, tx, ty) : nullptr;
+            s_map_tile_x[i] = tx;
+            s_map_tile_y[i] = ty;
+            s_map_tile_filled[i] = pixels != nullptr;
+            if (pixels != nullptr) {
+                memset(&s_map_dsc[i], 0, sizeof(s_map_dsc[i]));
+                s_map_dsc[i].header.magic = LV_IMAGE_HEADER_MAGIC;
+                s_map_dsc[i].header.cf = LV_COLOR_FORMAT_RGB565;
+                s_map_dsc[i].header.w = kMapTilePx;
+                s_map_dsc[i].header.h = kMapTilePx;
+                s_map_dsc[i].header.stride = kMapTilePx * 2u;
+                s_map_dsc[i].data = pixels;
+                s_map_dsc[i].data_size = kMapTilePx * kMapTilePx * 2u;
+                lv_image_set_src(s_map_tiles[i], &s_map_dsc[i]);
+            } else {
+                lv_image_set_src(s_map_tiles[i], nullptr); // dark placeholder
+            }
+        }
+    }
+}
+
+void layoutMapMarkers()
+{
+    if (s_map_markers[0] == nullptr) {
+        return;
+    }
+    // Static: the station struct carries a 220-byte comment, so a snapshot
+    // array would eat the UI task's stack.
+    static AprsStationInfo stations[kMapMarkerMax];
+    const size_t count = APRS_SERVICE_GetStations(stations, kMapMarkerMax);
+    const double left = s_map_cx - kWidth / 2.0;
+    const double top = s_map_cy - kMapViewH / 2.0;
+    size_t used = 0u;
+    for (size_t i = 0u; i < count && used < kMapMarkerMax; ++i) {
+        double px = 0.0;
+        double py = 0.0;
+        MAP_TILES_LonLatToPixel(stations[i].lon, stations[i].lat, s_map_zoom, &px, &py);
+        const int sx = static_cast<int>(px - left);
+        const int sy = static_cast<int>(py - top);
+        // Skip stations outside the viewport (the label sticks out right/up).
+        if (sx < -48 || sx >= kWidth + 8 || sy < -12 || sy >= kMapViewH + 8) {
+            continue;
+        }
+        lv_obj_set_pos(s_map_markers[used], sx - 3, sy - 3);
+        lv_obj_set_pos(s_map_marker_labels[used], sx + 6, sy - 8);
+        lv_label_set_text(s_map_marker_labels[used], stations[i].name);
+        lv_obj_remove_flag(s_map_markers[used], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_map_marker_labels[used], LV_OBJ_FLAG_HIDDEN);
+        ++used;
+    }
+    for (size_t i = used; i < kMapMarkerMax; ++i) {
+        lv_obj_add_flag(s_map_markers[i], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_map_marker_labels[i], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// Drag panning: the clipping container gets PRESSING on every indev read;
+// the vect is the pixel delta since the previous read.
+void mapPanEvent(lv_event_t *event)
+{
+    lv_indev_t *indev = lv_event_get_indev(event);
+    if (indev == nullptr) {
+        return;
+    }
+    lv_point_t vect = {};
+    lv_indev_get_vect(indev, &vect);
+    if (vect.x == 0 && vect.y == 0) {
+        return;
+    }
+    s_map_cx -= vect.x;
+    s_map_cy -= vect.y;
+    clampMapCenter();
+    layoutMapTiles();
+    layoutMapMarkers();
+}
+
+void mapZoomStep(int delta)
+{
+    const int next = static_cast<int>(s_map_zoom) + delta;
+    if (next < kMapZoomMin || next > kMapZoomMax) {
+        return;
+    }
+    // Keep the geographic center across the scale change.
+    double lon = 0.0;
+    double lat = 0.0;
+    MAP_TILES_PixelToLonLat(s_map_cx, s_map_cy, s_map_zoom, &lon, &lat);
+    s_map_zoom = static_cast<uint8_t>(next);
+    mapSetCenterLonLat(lon, lat);
+    for (size_t i = 0u; i < sizeof(s_map_tiles) / sizeof(s_map_tiles[0]); ++i) {
+        s_map_tile_x[i] = INT32_MIN; // force tile reassignment
+        s_map_tile_filled[i] = false;
+    }
+    layoutMapTiles();
+    layoutMapMarkers();
+    mapUpdateTitle();
+}
+
+void mapZoomInClicked(lv_event_t *) { mapZoomStep(1); }
+void mapZoomOutClicked(lv_event_t *) { mapZoomStep(-1); }
+// Touch exit for the buttonless board; the actual teardown runs deferred in
+// processMenuInput (see s_cw_exit_requested for the same pattern).
+void mapExitClicked(lv_event_t *) { s_map_exit_requested = true; }
+
+void refreshMapMenu()
+{
+    const uint32_t tile_rev = MAP_TILES_Revision();
+    const uint32_t station_rev = APRS_SERVICE_GetStationRevision();
+    if (tile_rev == s_map_tile_rev && station_rev == s_map_station_rev) {
+        return;
+    }
+    s_map_tile_rev = tile_rev;
+    s_map_station_rev = station_rev;
+    layoutMapTiles();
+    layoutMapMarkers();
+}
+
+void buildMapMenu()
+{
+    lv_obj_t *scr = prepareContent();
+
+    // First visit: center on the GPS fix, else the configured APRS default
+    // position, else the first heard station, else the world origin.
+    if (!s_map_centered) {
+        double lat = 0.0;
+        double lon = 0.0;
+        bool have = APRS_SERVICE_GetOwnPosition(&lat, &lon, nullptr);
+        if (!have) {
+            // No live fix: the getter already fell back to the configured
+            // default; 0/0 means none is configured.
+            have = lat != 0.0 || lon != 0.0;
+        }
+        if (!have) {
+            AprsStationInfo first = {};
+            if (APRS_SERVICE_GetStations(&first, 1u) > 0u) {
+                lat = first.lat;
+                lon = first.lon;
+                have = true;
+            }
+        }
+        s_map_zoom = kMapZoomDefault;
+        mapSetCenterLonLat(lon, lat);
+        s_map_centered = true;
+    }
+
+    // Buttonless board: the title row carries a touch EXIT button and the
+    // title shrinks to make room, mirroring the CW page.
+    lv_obj_t *exit_btn = lv_button_create(scr);
+    lv_obj_set_pos(exit_btn, 5, 0);
+    lv_obj_set_size(exit_btn, 48, 24);
+    lv_obj_set_style_radius(exit_btn, 6, 0);
+    lv_obj_set_style_bg_color(exit_btn, lv_color_hex(0x10212A), 0);
+    lv_obj_set_style_bg_color(exit_btn, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(exit_btn, mapExitClicked, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *exit_label = makeLabel(exit_btn, menuFont(&lv_font_montserrat_14), kColorCallIdle);
+    lv_label_set_text(exit_label, menuText("EXIT", "退出"));
+    lv_obj_center(exit_label);
+
+    s_map_lbl_title = makeLabel(scr, menuFont(&lv_font_montserrat_16), kColorAccent);
+    lv_obj_set_width(s_map_lbl_title, kWidth - 64);
+    lv_obj_set_style_text_align(s_map_lbl_title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_map_lbl_title, 56, 2);
+    mapUpdateTitle();
+
+    s_map_view = lv_obj_create(scr);
+    lv_obj_remove_style_all(s_map_view);
+    lv_obj_set_pos(s_map_view, 0, kMapViewY);
+    lv_obj_set_size(s_map_view, kWidth, kMapViewH);
+    lv_obj_set_style_bg_color(s_map_view, lv_color_hex(kColorBg), 0);
+    lv_obj_set_style_bg_opa(s_map_view, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(s_map_view, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(s_map_view, LV_OBJ_FLAG_OVERFLOW_VISIBLE); // clip panning tiles
+    lv_obj_add_flag(s_map_view, LV_OBJ_FLAG_CLICKABLE); // receives the drag PRESSING
+    lv_obj_add_event_cb(s_map_view, mapPanEvent, LV_EVENT_PRESSING, nullptr);
+
+    for (int i = 0; i < kMapCols * kMapRows; ++i) {
+        lv_obj_t *img = lv_image_create(s_map_view);
+        lv_obj_set_size(img, kMapTilePx, kMapTilePx);
+        lv_obj_set_style_bg_color(img, lv_color_hex(0x0B1220), 0);
+        lv_obj_set_style_bg_opa(img, LV_OPA_COVER, 0);
+        s_map_tiles[i] = img;
+        s_map_tile_x[i] = INT32_MIN;
+        s_map_tile_filled[i] = false;
+    }
+
+    // Own-position reticle at the viewport center.
+    lv_obj_t *center_dot = lv_obj_create(s_map_view);
+    lv_obj_remove_style_all(center_dot);
+    lv_obj_set_size(center_dot, 7, 7);
+    lv_obj_set_style_radius(center_dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(center_dot, lv_color_hex(kColorAccent), 0);
+    lv_obj_set_style_bg_opa(center_dot, LV_OPA_COVER, 0);
+    lv_obj_set_pos(center_dot, kWidth / 2 - 3, kMapViewH / 2 - 3);
+
+    for (size_t i = 0u; i < kMapMarkerMax; ++i) {
+        lv_obj_t *dot = lv_obj_create(s_map_view);
+        lv_obj_remove_style_all(dot);
+        lv_obj_set_size(dot, 7, 7);
+        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(dot, lv_color_hex(kColorTx), 0);
+        lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+        lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN);
+        s_map_markers[i] = dot;
+
+        lv_obj_t *tag = makeLabel(s_map_view, &lv_font_montserrat_14, kColorCallIdle);
+        lv_obj_set_style_bg_color(tag, lv_color_hex(0x000000), 0);
+        lv_obj_set_style_bg_opa(tag, LV_OPA_50, 0);
+        lv_obj_set_style_pad_all(tag, 1, 0);
+        lv_obj_add_flag(tag, LV_OBJ_FLAG_HIDDEN);
+        s_map_marker_labels[i] = tag;
+    }
+
+    auto zoom_button = [scr](int x, const char *text, lv_event_cb_t callback) {
+        lv_obj_t *button = lv_button_create(scr);
+        lv_obj_set_pos(button, x, 212);
+        lv_obj_set_size(button, 72, 34);
+        lv_obj_set_style_radius(button, 6, 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x10212A), 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+        lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *label = makeLabel(button, &lv_font_montserrat_16, kColorCallIdle);
+        lv_label_set_text(label, text);
+        lv_obj_center(label);
+    };
+    zoom_button(16, "-", mapZoomOutClicked);
+    zoom_button(152, "+", mapZoomInClicked);
+
+    layoutMapTiles();
+    layoutMapMarkers();
+    s_map_tile_rev = MAP_TILES_Revision();
+    s_map_station_rev = APRS_SERVICE_GetStationRevision();
+}
+#endif // NRL_BOARD == NRL_BOARD_BI4UMD
+
 void buildMenuUi()
 {
 #if NRL_BOARD == NRL_BOARD_BI4UMD
@@ -2132,6 +2479,9 @@ void buildMenuUi()
     else if (s_menu_page == MenuPage::Mdc) buildProtocolMenu(true);
     else if (s_menu_page == MenuPage::Dtmf) buildProtocolMenu(false);
     else if (s_menu_page == MenuPage::Cw) buildCwMenu();
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    else if (s_menu_page == MenuPage::Map) buildMapMenu();
+#endif
     else buildMainMenu();
 #if NRL_BOARD == NRL_BOARD_BI4UMD
     addBi4umdMenuButtons();
@@ -3428,7 +3778,12 @@ void refreshOtaNotice()
 
 size_t menuItemCount()
 {
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    if (s_menu_page == MenuPage::Main) return 11u;
+    if (s_menu_page == MenuPage::Map) return 1u;
+#else
     if (s_menu_page == MenuPage::Main) return 10u;
+#endif
     if (s_menu_page == MenuPage::Cw) return 1u;
     if (s_menu_page == MenuPage::Language) return 3u;
     if (s_menu_page == MenuPage::About) return 1u;
@@ -3530,6 +3885,13 @@ void confirmMainMenu()
             s_menu_index = 0u;
             buildMenuUi();
             break;
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+        case 10:
+            s_menu_page = MenuPage::Map;
+            s_menu_index = 0u;
+            buildMenuUi();
+            break;
+#endif
         default:
             break;
     }
@@ -3747,6 +4109,16 @@ void processMenuInput(uint32_t now)
         buildHomeContent();
         return;
     }
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    if (s_map_exit_requested) {
+        s_map_exit_requested = false;
+        s_menu_active = false;
+        s_menu_message[0] = '\0';
+        s_bi4umd_page = Bi4umdPage::Radio;
+        buildHomeContent();
+        return;
+    }
+#endif
     if (s_menu_open_requested) {
         s_menu_open_requested = false;
 #if NRL_BOARD == NRL_BOARD_BI4UMD
@@ -3793,6 +4165,9 @@ void processMenuInput(uint32_t now)
         else if (s_menu_page == MenuPage::Ctcss) confirmCtcssMenu();
         else if (s_menu_page == MenuPage::Mdc) confirmProtocolMenu(true);
         else if (s_menu_page == MenuPage::Dtmf) confirmProtocolMenu(false);
+        else if (s_menu_page == MenuPage::Map) {
+            // Touch-driven page: confirm would fall through to the OTA branch.
+        }
         else confirmOtaMenu();
     }
     if (!s_menu_active) return;
@@ -3861,6 +4236,11 @@ void processMenuInput(uint32_t now)
             buildMenuUi();
         }
     }
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    if (s_menu_page == MenuPage::Map) {
+        refreshMapMenu();
+    }
+#endif
 }
 
 } // namespace
@@ -3885,6 +4265,8 @@ extern "C" void Display_MenuNavigate(const int direction)
         CW_SERVICE_InputElement(direction > 0 ? CW_ELEMENT_DAH : CW_ELEMENT_DIT);
         return;
     }
+    // Map page pans/zooms by touch only; VOL swipe would rebuild it.
+    if (s_menu_page == MenuPage::Map) return;
     int pending = s_menu_nav_pending + (direction > 0 ? 1 : -1);
     if (pending > 8) pending = 8;
     if (pending < -8) pending = -8;
