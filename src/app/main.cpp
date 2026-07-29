@@ -24,6 +24,7 @@
 #include "../services/ota_service.h"
 #include "../services/radio_favorites.h"
 #include "../services/storage_service.h"
+#include "../services/sstv_service.h"
 #include "../lib/nrl_audio_bridge.h"
 #include "../lib/improv_protocol.h"
 #include "../lib/nrl_bt_hfp.h"
@@ -329,6 +330,9 @@ static bool initFullApp()
     // plus RF demodulation into the station list. Idles until enabled.
     APRS_SERVICE_Init();
     logDramMark("aprs");
+
+    // SSTV picture transmission: idles until AT+SSTV queues a frame.
+    SSTV_SERVICE_Init();
 
     // xiaozhi AI assistant: reconnects in the background when configured.
     AI_Init();

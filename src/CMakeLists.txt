@@ -27,6 +27,7 @@ set(app_sources
     services/smb_stream.cpp
     services/smb_vfs.cpp
     services/storage_service.cpp
+    services/sstv_service.cpp
     services/video_call.cpp
     app/driver/audio_passthrough.cpp
     app/driver/game_tetris.cpp
@@ -63,6 +64,7 @@ set(app_sources
     lib/dtmf_codec.cpp
     lib/ctcss_decoder.cpp
     lib/cw_codec.cpp
+    lib/sstv_codec.cpp
     lib/nrl_usb_console.cpp
     lib/nrl_wifi.cpp
     lib/wifi_config_portal.cpp

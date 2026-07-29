@@ -24,6 +24,7 @@
 #include "services/storage_service.h"
 #include "services/signaling_service.h"
 #include "services/cw_service.h"
+#include "services/sstv_service.h"
 #include "driver/sci_serial.h"
 #include "app/main_loop_profile.h"
 
@@ -2631,6 +2632,58 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         const ExternalRadioConfig *updated = EXTERNAL_RADIO_GetConfig();
         formatSciConfig(updated->sci, sci_config, sizeof(sci_config));
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, reply_key, sci_config);
+        return;
+    }
+
+    // SSTV picture transmission:
+    //   AT+SSTV=ROBOT36,<path>   start a Robot 36 frame (320x240, ~37 s)
+    //   AT+SSTV=MARTIN1,<path>   start a Martin M1 frame (320x256, ~115 s)
+    //   AT+SSTV?                 state / mode / progress
+    //   AT+SSTV=STOP             abort the running frame
+    if (stringEqualsIgnoreCase(command.command, "SSTV")) {
+        if (is_query) {
+            SstvSnapshot snap{};
+            SSTV_SERVICE_GetSnapshot(&snap);
+            const char *state = "IDLE";
+            if (snap.state == SSTV_STATE_PREPARING) state = "PREPARING";
+            else if (snap.state == SSTV_STATE_SENDING) state = "SENDING";
+            else if (snap.state == SSTV_STATE_DONE) state = "DONE";
+            else if (snap.state == SSTV_STATE_ERROR) state = "ERROR";
+            char status[192];
+            snprintf(status, sizeof(status), "%s,MODE=%s,PROGRESS=%u%%,PATH=%s,ERR=%s",
+                     state, snap.mode == SSTV_MODE_ROBOT36 ? "ROBOT36" : "MARTIN1",
+                     static_cast<unsigned>(snap.progress_percent), snap.path, snap.error);
+            appendKeyValueLine(result->payload, sizeof(result->payload),
+                               &result->payload_size, "SSTV", status);
+            return;
+        }
+        if (stringEqualsIgnoreCase(command.value, "STOP")) {
+            const bool stopped = SSTV_SERVICE_Stop();
+            appendKeyValueLine(result->payload, sizeof(result->payload),
+                               &result->payload_size, "SSTV", stopped ? "STOPPED" : "IDLE");
+            return;
+        }
+        const char *comma = strchr(command.value, ',');
+        if (comma == nullptr || comma == command.value || comma[1] == '\0') {
+            appendKeyValueLine(result->payload, sizeof(result->payload),
+                               &result->payload_size, "ERR", "SSTV");
+            return;
+        }
+        SSTV_Mode mode = SSTV_MODE_ROBOT36;
+        const size_t mode_len = static_cast<size_t>(comma - command.value);
+        if (mode_len == 7u && strncasecmp(command.value, "ROBOT36", 7u) == 0) {
+            mode = SSTV_MODE_ROBOT36;
+        } else if ((mode_len == 7u && strncasecmp(command.value, "MARTIN1", 7u) == 0) ||
+                   (mode_len == 9u && strncasecmp(command.value, "MARTIN_M1", 9u) == 0)) {
+            mode = SSTV_MODE_MARTIN_M1;
+        } else {
+            appendKeyValueLine(result->payload, sizeof(result->payload),
+                               &result->payload_size, "ERR", "SSTV_MODE");
+            return;
+        }
+        const bool started = SSTV_SERVICE_SendJpeg(comma + 1, mode);
+        appendKeyValueLine(result->payload, sizeof(result->payload),
+                           &result->payload_size, "SSTV", started ? "STARTED" : "BUSY");
         return;
     }
 

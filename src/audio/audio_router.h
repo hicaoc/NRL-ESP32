@@ -42,6 +42,8 @@ typedef enum {
     AUDIO_SRC_DTMF_SPEAKER, // DTMF tail burst appended to speaker playback
     AUDIO_SRC_CW_NRL,       // CW practice/automatic keying to NRL uplink
     AUDIO_SRC_CW_SPEAKER,   // CW sidetone to the local speaker
+    AUDIO_SRC_SSTV_NRL,     // SSTV picture modulation to NRL uplink
+    AUDIO_SRC_SSTV_SPEAKER, // SSTV sidetone to the local speaker
     AUDIO_SRC_COUNT
 } AudioRouterSource_t;
 
