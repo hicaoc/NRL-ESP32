@@ -1795,7 +1795,8 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     //   AT+APRS_SYMBOL=/I         symbol table+code (TCP/IP by default)
     //   AT+APRS_INTERVAL=60       beacon interval, seconds
     //   AT+APRS_POS=ddmm.mmmm,dddmm.mmmm
-    //                              default WGS-84 position (N/E automatic)
+    //                              default WGS-84 position (N/E automatic);
+    //                              plain decimal degrees also accepted
     //   AT+APRS_PATH=WIDE1-1      RF digi path
     //   AT+APRS_COMMENT=text      beacon comment
     //   AT+APRS_BEACON            queue a beacon right now

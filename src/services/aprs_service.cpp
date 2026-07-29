@@ -1810,12 +1810,19 @@ extern "C" bool APRS_SERVICE_ParseAprsCoord(const char *text, bool is_lat, doubl
         v = -v;
     }
 
-    const double d = floor(v / 100.0);
-    const double m = v - d * 100.0;
-    if (m >= 60.0) {
-        return false;
+    // ddmm.mmmm needs at least 3 (lat) / 4 (lon) integer digits; anything
+    // smaller is read as plain decimal degrees (e.g. "45.7529").
+    double deg = 0.0;
+    if (v >= (is_lat ? 100.0 : 1000.0)) {
+        const double d = floor(v / 100.0);
+        const double m = v - d * 100.0;
+        if (m >= 60.0) {
+            return false;
+        }
+        deg = d + m / 60.0;
+    } else {
+        deg = v;
     }
-    const double deg = d + m / 60.0;
     if ((is_lat && deg > 90.0) || (!is_lat && deg > 180.0)) {
         return false;
     }

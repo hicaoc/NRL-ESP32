@@ -123,10 +123,12 @@ bool APRS_SERVICE_SetBeaconInterval(uint16_t seconds);      // 10..3600
 bool APRS_SERVICE_SetAutoInterval(bool enabled);
 bool APRS_SERVICE_SetFixedBeaconWithoutGps(bool enabled);
 bool APRS_SERVICE_SetDefaultPosition(double lat, double lon);
-// WGS-84 coordinates in the APRS/NMEA style used for config input:
-// "ddmm.mmmm[N|S]" for latitude, "dddmm.mmmm[E|W]" for longitude (hemisphere
-// letter optional, a leading '-' also means S/W). Parse returns false on
-// malformed or out-of-range input; Format always writes the letter form.
+// WGS-84 coordinates used for config input. Accepts APRS/NMEA style
+// "ddmm.mmmm[N|S]" for latitude and "dddmm.mmmm[E|W]" for longitude
+// (hemisphere letter optional, a leading '-' also means S/W), or plain
+// decimal degrees when the integer part is too short for ddmm.mmmm
+// (e.g. "45.7529"). Parse returns false on malformed or out-of-range
+// input; Format always writes the ddmm.mmmm letter form.
 bool APRS_SERVICE_ParseAprsCoord(const char *text, bool is_lat, double *deg_out);
 void APRS_SERVICE_FormatAprsCoord(double deg, bool is_lat, char *out, size_t out_size);
 bool APRS_SERVICE_SetPath(const char *path);
