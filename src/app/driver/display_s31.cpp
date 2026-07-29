@@ -4188,7 +4188,7 @@ void buildSstv()
         s_sstv_dsc.header.w = 320;
         s_sstv_dsc.header.h = 256;
         s_sstv_dsc.header.stride = 320u * 2u;
-        s_sstv_dsc.data = frame;
+        s_sstv_dsc.data = reinterpret_cast<const uint8_t *>(frame);
         s_sstv_dsc.data_size = 320u * 256u * 2u;
         lv_image_set_src(s_img_sstv, &s_sstv_dsc);
     }
