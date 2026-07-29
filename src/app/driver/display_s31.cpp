@@ -856,6 +856,7 @@ const TrEntry kTr[] = {
     {"Speaker (headset)", "扬声器 (耳机)"},
     {"Mic", "麦克风"},
     {"Adjust audio settings, then save.", "调整音频设置后保存。"},
+    {"Adjust audio, then save. Playback applies from the next track.", "调整音频后保存，播放设置下一曲生效。"},
     {"Changed. Tap Save to persist.", "已修改, 点保存生效。"},
     {"Reset failed.", "重置失败。"},
     {"Speaker volume: %d%%\nMic volume: %u\nAEC: %s\nNoise reduction: %s",
@@ -1697,42 +1698,16 @@ void buildApps()
     s_page = Page::Apps;
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
-    // ESP-NOW lives under Config (it's a settings entry, not an app).
-    // Two rows of four; Map opens the offline tile viewer with APRS overlay.
-    button(scr, 24, 84, 176, 60, "Music", Action::Music);
-    button(scr, 208, 84, 176, 60, "Radio", Action::Radio);
-    button(scr, 392, 84, 176, 60, "Video", Action::Video);
-    button(scr, 576, 84, 176, 60, "AI", Action::Ai);
-    button(scr, 24, 148, 176, 60, "Tetris", Action::Game);
-    button(scr, 208, 148, 176, 60, "APRS", Action::Aprs);
-    button(scr, 392, 148, 176, 60, "CW", Action::Cw);
-    button(scr, 576, 148, 176, 60, "Map", Action::Map);
-
-    // Shared playback target: one setting for everything the music player
-    // outputs (music / nanny beacon / net radio), so it lives here next to
-    // those features instead of inside any single one's settings page.
-    lv_obj_t *box = panel(scr, 24, 220, 750, 132);
-    fieldLabel(box, 0, 0, "Playback Target (music / beacon / radio)");
-    s_dd_music_target = styledDropdown(box, 0, 24, 340);
-    lv_dropdown_set_options(s_dd_music_target, tr("Local speaker\nNRL network\nLocal + network"));
-    const int target = MUSIC_GetTarget();
-    lv_dropdown_set_selected(s_dd_music_target,
-                             (target >= MUSIC_TARGET_LOCAL && target <= MUSIC_TARGET_BOTH)
-                                 ? static_cast<uint32_t>(target)
-                                 : 0u);
-    lv_obj_add_event_cb(s_dd_music_target, musicTargetEvent, LV_EVENT_VALUE_CHANGED, nullptr);
-
-    fieldLabel(box, 380, 0, "Music Output Device");
-    lv_obj_t *dd_output = styledDropdown(box, 380, 24, 330);
-    lv_dropdown_set_options(dd_output, tr("Onboard speaker\nBT headset (A2DP)"));
-    lv_dropdown_set_selected(dd_output,
-                             (MUSIC_GetOutput() == MUSIC_OUTPUT_BT) ? 1u : 0u);
-    lv_obj_add_event_cb(dd_output, musicOutputEvent, LV_EVENT_VALUE_CHANGED, nullptr);
-
-    s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
-    lv_obj_set_pos(s_lbl_form_status, 0, 76);
-    lv_obj_set_width(s_lbl_form_status, 710);
-    lv_label_set_text(s_lbl_form_status, tr("Applies from the next track."));
+    // Pure app launcher: two roomy rows of four. Audio output routing lives
+    // on the Config > Audio settings page, so nothing else crowds this grid.
+    button(scr, 24, 96, 176, 104, "Music", Action::Music);
+    button(scr, 208, 96, 176, 104, "Radio", Action::Radio);
+    button(scr, 392, 96, 176, 104, "Video", Action::Video);
+    button(scr, 576, 96, 176, 104, "AI", Action::Ai);
+    button(scr, 24, 216, 176, 104, "Tetris", Action::Game);
+    button(scr, 208, 216, 176, 104, "APRS", Action::Aprs);
+    button(scr, 392, 216, 176, 104, "CW", Action::Cw);
+    button(scr, 576, 216, 176, 104, "Map", Action::Map);
 
     button(scr, 24, 372, 230, 76, "Back", Action::Home);
 }
@@ -2228,7 +2203,10 @@ void buildAudio()
     s_page = Page::Audio;
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
-    lv_obj_t *box = panel(scr, 24, 86, 750, 250);
+    // Compact vertical rhythm so the playback-target selectors moved in from
+    // the Apps page fit without wrapping: sliders at 62 px pitch, switches,
+    // then two dropdowns side by side, status line at the panel bottom.
+    lv_obj_t *box = panel(scr, 24, 86, 750, 272);
     const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
     // When a headset is online the Speaker slider tracks/controls its volume;
     // otherwise it controls the onboard codec line-out.
@@ -2239,22 +2217,42 @@ void buildAudio()
 
     fieldLabel(box, 0, 0, (bt_pct >= 0) ? "Speaker (headset)" : "Speaker");
     s_lbl_speaker_value = valueLabel(box, 620, 0, 90);
-    s_slider_speaker = slider(box, 0, 36, 710, 0, 100, speaker_pct, AudioControl::Speaker);
+    s_slider_speaker = slider(box, 0, 30, 710, 0, 100, speaker_pct, AudioControl::Speaker);
 
-    fieldLabel(box, 0, 70, "Mic");
-    s_lbl_mic_value = valueLabel(box, 620, 70, 90);
-    s_slider_mic = slider(box, 0, 106, 710, 0, 255, cfg ? cfg->mic_volume : 0, AudioControl::Mic);
+    fieldLabel(box, 0, 62, "Mic");
+    s_lbl_mic_value = valueLabel(box, 620, 62, 90);
+    s_slider_mic = slider(box, 0, 92, 710, 0, 255, cfg ? cfg->mic_volume : 0, AudioControl::Mic);
 
-    s_sw_aec = switchControl(box, 0, 152, "AEC", cfg && cfg->aec_enabled, AudioControl::Aec);
-    s_sw_noise = switchControl(box, 190, 152, "AI Noise", cfg && cfg->ai_noise_enabled, AudioControl::Noise);
-    s_sw_mic_hpf = switchControl(box, 380, 152, "Mic HPF", cfg && cfg->mic_hpf_enabled, AudioControl::MicHpf);
+    s_sw_aec = switchControl(box, 0, 132, "AEC", cfg && cfg->aec_enabled, AudioControl::Aec);
+    s_sw_noise = switchControl(box, 190, 132, "AI Noise", cfg && cfg->ai_noise_enabled, AudioControl::Noise);
+    s_sw_mic_hpf = switchControl(box, 380, 132, "Mic HPF", cfg && cfg->mic_hpf_enabled, AudioControl::MicHpf);
     // The NRL TX codec switch lives on the NRL (Station) page; the ESP-NOW
     // codec switch on the ESP-NOW page.
 
+    // Shared playback target: one setting for everything the music player
+    // outputs (music / nanny beacon / net radio) plus the output device.
+    fieldLabel(box, 0, 176, "Playback Target (music / beacon / radio)");
+    s_dd_music_target = styledDropdown(box, 0, 198, 340);
+    lv_dropdown_set_options(s_dd_music_target, tr("Local speaker\nNRL network\nLocal + network"));
+    const int target = MUSIC_GetTarget();
+    lv_dropdown_set_selected(s_dd_music_target,
+                             (target >= MUSIC_TARGET_LOCAL && target <= MUSIC_TARGET_BOTH)
+                                 ? static_cast<uint32_t>(target)
+                                 : 0u);
+    lv_obj_add_event_cb(s_dd_music_target, musicTargetEvent, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    fieldLabel(box, 360, 176, "Music Output Device");
+    lv_obj_t *dd_output = styledDropdown(box, 360, 198, 350);
+    lv_dropdown_set_options(dd_output, tr("Onboard speaker\nBT headset (A2DP)"));
+    lv_dropdown_set_selected(dd_output,
+                             (MUSIC_GetOutput() == MUSIC_OUTPUT_BT) ? 1u : 0u);
+    lv_obj_add_event_cb(dd_output, musicOutputEvent, LV_EVENT_VALUE_CHANGED, nullptr);
+
     s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
     lv_obj_set_width(s_lbl_form_status, 710);
-    lv_obj_set_pos(s_lbl_form_status, 0, 210);
-    lv_label_set_text(s_lbl_form_status, tr("Adjust audio settings, then save."));
+    lv_obj_set_pos(s_lbl_form_status, 0, 248);
+    lv_label_set_text(s_lbl_form_status,
+                      tr("Adjust audio, then save. Playback applies from the next track."));
     updateAudioValueLabels();
 
     button(scr, 24, 372, 230, 76, "Back", Action::Config);
