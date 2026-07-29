@@ -26,6 +26,7 @@
 #include "../../services/radio_favorites.h"
 #include "../../services/storage_service.h"
 #include "../../services/signaling_service.h"
+#include "../../services/sstv_service.h"
 #include "../../services/video_call.h"
 #include "external_radio.h"
 #include "fonts/lv_font_cjk.h"
@@ -115,6 +116,7 @@ enum class Page : uint8_t {
     Cw,
     CwScore,
     Map,
+    Sstv,
 };
 
 enum class Action : intptr_t {
@@ -186,6 +188,14 @@ enum class Action : intptr_t {
     Map,
     MapZoomIn,
     MapZoomOut,
+    Sstv,
+    SstvTxMode,
+    SstvFilePrev,
+    SstvFileNext,
+    SstvSend,
+    SstvRxSource,
+    SstvRxToggle,
+    SstvSave,
 };
 
 enum class AudioControl : intptr_t {
@@ -444,6 +454,29 @@ uint8_t s_map_zoom = kMapZoomDefault;
 bool s_map_centered = false; // initial center picked once (GPS/default/station)
 uint32_t s_map_tile_rev = 0u;
 uint32_t s_map_station_rev = UINT32_MAX;
+
+// SSTV page (TX a JPEG from the TF card, live RX view from the service's
+// decoder frame buffer).
+constexpr size_t kSstvFileMax = 16u;
+constexpr size_t kSstvNameChars = 40u;
+lv_obj_t *s_sstv_lbl_file = nullptr;
+lv_obj_t *s_sstv_lbl_tx = nullptr;
+lv_obj_t *s_sstv_lbl_rx1 = nullptr;
+lv_obj_t *s_sstv_lbl_rx2 = nullptr;
+lv_obj_t *s_sstv_lbl_img = nullptr;
+lv_obj_t *s_sstv_mode_label = nullptr; // label children of toggle buttons
+lv_obj_t *s_sstv_src_label = nullptr;
+lv_obj_t *s_sstv_rx_toggle_label = nullptr;
+lv_obj_t *s_img_sstv = nullptr;
+lv_image_dsc_t s_sstv_dsc = {};
+SSTV_Mode s_sstv_tx_mode = SSTV_MODE_ROBOT36;
+SstvRxSource s_sstv_rx_source = SSTV_SOURCE_MIC;
+char s_sstv_files[kSstvFileMax][kSstvNameChars] = {};
+size_t s_sstv_file_count = 0u;
+size_t s_sstv_file_index = 0u;
+uint32_t s_sstv_img_rev = 0u;
+char s_sstv_msg[96] = {};       // transient save/status message
+uint32_t s_sstv_msg_ms = 0u;
 lv_obj_t *s_btn_video_tx_label = nullptr;
 CoverBitmap s_video_bmp = {};
 lv_image_dsc_t s_video_dsc = {};
@@ -797,6 +830,22 @@ const TrEntry kTr[] = {
     {"Video", "视频"},
     {"Tetris", "方块"},
     {"Map", "地图"},
+    {"Send", "发送"},
+    {"Save", "保存"},
+    {"Start", "开始"},
+    {"Stop", "停止"},
+    {"no TF card", "未插 TF 卡"},
+    {"no .jpg at card root", "卡根目录没有 .jpg"},
+    {"no JPEG on TF card", "TF 卡上没有 JPEG"},
+    {"TX busy / failed", "发送忙/失败"},
+    {"saved %s", "已保存 %s"},
+    {"save failed (no frame/card)", "保存失败（无图像/无卡）"},
+    {"TX preparing...", "发送准备中..."},
+    {"TX sending %u%%", "发送中 %u%%"},
+    {"TX done", "发送完成"},
+    {"TX error: %s", "发送错误：%s"},
+    {"TX idle (%s)", "发送空闲（%s）"},
+    {"RX off", "接收关闭"},
     {"Station", "台站"},
     {"Audio", "音频"},
     {"BT", "蓝牙"},
@@ -1342,6 +1391,15 @@ void clearScreen()
     }
     s_map_center_dot = nullptr;
     s_map_lbl_zoom = nullptr;
+    s_sstv_lbl_file = nullptr;
+    s_sstv_lbl_tx = nullptr;
+    s_sstv_lbl_rx1 = nullptr;
+    s_sstv_lbl_rx2 = nullptr;
+    s_sstv_lbl_img = nullptr;
+    s_sstv_mode_label = nullptr;
+    s_sstv_src_label = nullptr;
+    s_sstv_rx_toggle_label = nullptr;
+    s_img_sstv = nullptr;
     s_lbl_provision_ip = nullptr;
     s_lbl_provision_ssid = nullptr;
     s_notice_panel = nullptr;
@@ -1698,16 +1756,17 @@ void buildApps()
     s_page = Page::Apps;
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
-    // Pure app launcher: two roomy rows of four. Audio output routing lives
-    // on the Config > Audio settings page, so nothing else crowds this grid.
-    button(scr, 24, 96, 176, 104, "Music", Action::Music);
-    button(scr, 208, 96, 176, 104, "Radio", Action::Radio);
-    button(scr, 392, 96, 176, 104, "Video", Action::Video);
-    button(scr, 576, 96, 176, 104, "AI", Action::Ai);
-    button(scr, 24, 216, 176, 104, "Tetris", Action::Game);
-    button(scr, 208, 216, 176, 104, "APRS", Action::Aprs);
-    button(scr, 392, 216, 176, 104, "CW", Action::Cw);
-    button(scr, 576, 216, 176, 104, "Map", Action::Map);
+    // Pure app launcher: 3x3 grid. Audio output routing lives on the
+    // Config > Audio settings page, so nothing else crowds this grid.
+    button(scr, 24, 84, 240, 84, "Music", Action::Music);
+    button(scr, 272, 84, 240, 84, "Radio", Action::Radio);
+    button(scr, 520, 84, 240, 84, "Video", Action::Video);
+    button(scr, 24, 176, 240, 84, "AI", Action::Ai);
+    button(scr, 272, 176, 240, 84, "Tetris", Action::Game);
+    button(scr, 520, 176, 240, 84, "APRS", Action::Aprs);
+    button(scr, 24, 268, 240, 84, "CW", Action::Cw);
+    button(scr, 272, 268, 240, 84, "Map", Action::Map);
+    button(scr, 520, 268, 240, 84, "SSTV", Action::Sstv);
 
     button(scr, 24, 372, 230, 76, "Back", Action::Home);
 }
@@ -3921,6 +3980,228 @@ void buildMap()
     s_map_station_rev = APRS_SERVICE_GetStationRevision();
 }
 
+// ---- SSTV page ----------------------------------------------------------------
+// TX: pick a JPEG from the TF card root and send it over the air (side tone
+// on the speaker). RX: the service's demodulator taps mic or NRL downlink and
+// writes lines into a PSRAM frame buffer shown live; the widget only gets
+// invalidated when the image revision bumps.
+
+void refreshSstvPage();
+
+void scanSstvFiles()
+{
+    s_sstv_file_count = 0u;
+    s_sstv_file_index = 0u;
+    if (!STORAGE_SdMounted()) {
+        return;
+    }
+    DIR *dir = opendir(STORAGE_SdMountPoint());
+    if (dir == nullptr) {
+        return;
+    }
+    while (s_sstv_file_count < kSstvFileMax) {
+        const struct dirent *ent = readdir(dir);
+        if (ent == nullptr) {
+            break;
+        }
+        const size_t len = strlen(ent->d_name);
+        if (len < 5u || len >= kSstvNameChars) {
+            continue;
+        }
+        const bool jpg = strcasecmp(ent->d_name + len - 4u, ".jpg") == 0;
+        const bool jpeg = len >= 6u && strcasecmp(ent->d_name + len - 5u, ".jpeg") == 0;
+        if (!jpg && !jpeg) {
+            continue;
+        }
+        snprintf(s_sstv_files[s_sstv_file_count], kSstvNameChars, "%s", ent->d_name);
+        ++s_sstv_file_count;
+    }
+    closedir(dir);
+}
+
+void stepSstvFile(int delta)
+{
+    if (s_sstv_file_count == 0u) {
+        return;
+    }
+    s_sstv_file_index = (s_sstv_file_index + s_sstv_file_count + static_cast<size_t>(delta)) %
+                        s_sstv_file_count;
+    refreshSstvPage();
+}
+
+void sendSstvFromPage()
+{
+    if (s_sstv_file_count == 0u || !STORAGE_SdMounted()) {
+        snprintf(s_sstv_msg, sizeof(s_sstv_msg), "%s", tr("no JPEG on TF card"));
+        s_sstv_msg_ms = millis();
+        refreshSstvPage();
+        return;
+    }
+    char path[128];
+    snprintf(path, sizeof(path), "%s/%s", STORAGE_SdMountPoint(),
+             s_sstv_files[s_sstv_file_index]);
+    if (!SSTV_SERVICE_SendJpeg(path, s_sstv_tx_mode)) {
+        snprintf(s_sstv_msg, sizeof(s_sstv_msg), "%s", tr("TX busy / failed"));
+        s_sstv_msg_ms = millis();
+    }
+    refreshSstvPage();
+}
+
+void saveSstvFromPage()
+{
+    char path[96] = {};
+    if (SSTV_SERVICE_SaveRxJpeg(path, sizeof(path))) {
+        const char *base = strrchr(path, '/');
+        snprintf(s_sstv_msg, sizeof(s_sstv_msg), tr("saved %s"), base != nullptr ? base + 1 : path);
+    } else {
+        snprintf(s_sstv_msg, sizeof(s_sstv_msg), "%s", tr("save failed (no frame/card)"));
+    }
+    s_sstv_msg_ms = millis();
+    refreshSstvPage();
+}
+
+void refreshSstvPage()
+{
+    if (s_sstv_lbl_tx == nullptr) {
+        return;
+    }
+    SstvSnapshot snap{};
+    SSTV_SERVICE_GetSnapshot(&snap);
+    char text[160];
+
+    if (!STORAGE_SdMounted()) {
+        snprintf(text, sizeof(text), "%s", tr("no TF card"));
+    } else if (s_sstv_file_count == 0u) {
+        snprintf(text, sizeof(text), "%s", tr("no .jpg at card root"));
+    } else {
+        snprintf(text, sizeof(text), "%u/%u %s", static_cast<unsigned>(s_sstv_file_index + 1u),
+                 static_cast<unsigned>(s_sstv_file_count), s_sstv_files[s_sstv_file_index]);
+    }
+    setLabelTextIfChanged(s_sstv_lbl_file, text);
+
+    if (snap.state == SSTV_STATE_PREPARING) {
+        snprintf(text, sizeof(text), "%s", tr("TX preparing..."));
+    } else if (snap.state == SSTV_STATE_SENDING) {
+        snprintf(text, sizeof(text), tr("TX sending %u%%"),
+                 static_cast<unsigned>(snap.progress_percent));
+    } else if (snap.state == SSTV_STATE_DONE) {
+        snprintf(text, sizeof(text), "%s", tr("TX done"));
+    } else if (snap.state == SSTV_STATE_ERROR) {
+        snprintf(text, sizeof(text), tr("TX error: %s"), snap.error);
+    } else {
+        snprintf(text, sizeof(text), tr("TX idle (%s)"),
+                 s_sstv_tx_mode == SSTV_MODE_ROBOT36 ? "ROBOT36" : "MARTIN1");
+    }
+    setLabelTextIfChanged(s_sstv_lbl_tx, text);
+
+    if (!snap.rx_active) {
+        snprintf(text, sizeof(text), "%s", tr("RX off"));
+    } else {
+        const char *state = snap.rx_state == SSTV_RX_VIS ? "VIS" :
+                            snap.rx_state == SSTV_RX_LINES ? "RX" :
+                            snap.rx_state == SSTV_RX_DONE ? "DONE" : "LISTEN";
+        snprintf(text, sizeof(text), "RX %s  %s  q%u%%", state,
+                 snap.rx_state >= SSTV_RX_LINES
+                     ? (snap.rx_mode == SSTV_MODE_ROBOT36 ? "ROBOT36" : "MARTIN1")
+                     : "-",
+                 static_cast<unsigned>(snap.rx_quality));
+    }
+    setLabelTextIfChanged(s_sstv_lbl_rx1, text);
+
+    // Transient message (save result, send error) wins for a few seconds.
+    if (s_sstv_msg[0] != '\0' && millis() - s_sstv_msg_ms < 4000u) {
+        snprintf(text, sizeof(text), "%s", s_sstv_msg);
+    } else {
+        s_sstv_msg[0] = '\0';
+        snprintf(text, sizeof(text), "lines %u/%u", static_cast<unsigned>(snap.rx_lines),
+                 static_cast<unsigned>(snap.rx_lines_total));
+    }
+    setLabelTextIfChanged(s_sstv_lbl_rx2, text);
+
+    setLabelTextIfChanged(s_sstv_mode_label,
+                          s_sstv_tx_mode == SSTV_MODE_ROBOT36 ? "ROBOT36" : "MARTIN1");
+    setLabelTextIfChanged(s_sstv_src_label,
+                          s_sstv_rx_source == SSTV_SOURCE_MIC ? "Src:MIC" : "Src:NRL");
+    setLabelTextIfChanged(s_sstv_rx_toggle_label, snap.rx_active ? tr("Stop") : tr("Start"));
+
+    if (snap.rx_revision != s_sstv_img_rev) {
+        s_sstv_img_rev = snap.rx_revision;
+        if (s_img_sstv != nullptr) {
+            lv_obj_invalidate(s_img_sstv); // decoder wrote new lines in place
+        }
+    }
+    snprintf(text, sizeof(text), "frame %u/%u", static_cast<unsigned>(snap.rx_lines),
+             static_cast<unsigned>(snap.rx_lines_total));
+    setLabelTextIfChanged(s_sstv_lbl_img, text);
+}
+
+void buildSstv()
+{
+    clearScreen();
+    s_page = Page::Sstv;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+
+    lv_obj_t *tx = panel(scr, 24, 76, 420, 176);
+    fieldLabel(tx, 0, 0, "TX IMAGE (TF -> air)");
+    s_sstv_lbl_file = label(tx, &lv_font_montserrat_16, kColorText);
+    lv_obj_set_pos(s_sstv_lbl_file, 0, 24);
+    lv_obj_set_width(s_sstv_lbl_file, 380);
+    lv_label_set_long_mode(s_sstv_lbl_file, LV_LABEL_LONG_DOT);
+    button(tx, 0, 56, 84, 44, "<", Action::SstvFilePrev);
+    button(tx, 92, 56, 84, 44, ">", Action::SstvFileNext);
+    lv_obj_t *mode_btn = button(tx, 184, 56, 116, 44, "ROBOT36", Action::SstvTxMode);
+    s_sstv_mode_label = lv_obj_get_child(mode_btn, 0);
+    button(tx, 308, 56, 80, 44, "Send", Action::SstvSend);
+    s_sstv_lbl_tx = label(tx, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_pos(s_sstv_lbl_tx, 0, 112);
+    lv_obj_set_width(s_sstv_lbl_tx, 380);
+
+    lv_obj_t *rx = panel(scr, 24, 264, 420, 192);
+    fieldLabel(rx, 0, 0, "RX RECEIVE");
+    lv_obj_t *src_btn = button(rx, 0, 24, 116, 44, "Src:MIC", Action::SstvRxSource);
+    s_sstv_src_label = lv_obj_get_child(src_btn, 0);
+    lv_obj_t *toggle_btn = button(rx, 124, 24, 116, 44, "Start", Action::SstvRxToggle);
+    s_sstv_rx_toggle_label = lv_obj_get_child(toggle_btn, 0);
+    button(rx, 248, 24, 100, 44, "Save", Action::SstvSave);
+    s_sstv_lbl_rx1 = label(rx, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_pos(s_sstv_lbl_rx1, 0, 80);
+    lv_obj_set_width(s_sstv_lbl_rx1, 380);
+    s_sstv_lbl_rx2 = label(rx, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_pos(s_sstv_lbl_rx2, 0, 108);
+    lv_obj_set_width(s_sstv_lbl_rx2, 380);
+
+    // Live frame view. The buffer is owned by the service and mutated by the
+    // decoder; the descriptor is bound once here.
+    const uint16_t *frame = SSTV_SERVICE_RxImage();
+    s_img_sstv = lv_image_create(scr);
+    lv_obj_set_pos(s_img_sstv, 460, 76);
+    lv_obj_set_size(s_img_sstv, 320, 256);
+    lv_obj_set_style_bg_color(s_img_sstv, lv_color_hex(kColorPanel2), 0);
+    lv_obj_set_style_bg_opa(s_img_sstv, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(s_img_sstv, lv_color_hex(kColorBorder), 0);
+    lv_obj_set_style_border_width(s_img_sstv, 1, 0);
+    if (frame != nullptr) {
+        memset(&s_sstv_dsc, 0, sizeof(s_sstv_dsc));
+        s_sstv_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+        s_sstv_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+        s_sstv_dsc.header.w = 320;
+        s_sstv_dsc.header.h = 256;
+        s_sstv_dsc.header.stride = 320u * 2u;
+        s_sstv_dsc.data = frame;
+        s_sstv_dsc.data_size = 320u * 256u * 2u;
+        lv_image_set_src(s_img_sstv, &s_sstv_dsc);
+    }
+    s_sstv_img_rev = SSTV_SERVICE_RxImageRevision();
+    s_sstv_lbl_img = label(scr, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_pos(s_sstv_lbl_img, 460, 340);
+    lv_obj_set_width(s_sstv_lbl_img, 320);
+
+    button(scr, 610, 396, 170, 68, "Back", Action::Apps);
+    scanSstvFiles();
+    refreshSstvPage();
+}
+
 void buildAprs()
 {
     clearScreen();
@@ -4780,6 +5061,38 @@ void action(lv_event_t *event)
         case Action::Map: buildMap(); break;
         case Action::MapZoomIn: mapZoomStep(1); break;
         case Action::MapZoomOut: mapZoomStep(-1); break;
+        case Action::Sstv: buildSstv(); break;
+        case Action::SstvTxMode:
+            s_sstv_tx_mode = s_sstv_tx_mode == SSTV_MODE_ROBOT36 ? SSTV_MODE_MARTIN_M1
+                                                                 : SSTV_MODE_ROBOT36;
+            refreshSstvPage();
+            break;
+        case Action::SstvFilePrev: stepSstvFile(-1); break;
+        case Action::SstvFileNext: stepSstvFile(1); break;
+        case Action::SstvSend: sendSstvFromPage(); break;
+        case Action::SstvRxSource: {
+            s_sstv_rx_source = s_sstv_rx_source == SSTV_SOURCE_MIC ? SSTV_SOURCE_NRL
+                                                                   : SSTV_SOURCE_MIC;
+            SstvSnapshot snap{};
+            SSTV_SERVICE_GetSnapshot(&snap);
+            if (snap.rx_active) { // retune the tap to the new source
+                (void)SSTV_SERVICE_StartRx(s_sstv_rx_source);
+            }
+            refreshSstvPage();
+            break;
+        }
+        case Action::SstvRxToggle: {
+            SstvSnapshot snap{};
+            SSTV_SERVICE_GetSnapshot(&snap);
+            if (snap.rx_active) {
+                (void)SSTV_SERVICE_StopRx();
+            } else {
+                (void)SSTV_SERVICE_StartRx(s_sstv_rx_source);
+            }
+            refreshSstvPage();
+            break;
+        }
+        case Action::SstvSave: saveSstvFromPage(); break;
         case Action::Cw: buildCw(); break;
         case Action::CwDelete: CW_SERVICE_Delete(); break;
         case Action::CwSend: (void)CW_SERVICE_Send(); break;
@@ -5692,6 +6005,9 @@ void refresh()
     if (s_page == Page::Map) {
         refreshMapPage();
     }
+    if (s_page == Page::Sstv) {
+        refreshSstvPage();
+    }
 }
 
 // Rebuild the active page so a font-engine switch takes effect on every
@@ -5723,6 +6039,7 @@ void rebuildCurrentPage()
         case Page::Cw: buildCw(); break;
         case Page::CwScore: buildCwScore(); break;
         case Page::Map: buildMap(); break;
+        case Page::Sstv: buildSstv(); break;
     }
     s_last_refresh_ms = 0;
 }
