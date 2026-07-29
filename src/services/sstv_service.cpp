@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include <esp_heap_caps.h>
+#include <esp_jpeg_enc.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -14,6 +15,7 @@
 #include "../audio/audio_router.h"
 #include "../lib/nrl_psram.h"
 #include "../media/cover_decoder.h"
+#include "storage_service.h"
 
 static const char *TAG = "SSTV";
 
@@ -35,6 +37,39 @@ char s_req_path[sizeof(s_snap.path)] = {};
 
 // Frame buffer, allocated once (160 KB): PSRAM where available.
 uint16_t *s_image = nullptr;
+
+// RX side: the decoder callbacks fire from the audio task that pushes into
+// our sink, so they only touch plain single-writer fields (no lock, no heap).
+uint16_t *s_rx_image = nullptr;      // 320x256 RGB565, PSRAM
+volatile uint32_t s_rx_revision = 0u; // bumps per received line
+
+void rxOnVis(SSTV_Mode, void *)
+{
+    if (s_rx_image != nullptr) {
+        memset(s_rx_image, 0, kFrameWidth * 256u * sizeof(uint16_t));
+    }
+    s_rx_revision = 0u;
+}
+
+void rxOnLine(uint16_t y, const uint16_t *row, void *)
+{
+    if (s_rx_image != nullptr && row != nullptr && y < 256u) {
+        memcpy(s_rx_image + static_cast<uint32_t>(y) * kFrameWidth, row,
+               kFrameWidth * sizeof(uint16_t));
+    }
+    ++s_rx_revision;
+}
+
+void rxOnDone(void *)
+{
+    ++s_rx_revision;
+}
+
+// 16 kHz tap for the demodulator (see audio_router sink docs).
+void sstvSink(uint8_t, const int16_t *samples, size_t sample_count, void *)
+{
+    SSTV_RX_Feed(samples, sample_count);
+}
 
 // Stack in PSRAM where the target allows external stacks (the worker blocks
 // on FatFS reads and the 10 ms pacing); internal SRAM otherwise.
@@ -225,8 +260,20 @@ void SSTV_SERVICE_Init(void)
     if (s_image == nullptr) {
         ESP_LOGE(TAG, "no frame buffer");
     }
+    s_rx_image = static_cast<uint16_t *>(heap_caps_malloc(
+        static_cast<size_t>(kFrameWidth) * 256u * sizeof(uint16_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (s_rx_image == nullptr) {
+        s_rx_image = static_cast<uint16_t *>(heap_caps_malloc(
+            static_cast<size_t>(kFrameWidth) * 256u * sizeof(uint16_t), MALLOC_CAP_8BIT));
+    }
+    if (s_rx_image == nullptr) {
+        ESP_LOGE(TAG, "no RX frame buffer");
+    }
     memset(&s_snap, 0, sizeof(s_snap));
     s_snap.state = SSTV_STATE_IDLE;
+    SSTV_RX_Init(rxOnVis, rxOnLine, rxOnDone, nullptr);
+    AudioRouter_RegisterSink(AUDIO_SINK_SSTV, SSTV_SAMPLE_RATE_HZ, sstvSink, nullptr);
     AudioRouter_SetRoute(AUDIO_SRC_SSTV_NRL, AUDIO_SINK_NRL_UPLINK, true);
     AudioRouter_SetRoute(AUDIO_SRC_SSTV_SPEAKER, AUDIO_SINK_SPEAKER, true);
     // Core 1 with the audio pipeline, same priority as the CW tx worker.
@@ -243,7 +290,8 @@ bool SSTV_SERVICE_SendJpeg(const char *path, SSTV_Mode mode)
         return false;
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (s_snap.state == SSTV_STATE_PREPARING || s_snap.state == SSTV_STATE_SENDING) {
+    if (s_snap.state == SSTV_STATE_PREPARING || s_snap.state == SSTV_STATE_SENDING ||
+        s_snap.rx_active) {
         xSemaphoreGive(s_lock);
         return false;
     }
@@ -269,6 +317,109 @@ bool SSTV_SERVICE_Stop(void)
     return active;
 }
 
+bool SSTV_SERVICE_StartRx(SstvRxSource source)
+{
+    if (s_lock == nullptr || s_rx_image == nullptr) {
+        return false;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_snap.state == SSTV_STATE_PREPARING || s_snap.state == SSTV_STATE_SENDING) {
+        xSemaphoreGive(s_lock);
+        return false; // TX owns the airtime
+    }
+    SSTV_RX_Reset();
+    s_rx_revision = 0u;
+    s_snap.rx_source = source;
+    s_snap.rx_active = true;
+    s_snap.rx_lines = 0u;
+    ++s_snap.revision;
+    AudioRouter_SetRoute(AUDIO_SRC_MIC, AUDIO_SINK_SSTV, source == SSTV_SOURCE_MIC);
+    AudioRouter_SetRoute(AUDIO_SRC_NRL_DOWNLINK, AUDIO_SINK_SSTV, source == SSTV_SOURCE_NRL);
+    xSemaphoreGive(s_lock);
+    return true;
+}
+
+bool SSTV_SERVICE_StopRx(void)
+{
+    if (s_lock == nullptr) {
+        return false;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    const bool was = s_snap.rx_active;
+    s_snap.rx_active = false;
+    ++s_snap.revision;
+    AudioRouter_SetRoute(AUDIO_SRC_MIC, AUDIO_SINK_SSTV, false);
+    AudioRouter_SetRoute(AUDIO_SRC_NRL_DOWNLINK, AUDIO_SINK_SSTV, false);
+    SSTV_RX_Reset();
+    xSemaphoreGive(s_lock);
+    return was;
+}
+
+const uint16_t *SSTV_SERVICE_RxImage(void)
+{
+    return s_rx_image;
+}
+
+uint32_t SSTV_SERVICE_RxImageRevision(void)
+{
+    return s_rx_revision;
+}
+
+bool SSTV_SERVICE_SaveRxJpeg(char *out_path, size_t out_path_size)
+{
+    if (s_rx_image == nullptr || !STORAGE_SdMounted()) {
+        return false;
+    }
+    const uint16_t lines = SSTV_RX_LinesReceived();
+    const uint16_t height = static_cast<uint16_t>(lines & ~7u); // MCU-friendly
+    if (height < 8u) {
+        return false;
+    }
+    jpeg_enc_config_t enc_cfg = DEFAULT_JPEG_ENC_CONFIG();
+    enc_cfg.width = static_cast<int>(kFrameWidth);
+    enc_cfg.height = height;
+    enc_cfg.src_type = JPEG_PIXEL_FORMAT_RGB565_LE;
+    enc_cfg.subsampling = JPEG_SUBSAMPLE_420;
+    enc_cfg.quality = 85u;
+    jpeg_enc_handle_t enc = nullptr;
+    if (jpeg_enc_open(&enc_cfg, &enc) != JPEG_ERR_OK || enc == nullptr) {
+        return false;
+    }
+    constexpr size_t kJpegOutCap = 96u * 1024u;
+    uint8_t *jpeg = static_cast<uint8_t *>(
+        heap_caps_malloc(kJpegOutCap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    int jpeg_size = 0;
+    bool ok = jpeg != nullptr &&
+              jpeg_enc_process(enc, reinterpret_cast<const uint8_t *>(s_rx_image),
+                               static_cast<int>(kFrameWidth) * height * 2, jpeg,
+                               static_cast<int>(kJpegOutCap), &jpeg_size) == JPEG_ERR_OK &&
+              jpeg_size > 0;
+    (void)jpeg_enc_close(enc);
+    if (ok) {
+        char path[96];
+        snprintf(path, sizeof(path), "%s/sstv_rx_%lu.jpg", STORAGE_SdMountPoint(),
+                 static_cast<unsigned long>(xTaskGetTickCount() * portTICK_PERIOD_MS));
+        FILE *file = fopen(path, "wb");
+        if (file != nullptr) {
+            ok = fwrite(jpeg, 1, static_cast<size_t>(jpeg_size), file) ==
+                 static_cast<size_t>(jpeg_size);
+            fclose(file);
+            if (ok) {
+                ESP_LOGI(TAG, "saved %s (%ux%u)", path, kFrameWidth, height);
+                if (out_path != nullptr && out_path_size > 0u) {
+                    snprintf(out_path, out_path_size, "%s", path);
+                }
+            }
+        } else {
+            ok = false;
+        }
+    }
+    if (jpeg != nullptr) {
+        heap_caps_free(jpeg);
+    }
+    return ok;
+}
+
 void SSTV_SERVICE_GetSnapshot(SstvSnapshot *out)
 {
     if (out == nullptr) {
@@ -280,5 +431,12 @@ void SSTV_SERVICE_GetSnapshot(SstvSnapshot *out)
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     *out = s_snap;
+    // Decoder-side live counters are single-writer (audio task); read unlocked.
+    out->rx_state = s_snap.rx_active ? SSTV_RX_GetState() : SSTV_RX_HUNT;
+    out->rx_mode = SSTV_RX_GetMode();
+    out->rx_lines = SSTV_RX_LinesReceived();
+    out->rx_lines_total = SSTV_RX_LinesTotal();
+    out->rx_quality = s_snap.rx_active ? SSTV_RX_SignalQuality() : 0u;
+    out->rx_revision = s_rx_revision;
     xSemaphoreGive(s_lock);
 }

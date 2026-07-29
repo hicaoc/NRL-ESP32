@@ -65,6 +65,7 @@ set(app_sources
     lib/ctcss_decoder.cpp
     lib/cw_codec.cpp
     lib/sstv_codec.cpp
+    lib/sstv_rx.cpp
     lib/nrl_usb_console.cpp
     lib/nrl_wifi.cpp
     lib/wifi_config_portal.cpp

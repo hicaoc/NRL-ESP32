@@ -2640,6 +2640,8 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     //   AT+SSTV=MARTIN1,<path>   start a Martin M1 frame (320x256, ~115 s)
     //   AT+SSTV?                 state / mode / progress
     //   AT+SSTV=STOP             abort the running frame
+    //   AT+SSTV=RX,MIC|NRL       start receiving from the mic tap / NRL downlink
+    //   AT+SSTV=RX,OFF           stop receiving
     if (stringEqualsIgnoreCase(command.command, "SSTV")) {
         if (is_query) {
             SstvSnapshot snap{};
@@ -2655,6 +2657,45 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
                      static_cast<unsigned>(snap.progress_percent), snap.path, snap.error);
             appendKeyValueLine(result->payload, sizeof(result->payload),
                                &result->payload_size, "SSTV", status);
+            const char *rx_state = "OFF";
+            if (snap.rx_active) {
+                rx_state = snap.rx_state == SSTV_RX_VIS ? "VIS" :
+                           snap.rx_state == SSTV_RX_LINES ? "RECEIVING" :
+                           snap.rx_state == SSTV_RX_DONE ? "DONE" : "LISTENING";
+            }
+            char rx_status[96];
+            snprintf(rx_status, sizeof(rx_status), "%s,SRC=%s,MODE=%s,LINES=%u/%u,Q=%u",
+                     rx_state, snap.rx_source == SSTV_SOURCE_MIC ? "MIC" : "NRL",
+                     snap.rx_mode == SSTV_MODE_ROBOT36 ? "ROBOT36" : "MARTIN1",
+                     static_cast<unsigned>(snap.rx_lines),
+                     static_cast<unsigned>(snap.rx_lines_total),
+                     static_cast<unsigned>(snap.rx_quality));
+            appendKeyValueLine(result->payload, sizeof(result->payload),
+                               &result->payload_size, "SSTV_RX", rx_status);
+            return;
+        }
+        if (strncasecmp(command.value, "RX,", 3u) == 0) {
+            const char *arg = command.value + 3u;
+            if (stringEqualsIgnoreCase(arg, "OFF")) {
+                const bool was = SSTV_SERVICE_StopRx();
+                appendKeyValueLine(result->payload, sizeof(result->payload),
+                                   &result->payload_size, "SSTV_RX", was ? "OFF" : "IDLE");
+                return;
+            }
+            SstvRxSource source = SSTV_SOURCE_MIC;
+            if (stringEqualsIgnoreCase(arg, "MIC")) {
+                source = SSTV_SOURCE_MIC;
+            } else if (stringEqualsIgnoreCase(arg, "NRL")) {
+                source = SSTV_SOURCE_NRL;
+            } else {
+                appendKeyValueLine(result->payload, sizeof(result->payload),
+                                   &result->payload_size, "ERR", "SSTV_RX");
+                return;
+            }
+            const bool ok = SSTV_SERVICE_StartRx(source);
+            appendKeyValueLine(result->payload, sizeof(result->payload),
+                               &result->payload_size, "SSTV_RX",
+                               ok ? (source == SSTV_SOURCE_MIC ? "MIC" : "NRL") : "BUSY");
             return;
         }
         if (stringEqualsIgnoreCase(command.value, "STOP")) {

@@ -21,6 +21,7 @@
 #include <stdint.h>
 
 #include "../lib/sstv_codec.h"
+#include "../lib/sstv_rx.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -34,6 +35,11 @@ typedef enum {
     SSTV_STATE_ERROR,
 } SstvState;
 
+typedef enum {
+    SSTV_SOURCE_MIC = 0, // radio audio from the onboard mic tap
+    SSTV_SOURCE_NRL,     // NRL network downlink
+} SstvRxSource;
+
 typedef struct {
     SstvState state;
     SSTV_Mode mode;
@@ -41,6 +47,15 @@ typedef struct {
     char path[96];
     char error[32];
     uint32_t revision; // bump counter so UIs can skip redundant redraws
+    // RX side (independent from TX; TX busy blocks StartRx and vice versa).
+    bool rx_active;
+    SstvRxSource rx_source;
+    SstvRxState rx_state;
+    SSTV_Mode rx_mode;        // valid once rx_state >= SSTV_RX_LINES
+    uint16_t rx_lines;        // image lines received so far
+    uint16_t rx_lines_total;  // 240 (Robot 36) / 256 (Martin M1)
+    uint8_t rx_quality;       // 0..100 sync tone strength
+    uint32_t rx_revision;     // bumps on every received image line
 } SstvSnapshot;
 
 void SSTV_SERVICE_Init(void);
@@ -52,6 +67,22 @@ bool SSTV_SERVICE_SendJpeg(const char *path, SSTV_Mode mode);
 // Abort the running/queued transmission. Returns false when nothing was
 // active.
 bool SSTV_SERVICE_Stop(void);
+
+// Start/stop listening for SSTV on one audio source. StartRx returns false
+// while a TX is active (or vice versa, SendJpeg returns false during RX);
+// starting RX twice switches source and resets the decoder.
+bool SSTV_SERVICE_StartRx(SstvRxSource source);
+bool SSTV_SERVICE_StopRx(void);
+
+// Received frame so far (320 wide, rx_lines rows valid; do NOT free) plus its
+// bump counter. NULL when the frame buffer allocation failed at boot.
+const uint16_t *SSTV_SERVICE_RxImage(void);
+uint32_t SSTV_SERVICE_RxImageRevision(void);
+
+// Encode the received lines as JPEG to /sdcard/sstv_rx_<tick>.jpg (TF card
+// must be mounted). Writes the path into out_path (may be NULL). Returns
+// false when nothing was received or the card/encoder failed.
+bool SSTV_SERVICE_SaveRxJpeg(char *out_path, size_t out_path_size);
 
 void SSTV_SERVICE_GetSnapshot(SstvSnapshot *out);
 

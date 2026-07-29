@@ -55,6 +55,7 @@ typedef enum {
     AUDIO_SINK_AI,          // xiaozhi AI mic uplink (Opus-encoded), 16 kHz
     AUDIO_SINK_APRS,        // AFSK demodulator mic tap, 16 kHz
     AUDIO_SINK_SIGNALING,   // MDC1200/DTMF decoder tap, 16 kHz
+    AUDIO_SINK_SSTV,        // SSTV picture demodulator tap, 16 kHz
     AUDIO_SINK_COUNT
 } AudioRouterSink_t;
 
