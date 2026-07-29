@@ -57,12 +57,14 @@ void rxOnLine(uint16_t y, const uint16_t *row, void *)
         memcpy(s_rx_image + static_cast<uint32_t>(y) * kFrameWidth, row,
                kFrameWidth * sizeof(uint16_t));
     }
-    ++s_rx_revision;
+    // Plain assignment: ++ on a volatile object is deprecated in C++20 and
+    // this build treats warnings as errors (CI caught it on all boards).
+    s_rx_revision = s_rx_revision + 1u;
 }
 
 void rxOnDone(void *)
 {
-    ++s_rx_revision;
+    s_rx_revision = s_rx_revision + 1u;
 }
 
 // 16 kHz tap for the demodulator (see audio_router sink docs).
