@@ -29,7 +29,14 @@ constexpr uint16_t kGoertzelN = 80u; // 5 ms window: exactly 6 cycles of 1200 Hz
 // the comb zero misses the resonator pole and the output grows unbounded)
 constexpr float kToneOnRatio = 0.45f;
 constexpr float kToneOffRatio = 0.25f;
+// With no input, the phase discriminator naturally relaxes back to its
+// 1900 Hz centre and can look exactly like a VIS leader. Require a tiny but
+// real signal (RMS > 20 PCM counts) before accepting header tones. This is
+// still far below the 2%-gain weak-signal test (about 100 RMS counts).
+constexpr float kHeaderMinEnergy = 400.0f;
 constexpr uint32_t kLeaderMinSamples = 3520u; // 220 ms of the 300 ms leader
+constexpr uint16_t kBreakMinSamples = 80u;    // accept >=5 ms of the 10 ms break
+constexpr uint16_t kBreakMaxSamples = 400u;   // reject unrelated long 1200 Hz tones
 constexpr uint16_t kVisSlotSamples = 480u;    // 30 ms
 constexpr uint16_t kVisMargin = 120u;         // measure the middle 50% of a slot
 constexpr int kSyncLeadBack = 54;  // Goertzel 'on' crossing lags tone begin ~0.67*N
@@ -77,6 +84,21 @@ float s_ratio = 0.0f;
 uint32_t s_index = 0u;
 bool s_tone = false;
 uint32_t s_tone_begin = 0u;
+
+// Standard calibration header detector:
+//   300 ms 1900 Hz, 10 ms 1200 Hz, 300 ms 1900 Hz.
+// A separate legacy path below still accepts the old project-specific
+// continuous 1200 Hz leader so mixed firmware versions remain interoperable.
+enum HeaderPhase : uint8_t {
+    HEADER_FIRST_LEADER = 0,
+    HEADER_BREAK,
+    HEADER_SECOND_LEADER,
+};
+HeaderPhase s_header_phase = HEADER_FIRST_LEADER;
+uint32_t s_header_run_begin = 0u;
+uint32_t s_break_begin = 0u;
+bool s_header_run_active = false;
+uint16_t s_header_gap = 0u;
 
 SstvRxState s_state = SSTV_RX_HUNT;
 SSTV_Mode s_mode = SSTV_MODE_ROBOT36;
@@ -374,7 +396,7 @@ bool visSlotDone()
     }
     const float mean = s_slot_acc / s_slot_count;
     if (s_vis_slot == 0u) {
-        return mean > 1200.0f; // start bit is 1300 Hz
+        return mean >= 1100.0f && mean <= 1300.0f; // start bit is 1200 Hz
     }
     if (s_vis_slot <= 7u) {
         const uint8_t bit = mean < 1200.0f ? 1u : 0u;
@@ -398,6 +420,102 @@ bool visSlotDone()
         return false; // known-but-unsupported or garbage: keep listening
     }
     return true;
+}
+
+void resetHeaderDetector()
+{
+    s_header_phase = HEADER_FIRST_LEADER;
+    s_header_run_begin = 0u;
+    s_break_begin = 0u;
+    s_header_run_active = false;
+    s_header_gap = 0u;
+}
+
+void startVis(uint32_t leader_end)
+{
+    s_leader_end = leader_end;
+    s_vis_slot = 0u;
+    s_vis_code = 0u;
+    s_vis_ones = 0u;
+    s_slot_acc = 0.0f;
+    s_slot_count = 0u;
+    s_state = SSTV_RX_VIS;
+    resetHeaderDetector();
+}
+
+void huntStandardHeader()
+{
+    // The lightweight phase discriminator reads a steady 1900 Hz table tone
+    // at about 1837 Hz and rings briefly at transitions. Use a deliberately
+    // broad calibration band; VIS/data tones remain below it.
+    const bool signal_present = s_eng >= kHeaderMinEnergy;
+    const bool leader = signal_present && s_freq >= 1600.0f && s_freq <= 2150.0f;
+    const bool break_tone = signal_present && s_freq >= 1050.0f && s_freq <= 1350.0f;
+
+    if (s_header_phase == HEADER_FIRST_LEADER) {
+        if (leader) {
+            if (!s_header_run_active) {
+                s_header_run_active = true;
+                s_header_run_begin = s_index;
+            }
+            s_header_gap = 0u;
+            if (s_index - s_header_run_begin >= kLeaderMinSamples) {
+                s_header_phase = HEADER_BREAK;
+            }
+        } else if (s_header_run_active && ++s_header_gap > 160u) {
+            s_header_run_active = false;
+            s_header_gap = 0u;
+        }
+        return;
+    }
+
+    if (s_header_phase == HEADER_BREAK) {
+        if (break_tone) {
+            s_header_phase = HEADER_SECOND_LEADER;
+            s_break_begin = s_index;
+            s_header_run_active = false;
+        } else if (!leader && s_index - s_header_run_begin > 5600u) {
+            resetHeaderDetector();
+        }
+        return;
+    }
+
+    // HEADER_SECOND_LEADER: finish validating the short break, then measure
+    // the second leader early enough to predict its nominal end.
+    if (!s_header_run_active) {
+        if (break_tone) {
+            if (s_index - s_break_begin > kBreakMaxSamples) {
+                resetHeaderDetector();
+            }
+            return;
+        }
+        const uint32_t break_len = s_index - s_break_begin;
+        if (!leader) {
+            if (break_len > kBreakMaxSamples) {
+                resetHeaderDetector();
+            }
+            return;
+        }
+        if (break_len < kBreakMinSamples || break_len > kBreakMaxSamples) {
+            resetHeaderDetector();
+            return;
+        }
+        s_header_run_active = true;
+        s_header_run_begin = s_index;
+        s_header_gap = 0u;
+        return;
+    }
+
+    if (!leader) {
+        if (++s_header_gap > 160u) {
+            resetHeaderDetector();
+        }
+        return;
+    }
+    s_header_gap = 0u;
+    if (s_index - s_header_run_begin >= kLeaderMinSamples) {
+        startVis(s_header_run_begin + 4800u);
+    }
 }
 
 void processSample(const int16_t x)
@@ -444,20 +562,16 @@ void processSample(const int16_t x)
 
     // --- line/header state machine ---
     if (s_state == SSTV_RX_HUNT || s_state == SSTV_RX_DONE) {
-        // Leader: a continuous 1200 Hz tone >= 220 ms can only be the 300 ms
-        // VIS leader. The VIS slots then start exactly one leader length
-        // (4800 samples) after the tone began -- the 1100/1300 Hz VIS bits
-        // are too close to 1200 Hz for the Goertzel to gate them, so the
-        // slot anchor derives from the tone START, not its end.
-        if (s_tone && s_index - s_tone_begin >= kLeaderMinSamples &&
+        // Standard phone/radio SSTV starts with the 1900/1200/1900 Hz
+        // calibration header. Detect it from the discriminator output.
+        huntStandardHeader();
+
+        // Backward compatibility with firmware that used the old, nonstandard
+        // 300 ms continuous 1200 Hz leader.
+        if (s_eng >= kHeaderMinEnergy && s_tone &&
+            s_index - s_tone_begin >= kLeaderMinSamples &&
             s_index - s_tone_begin < kLeaderMinSamples + 4800u) {
-            s_leader_end = s_tone_begin + 4800u;
-            s_vis_slot = 0u;
-            s_vis_code = 0u;
-            s_vis_ones = 0u;
-            s_slot_acc = 0.0f;
-            s_slot_count = 0u;
-            s_state = SSTV_RX_VIS;
+            startVis(s_tone_begin + 4800u);
         }
     } else if (s_state == SSTV_RX_VIS) {
         const uint32_t slot_start = s_leader_end + static_cast<uint32_t>(s_vis_slot) * kVisSlotSamples;
@@ -469,6 +583,7 @@ void processSample(const int16_t x)
         if (s_index + 1u >= slot_start + kVisSlotSamples) {
             if (!visSlotDone()) {
                 s_state = SSTV_RX_HUNT;
+                resetHeaderDetector();
             } else if (s_state == SSTV_RX_VIS) {
                 ++s_vis_slot;
             }
@@ -581,6 +696,19 @@ void SSTV_RX_Init(SstvRxVisCallback on_vis, SstvRxLineCallback on_line,
 
 void SSTV_RX_Reset(void)
 {
+    s_nco = 0u;
+    s_i = 0.0f;
+    s_q = 0.0f;
+    s_i_prev = 0.0f;
+    s_q_prev = 0.0f;
+    s_freq = kCenterHz;
+    memset(s_ring, 0, sizeof(s_ring));
+    s_ring_pos = 0u;
+    s_g1 = 0.0f;
+    s_g2 = 0.0f;
+    s_eng = 0.0f;
+    s_ratio = 0.0f;
+    s_index = 0u;
     s_state = SSTV_RX_HUNT;
     s_lines_received = 0u;
     s_group = 0u;
@@ -606,6 +734,7 @@ void SSTV_RX_Reset(void)
     s_lsq_sy = 0.0;
     s_lsq_sxy = 0.0;
     s_last_sync = s_index;
+    resetHeaderDetector();
 }
 
 void SSTV_RX_Feed(const int16_t *samples, size_t count)

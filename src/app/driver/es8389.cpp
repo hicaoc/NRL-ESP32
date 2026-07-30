@@ -33,6 +33,7 @@ static i2c_master_bus_handle_t s_i2c_bus = nullptr;
 static const audio_codec_ctrl_if_t *s_ctrl_if = nullptr;
 static const audio_codec_data_if_t *s_data_if = nullptr;
 static const audio_codec_gpio_if_t *s_gpio_if = nullptr;
+static const audio_codec_if_t *s_codec_if = nullptr;
 static esp_codec_dev_handle_t s_codec = nullptr;
 
 static bool es8389_init_i2c(void) {
@@ -96,18 +97,18 @@ static bool es8389_create_codec(i2s_chan_handle_t tx_handle, i2s_chan_handle_t r
     es8389_cfg.hw_gain = gain;
     es8389_cfg.no_dac_ref = false;
 
-    const audio_codec_if_t *codec_if = es8389_codec_new(&es8389_cfg);
-    if (codec_if == nullptr) {
+    s_codec_if = es8389_codec_new(&es8389_cfg);
+    if (s_codec_if == nullptr) {
         ESP_LOGE(TAG, "create ES8389 codec interface failed");
         return false;
     }
 
     esp_codec_dev_cfg_t dev_cfg = {};
-    // ES8389 is used as the DAC/PA path on S31. Capture is handled by the
-    // separate ES7210/direct-I2S path, so keep codec-dev output-only; otherwise
-    // hi-fi playback also tries to reconfigure RX and logs failed 96 kHz clocks.
+    // The audio passthrough owns the ES8389 RX channel directly. Keep the
+    // codec-dev wrapper output-only so hi-fi playback can reconfigure TX
+    // without also changing RX to a music rate and breaking mic capture.
     dev_cfg.dev_type = ESP_CODEC_DEV_TYPE_OUT;
-    dev_cfg.codec_if = codec_if;
+    dev_cfg.codec_if = s_codec_if;
     dev_cfg.data_if = s_data_if;
     s_codec = esp_codec_dev_new(&dev_cfg);
     if (s_codec == nullptr) {
@@ -124,8 +125,12 @@ static void es8389_apply_config_levels(void) {
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
     if (config != nullptr) {
         ES8389_SetOutputVolume(config->line_out_volume);
+        ES8389_SetInputGain(config->mic_volume);
     } else {
         (void)esp_codec_dev_set_out_vol(s_codec, kDefaultOutVolume);
+        if (s_codec_if != nullptr && s_codec_if->set_mic_gain != nullptr) {
+            (void)s_codec_if->set_mic_gain(s_codec_if, kDefaultInGain);
+        }
     }
 }
 
@@ -234,11 +239,22 @@ extern "C" bool ES8389_SetOutputVolume(const uint8_t value) {
 }
 
 extern "C" bool ES8389_SetInputGain(const uint8_t value) {
-    (void)value;
-    if (s_codec == nullptr) {
+    if (s_codec_if == nullptr || s_codec_if->set_mic_gain == nullptr) {
         return false;
     }
-    return true;
+    // Keep codec-dev output-only so hi-fi playback can change TX clocks
+    // without reconfiguring the live RX channel. The ES8389 hardware
+    // interface is nevertheless opened in BOTH mode, so program its ADC PGA
+    // directly instead of using esp_codec_dev_set_in_gain(), which rejects an
+    // output-only device handle.
+    const unsigned step = (static_cast<unsigned>(value) * 14u + 127u) / 255u;
+    const float gain_db = static_cast<float>(step) * 3.0f;
+    const bool ok = s_codec_if->set_mic_gain(s_codec_if, gain_db) == ESP_CODEC_DEV_OK;
+    ESP_LOGI(TAG, "mic gain: volume=%u -> %.1f dB%s",
+             static_cast<unsigned>(value),
+             static_cast<double>(gain_db),
+             ok ? "" : " FAILED");
+    return ok;
 }
 
 extern "C" bool ES8389_HifiAcquire(const uint32_t sample_rate_hz,

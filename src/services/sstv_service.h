@@ -60,6 +60,10 @@ typedef struct {
 
 void SSTV_SERVICE_Init(void);
 
+// Resolve the shared TF-card SSTV image directory ("<mount>/sstv"), creating
+// it on demand. TX pickers and RX saves use this single location.
+bool SSTV_SERVICE_GetImageDirectory(char *out_path, size_t out_path_size);
+
 // Queue a transmission. Returns false when another frame is busy or the
 // arguments are unusable; decode errors surface later via the snapshot.
 bool SSTV_SERVICE_SendJpeg(const char *path, SSTV_Mode mode);
@@ -78,12 +82,21 @@ bool SSTV_SERVICE_Stop(void);
 bool SSTV_SERVICE_StartRx(SstvRxSource source);
 bool SSTV_SERVICE_StopRx(void);
 
+// Clear the live RX framebuffer without stopping or resetting the decoder.
+// A newly detected VIS header also clears the buffer automatically.
+bool SSTV_SERVICE_ClearRxImage(void);
+
+// Feed the unprocessed 16 kHz microphone tap. The audio capture task calls
+// this before speech HPF/AEC/AI noise suppression so SSTV calibration tones
+// cannot be removed by voice processing. Ignored unless MIC RX is active.
+void SSTV_SERVICE_FeedRawMic(const int16_t *samples, size_t sample_count);
+
 // Received frame so far (320 wide, rx_lines rows valid; do NOT free) plus its
 // bump counter. NULL when the frame buffer allocation failed at boot.
 const uint16_t *SSTV_SERVICE_RxImage(void);
 uint32_t SSTV_SERVICE_RxImageRevision(void);
 
-// Encode the received lines as JPEG to /sdcard/sstv_rx_<tick>.jpg (TF card
+// Encode the received lines as JPEG to /sdcard/sstv/sstv_rx_<tick>.jpg (TF card
 // must be mounted). Writes the path into out_path (may be NULL). Returns
 // false when nothing was received or the card/encoder failed.
 bool SSTV_SERVICE_SaveRxJpeg(char *out_path, size_t out_path_size);
