@@ -3,9 +3,10 @@
 // Timing reference (de-facto standard, as emitted by MMSSTV; verified against
 // the zero-crossing analysis at bruxy.regnet.cz/web/hamradio/EN/a-look-into-sstv-mode):
 //
-//   VIS header: 300 ms 1200 Hz leader, 30 ms 1300 Hz start bit, 7 data bits
-//   LSB-first (1100 Hz = 1, 1300 Hz = 0, 30 ms each), even-parity bit 30 ms,
-//   30 ms 1200 Hz stop bit. VIS codes: Robot 36 = 8, Martin M1 = 44.
+//   VIS header: 300 ms 1900 Hz leader, 10 ms 1200 Hz break, another 300 ms
+//   1900 Hz leader, then a 30 ms 1200 Hz start bit, 7 data bits LSB-first
+//   (1100 Hz = 1, 1300 Hz = 0), even-parity bit, and a 1200 Hz stop bit.
+//   Every VIS bit is 30 ms. Codes: Robot 36 = 8, Martin M1 = 44.
 //
 //   Robot 36, per 2-line group (Y / R-Y / Y / B-Y):
 //     sync 9.0 ms 1200 Hz, porch 3.0 ms 1500 Hz, Y scan 88.0 ms (320 px),
@@ -42,6 +43,7 @@ constexpr size_t kSinEntries = 1u << kSinBits;
 
 // Sub-carrier frequencies (Hz).
 constexpr uint16_t kFreqSync = 1200u;
+constexpr uint16_t kFreqLeader = 1900u;
 constexpr uint16_t kFreqBlack = 1500u;
 constexpr uint16_t kFreqWhite = 2300u;
 constexpr uint16_t kFreqVisOne = 1100u;
@@ -85,7 +87,7 @@ uint32_t s_seg_pos = 0u;
 
 // Sequencer: VIS header, then image lines/groups.
 uint8_t s_stage = 0u;    // 0 = VIS, 1 = image, 2 = done
-uint8_t s_vis_step = 0u; // 0..10
+uint8_t s_vis_step = 0u; // 0..12
 uint16_t s_line = 0u;    // Martin: line; Robot: 2-line group
 uint8_t s_line_seg = 0u; // segment index within the line/group
 
@@ -203,16 +205,18 @@ uint16_t scanFreq()
 bool advanceSegment()
 {
     if (s_stage == 0u) {
-        // VIS header (durations in samples at 16 kHz).
+        // Standard VIS header (durations in samples at 16 kHz).
         switch (s_vis_step) {
-            case 0: toneSegment(kFreqSync, 4800u); break; // 300 ms leader
-            case 1: toneSegment(kFreqVisZero, 480u); break; // start bit
-            case 2: case 3: case 4: case 5: case 6: case 7: case 8: {
-                const uint8_t bit = static_cast<uint8_t>((s_vis_code >> (s_vis_step - 2u)) & 1u);
+            case 0: toneSegment(kFreqLeader, 4800u); break; // 300 ms leader
+            case 1: toneSegment(kFreqSync, 160u); break;    // 10 ms break
+            case 2: toneSegment(kFreqLeader, 4800u); break; // 300 ms leader
+            case 3: toneSegment(kFreqSync, 480u); break;    // VIS start bit
+            case 4: case 5: case 6: case 7: case 8: case 9: case 10: {
+                const uint8_t bit = static_cast<uint8_t>((s_vis_code >> (s_vis_step - 4u)) & 1u);
                 toneSegment(bit != 0u ? kFreqVisOne : kFreqVisZero, 480u);
                 break;
             }
-            case 9: {
+            case 11: {
                 // Even parity over the 7 data bits (1100 Hz = 1).
                 uint8_t ones = 0u;
                 for (uint8_t i = 0u; i < 7u; ++i) {
@@ -223,7 +227,7 @@ bool advanceSegment()
             }
             default: toneSegment(kFreqSync, 480u); break; // stop bit
         }
-        if (++s_vis_step > 10u) {
+        if (++s_vis_step > 12u) {
             s_stage = 1u;
             s_line = 0u;
             s_line_seg = 0u;
@@ -319,9 +323,9 @@ void SSTV_TxInit(SSTV_Mode mode)
     s_img_width = 0u;
     s_vis_code = (mode == SSTV_MODE_ROBOT36) ? kVisRobot36 :
                  (mode == SSTV_MODE_MARTIN_M1) ? kVisMartinM1 : kVisPd120;
-    // VIS header: 4800 + 10 x 480 samples. Robot: 120 groups x 4800 samples;
+    // VIS header: 2 x 4800 + 160 + 10 x 480 samples. Robot: 120 groups x 4800 samples;
     // Martin: 256 lines x 7143; PD120: 248 double-lines x 8137.
-    s_total = 9600u + ((mode == SSTV_MODE_ROBOT36) ? 120u * 4800u :
+    s_total = 14560u + ((mode == SSTV_MODE_ROBOT36) ? 120u * 4800u :
                        (mode == SSTV_MODE_MARTIN_M1) ? 256u * 7143u : 248u * 8137u);
     s_elapsed = 0u;
     s_phase = 0u;

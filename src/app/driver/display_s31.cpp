@@ -487,7 +487,7 @@ char s_sstv_msg[96] = {};       // transient save/status message
 uint32_t s_sstv_msg_ms = 0u;
 
 // RX log viewer (sub-page of the SSTV page): saved frames at
-// /sdcard/sstv_rx_*.jpg, static rebuild-on-action like the CW score page.
+// /sdcard/sstv/sstv_rx_*.jpg, static rebuild-on-action like the CW score page.
 constexpr size_t kSstvLogMax = 32u;
 uint8_t s_sstv_view = 0u; // 0 = main SSTV page, 1 = RX log list, 2 = log viewer
 char s_sstv_log_files[kSstvLogMax][kSstvNameChars] = {};
@@ -854,7 +854,7 @@ const TrEntry kTr[] = {
     {"Start", "开始"},
     {"Stop", "停止"},
     {"no TF card", "未插 TF 卡"},
-    {"no .jpg at card root", "卡根目录没有 .jpg"},
+    {"no .jpg in /sstv", "/sstv 目录没有 .jpg"},
     {"no JPEG on TF card", "TF 卡上没有 JPEG"},
     {"TX busy / failed", "发送忙/失败"},
     {"saved %s", "已保存 %s"},
@@ -867,6 +867,7 @@ const TrEntry kTr[] = {
     {"RX off", "接收关闭"},
     {"camera busy (video TX)", "摄像头忙（视频通话中）"},
     {"camera capture failed", "拍照失败"},
+    {"camera TX queue failed", "照片发送排队失败"},
     {"no saved frames", "没有已保存的图像"},
     {"decode failed", "解码失败"},
     {"Up", "上一个"},
@@ -4019,7 +4020,7 @@ void buildMap()
 }
 
 // ---- SSTV page ----------------------------------------------------------------
-// TX: pick a JPEG from the TF card root and send it over the air (side tone
+// TX: pick a JPEG from the TF card /sstv directory and send it over the air (side tone
 // on the speaker). RX: the service's demodulator taps mic or NRL downlink and
 // writes lines into a PSRAM frame buffer shown live; the widget only gets
 // invalidated when the image revision bumps.
@@ -4039,7 +4040,11 @@ void scanSstvFiles()
     if (!STORAGE_SdMounted()) {
         return;
     }
-    DIR *dir = opendir(STORAGE_SdMountPoint());
+    char directory[96];
+    if (!SSTV_SERVICE_GetImageDirectory(directory, sizeof(directory))) {
+        return;
+    }
+    DIR *dir = opendir(directory);
     if (dir == nullptr) {
         return;
     }
@@ -4081,8 +4086,15 @@ void sendSstvFromPage()
         refreshSstvPage();
         return;
     }
+    char directory[96];
+    if (!SSTV_SERVICE_GetImageDirectory(directory, sizeof(directory))) {
+        snprintf(s_sstv_msg, sizeof(s_sstv_msg), "%s", tr("no JPEG on TF card"));
+        s_sstv_msg_ms = millis();
+        refreshSstvPage();
+        return;
+    }
     char path[128];
-    snprintf(path, sizeof(path), "%s/%s", STORAGE_SdMountPoint(),
+    snprintf(path, sizeof(path), "%s/%s", directory,
              s_sstv_files[s_sstv_file_index]);
     if (!SSTV_SERVICE_SendJpeg(path, s_sstv_tx_mode)) {
         snprintf(s_sstv_msg, sizeof(s_sstv_msg), "%s", tr("TX busy / failed"));
@@ -4114,30 +4126,62 @@ void camSstvFromPage()
         refreshSstvPage();
         return;
     }
+    SstvSnapshot snap{};
+    SSTV_SERVICE_GetSnapshot(&snap);
+    if (snap.state == SSTV_STATE_PREPARING || snap.state == SSTV_STATE_SENDING) {
+        snprintf(s_sstv_msg, sizeof(s_sstv_msg), "%s", tr("TX busy / failed"));
+        s_sstv_msg_ms = millis();
+        refreshSstvPage();
+        return;
+    }
+    if (snap.rx_active) {
+        (void)SSTV_SERVICE_StopRx();
+    }
     bsp_camera_config_t cfg = BSP_CAMERA_DEFAULT_CONFIG();
+    // Match the camera parameters already proven stable by video calling.
+    cfg.width = 1280;
+    cfg.height = 720;
+    cfg.pixel_format = BSP_CAMERA_PIXEL_FORMAT_JPEG;
+    cfg.xclk_freq_hz = 10 * 1000 * 1000;
     bsp_camera_t *cam = nullptr;
     bool sent = false;
-    if (bsp_camera_open(&cfg, &cam) == ESP_OK && cam != nullptr) {
+    bool captured = false;
+    const esp_err_t open_err = bsp_camera_open(&cfg, &cam);
+    if (open_err == ESP_OK && cam != nullptr) {
         (void)bsp_camera_set_jpeg_quality(cam, 10);
-        if (bsp_camera_start(cam) == ESP_OK) {
+        const esp_err_t start_err = bsp_camera_start(cam);
+        if (start_err == ESP_OK) {
             for (int i = 0; i < 8 && !sent; ++i) {
                 bsp_camera_frame_t frame = {};
-                if (bsp_camera_get_frame(cam, &frame) == ESP_OK && frame.data != nullptr) {
+                const esp_err_t frame_err = bsp_camera_get_frame(cam, &frame);
+                if (frame_err == ESP_OK && frame.data != nullptr && frame.size > 0u) {
+                    captured = true;
                     if (i >= 5) { // first frames: exposure/white-balance settling
+                        ESP_LOGI(TAG, "SSTV camera frame: index=%d bytes=%u", i,
+                                 static_cast<unsigned>(frame.size));
                         sent = SSTV_SERVICE_SendJpegBuffer(
                             static_cast<const uint8_t *>(frame.data), frame.size,
                             s_sstv_tx_mode);
                     }
                     (void)bsp_camera_return_frame(cam, &frame);
+                } else {
+                    ESP_LOGW(TAG, "SSTV camera frame failed: index=%d err=%s data=%p size=%u",
+                             i, esp_err_to_name(frame_err), frame.data,
+                             static_cast<unsigned>(frame.size));
                 }
                 vTaskDelay(pdMS_TO_TICKS(100));
             }
             (void)bsp_camera_stop(cam);
+        } else {
+            ESP_LOGE(TAG, "SSTV camera start failed: %s", esp_err_to_name(start_err));
         }
         (void)bsp_camera_close(cam);
+    } else {
+        ESP_LOGE(TAG, "SSTV camera open failed: %s handle=%p", esp_err_to_name(open_err), cam);
     }
     if (!sent) {
-        snprintf(s_sstv_msg, sizeof(s_sstv_msg), "%s", tr("camera capture failed"));
+        snprintf(s_sstv_msg, sizeof(s_sstv_msg), "%s",
+                 tr(captured ? "camera TX queue failed" : "camera capture failed"));
         s_sstv_msg_ms = millis();
     }
     refreshSstvPage();
@@ -4151,7 +4195,11 @@ void scanSstvLogFiles()
     if (!STORAGE_SdMounted()) {
         return;
     }
-    DIR *dir = opendir(STORAGE_SdMountPoint());
+    char directory[96];
+    if (!SSTV_SERVICE_GetImageDirectory(directory, sizeof(directory))) {
+        return;
+    }
+    DIR *dir = opendir(directory);
     if (dir == nullptr) {
         return;
     }
@@ -4198,7 +4246,7 @@ void buildSstvLog()
     scanSstvLogFiles();
 
     lv_obj_t *box = panel(scr, 24, 76, 752, 288);
-    fieldLabel(box, 0, 0, "RX LOG (/sdcard/sstv_rx_*.jpg)");
+    fieldLabel(box, 0, 0, "RX LOG (/sdcard/sstv/sstv_rx_*.jpg)");
     constexpr size_t kRows = 8u;
     if (s_sstv_log_count == 0u) {
         lv_obj_t *lbl = label(box, &lv_font_montserrat_20, kColorSub);
@@ -4232,10 +4280,15 @@ void buildSstvLogView()
 
     bool shown = false;
     if (s_sstv_log_count > 0u && STORAGE_SdMounted()) {
-        char path[128];
-        snprintf(path, sizeof(path), "%s/%s", STORAGE_SdMountPoint(),
-                 s_sstv_log_files[s_sstv_log_index]);
-        FILE *file = fopen(path, "rb");
+        char directory[96];
+        char path[160];
+        const bool directory_ok =
+            SSTV_SERVICE_GetImageDirectory(directory, sizeof(directory));
+        if (directory_ok) {
+            snprintf(path, sizeof(path), "%s/%s", directory,
+                     s_sstv_log_files[s_sstv_log_index]);
+        }
+        FILE *file = directory_ok ? fopen(path, "rb") : nullptr;
         if (file != nullptr && fseek(file, 0, SEEK_END) == 0) {
             const long size = ftell(file);
             uint8_t *jpeg = static_cast<uint8_t *>(heap_caps_malloc(
@@ -4289,7 +4342,7 @@ void refreshSstvPage()
     if (!STORAGE_SdMounted()) {
         snprintf(text, sizeof(text), "%s", tr("no TF card"));
     } else if (s_sstv_file_count == 0u) {
-        snprintf(text, sizeof(text), "%s", tr("no .jpg at card root"));
+        snprintf(text, sizeof(text), "%s", tr("no .jpg in /sstv"));
     } else {
         snprintf(text, sizeof(text), "%u/%u %s", static_cast<unsigned>(s_sstv_file_index + 1u),
                  static_cast<unsigned>(s_sstv_file_count), s_sstv_files[s_sstv_file_index]);
@@ -5315,7 +5368,10 @@ void action(lv_event_t *event)
             if (snap.rx_active) {
                 (void)SSTV_SERVICE_StopRx();
             } else {
-                (void)SSTV_SERVICE_StartRx(s_sstv_rx_source);
+                if (!SSTV_SERVICE_StartRx(s_sstv_rx_source)) {
+                    snprintf(s_sstv_msg, sizeof(s_sstv_msg), "%s", tr("RX start failed / TX busy"));
+                    s_sstv_msg_ms = millis();
+                }
             }
             refreshSstvPage();
             break;

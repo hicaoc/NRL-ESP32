@@ -248,6 +248,18 @@ uint32_t s_sstv_rev = UINT32_MAX;
 volatile bool s_sstv_exit_requested = false;
 #endif
 
+#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_GEZIPAI_4G
+// RX-only SSTV view for the 240x240, button-operated Gezipai boards. The
+// service owns this 320x256 RGB565 buffer; LVGL scales it into the 240x170
+// centre area without making another full-frame copy.
+lv_obj_t *s_gezipai_sstv_image = nullptr;
+lv_obj_t *s_gezipai_sstv_status = nullptr;
+lv_image_dsc_t s_gezipai_sstv_dsc = {};
+uint32_t s_gezipai_sstv_revision = UINT32_MAX;
+SstvRxSource s_gezipai_sstv_source = SSTV_SOURCE_MIC;
+char s_gezipai_sstv_status_cache[80] = {};
+#endif
+
 adc_oneshot_unit_handle_t s_adc = nullptr;
 adc_cali_handle_t s_adc_cali = nullptr;
 bool s_adc_ready = false;
@@ -274,6 +286,54 @@ enum class MenuPage : uint8_t {
     Map,
     Sstv,
 };
+
+enum class MainMenuAction : uint8_t {
+    Back,
+    PttMode,
+    NrlCodec,
+    NowCodec,
+    Cw,
+    Signaling,
+    Ota,
+    Aprs,
+    Language,
+    About,
+    Map,
+    Sstv,
+};
+
+// Gezipai's six-row viewport puts the frequently used radio applications
+// first, followed by link/audio settings and finally system maintenance.
+// BI4UMD keeps its established touch-menu order.
+constexpr MainMenuAction kMainMenuActions[] = {
+    MainMenuAction::Back,
+#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_GEZIPAI_4G
+    MainMenuAction::Sstv,
+    MainMenuAction::Aprs,
+    MainMenuAction::Cw,
+    MainMenuAction::Signaling,
+    MainMenuAction::PttMode,
+    MainMenuAction::NrlCodec,
+    MainMenuAction::NowCodec,
+    MainMenuAction::Ota,
+    MainMenuAction::Language,
+    MainMenuAction::About,
+#else
+    MainMenuAction::PttMode,
+    MainMenuAction::NrlCodec,
+    MainMenuAction::NowCodec,
+    MainMenuAction::Cw,
+    MainMenuAction::Signaling,
+    MainMenuAction::Ota,
+    MainMenuAction::Aprs,
+    MainMenuAction::Language,
+    MainMenuAction::About,
+    MainMenuAction::Map,
+    MainMenuAction::Sstv,
+#endif
+};
+constexpr size_t kMainMenuActionCount =
+    sizeof(kMainMenuActions) / sizeof(kMainMenuActions[0]);
 
 // Written by STATUS_IO_Poll() and consumed only by Display_Poll(). Keeping
 // LVGL out of the button/audio task avoids cross-task widget access.
@@ -1164,6 +1224,11 @@ void resetCenterWidgets()
     s_lbl_settings_mic = nullptr;
     s_lbl_settings_volume = nullptr;
 #endif
+#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_GEZIPAI_4G
+    s_gezipai_sstv_image = nullptr;
+    s_gezipai_sstv_status = nullptr;
+    s_gezipai_sstv_status_cache[0] = '\0';
+#endif
 }
 
 void resetHomeWidgets()
@@ -1432,23 +1497,36 @@ void buildMainMenu()
              NRLAudioBridge_GetVoiceCodec() == 1u ? "OPUS" : "G711");
     snprintf(now_codec, sizeof(now_codec), menuText("NOW CODEC: %s", "NOW编码: %s"),
              ESPNOW_LINK_GetTxCodec() == 1u ? "OPUS" : "G711");
-    const char *items[] = {
-        menuText("< BACK", "< 返回"),
-        ptt,
-        nrl_codec,
-        now_codec,
-        "CW MORSE",
-        menuText("SIGNALING", "信令设置"),
-        menuText("CHECK UPDATE", "检查更新"),
-        "APRS",
-        menuText("LANGUAGE", "语言"),
-        menuText("ABOUT", "关于"),
+    const char *items[kMainMenuActionCount] = {};
+    for (size_t i = 0u; i < kMainMenuActionCount; ++i) {
+        switch (kMainMenuActions[i]) {
+            case MainMenuAction::Back: items[i] = menuText("< BACK", "< 返回"); break;
+            case MainMenuAction::PttMode: items[i] = ptt; break;
+            case MainMenuAction::NrlCodec: items[i] = nrl_codec; break;
+            case MainMenuAction::NowCodec: items[i] = now_codec; break;
+            case MainMenuAction::Cw: items[i] = "CW MORSE"; break;
+            case MainMenuAction::Signaling:
+                items[i] = menuText("SIGNALING", "信令设置");
+                break;
+            case MainMenuAction::Ota:
+                items[i] = menuText("CHECK UPDATE", "检查更新");
+                break;
+            case MainMenuAction::Aprs: items[i] = "APRS"; break;
+            case MainMenuAction::Language:
+                items[i] = menuText("LANGUAGE", "语言");
+                break;
+            case MainMenuAction::About: items[i] = menuText("ABOUT", "关于"); break;
+            case MainMenuAction::Map: items[i] = menuText("MAP", "地图"); break;
+            case MainMenuAction::Sstv:
 #if NRL_BOARD == NRL_BOARD_BI4UMD
-        menuText("MAP", "地图"),
-        "SSTV",
+                items[i] = "SSTV";
+#else
+                items[i] = "SSTV RX";
 #endif
-    };
-    constexpr size_t kItemCount = sizeof(items) / sizeof(items[0]);
+                break;
+        }
+    }
+    constexpr size_t kItemCount = kMainMenuActionCount;
 #if NRL_BOARD == NRL_BOARD_BI4UMD
     buildBi4umdScrollableMenu(scr, items, kItemCount);
 #else
@@ -1463,7 +1541,8 @@ void buildMainMenu()
         menuRow(scr, 1 + static_cast<int>(i - start) * 24, items[i], s_menu_index == i,
                 nullptr, static_cast<int>(i));
     }
-#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_GEZIPAI_4G || \
+    NRL_BOARD == NRL_BOARD_BI4UMD
     menuScrollBar(scr, kItemCount, kVisibleRows, start);
 #endif
 #endif
@@ -2504,7 +2583,7 @@ void sstvScanFiles()
     s_sstv_selected = -1;
     if (!STORAGE_SdMounted()) return;
     char dir_path[96];
-    snprintf(dir_path, sizeof(dir_path), "%s", STORAGE_SdMountPoint());
+    if (!SSTV_SERVICE_GetImageDirectory(dir_path, sizeof(dir_path))) return;
     DIR *dir = opendir(dir_path);
     if (dir == nullptr) return;
     struct dirent *entry = nullptr;
@@ -2568,8 +2647,10 @@ void sstvSendClicked(lv_event_t *)
         return;
     }
     if (s_sstv_selected < 0 || static_cast<size_t>(s_sstv_selected) >= s_sstv_file_count) return;
+    char directory[96];
+    if (!SSTV_SERVICE_GetImageDirectory(directory, sizeof(directory))) return;
     char path[128];
-    snprintf(path, sizeof(path), "%s/%s", STORAGE_SdMountPoint(), s_sstv_files[s_sstv_selected]);
+    snprintf(path, sizeof(path), "%s/%s", directory, s_sstv_files[s_sstv_selected]);
     (void)SSTV_SERVICE_SendJpeg(path, s_sstv_mode);
 }
 
@@ -2666,6 +2747,87 @@ void buildSstvMenu()
 }
 #endif // NRL_BOARD == NRL_BOARD_BI4UMD
 
+#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_GEZIPAI_4G
+void refreshGezipaiSstvRx()
+{
+    if (s_gezipai_sstv_status == nullptr) return;
+
+    SstvSnapshot snap{};
+    SSTV_SERVICE_GetSnapshot(&snap);
+    char text[80];
+    const char *source = snap.rx_source == SSTV_SOURCE_MIC ? "MIC" : "NRL";
+    if (SSTV_SERVICE_RxImage() == nullptr) {
+        snprintf(text, sizeof(text), "NO RX BUFFER  PTT EXIT");
+    } else if (!snap.rx_active) {
+        snprintf(text, sizeof(text), "RX START FAILED  PTT EXIT");
+    } else if (snap.rx_state == SSTV_RX_LINES || snap.rx_state == SSTV_RX_DONE) {
+        snprintf(text, sizeof(text), "%s %s %s %u/%u Q%u",
+                 snap.rx_state == SSTV_RX_DONE ? "DONE" : "RX",
+                 source,
+                 snap.rx_mode == SSTV_MODE_ROBOT36 ? "R36" : "M1",
+                 static_cast<unsigned>(snap.rx_lines),
+                 static_cast<unsigned>(snap.rx_lines_total),
+                 static_cast<unsigned>(snap.rx_quality));
+    } else {
+        snprintf(text, sizeof(text), "%s %s Q%u  +SRC -CLR PTT",
+                 snap.rx_state == SSTV_RX_VIS ? "VIS" : "LISTEN",
+                 source,
+                 static_cast<unsigned>(snap.rx_quality));
+    }
+    if (strncmp(s_gezipai_sstv_status_cache, text,
+                sizeof(s_gezipai_sstv_status_cache)) != 0) {
+        snprintf(s_gezipai_sstv_status_cache,
+                 sizeof(s_gezipai_sstv_status_cache), "%s", text);
+        lv_label_set_text(s_gezipai_sstv_status, text);
+    }
+
+    if (snap.rx_revision != s_gezipai_sstv_revision) {
+        s_gezipai_sstv_revision = snap.rx_revision;
+        if (s_gezipai_sstv_image != nullptr) {
+            lv_obj_invalidate(s_gezipai_sstv_image);
+        }
+    }
+}
+
+void buildGezipaiSstvRxMenu()
+{
+    lv_obj_t *content = prepareContent();
+    const uint16_t *frame = SSTV_SERVICE_RxImage();
+
+    s_gezipai_sstv_image = lv_image_create(content);
+    lv_obj_set_size(s_gezipai_sstv_image, 320, 256);
+    lv_obj_align(s_gezipai_sstv_image, LV_ALIGN_CENTER, 0, 0);
+    // 160/256 = 0.625: renders the frame at 200x160 and preserves aspect.
+    lv_image_set_scale(s_gezipai_sstv_image, 160u);
+    lv_obj_set_style_bg_color(s_gezipai_sstv_image, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(s_gezipai_sstv_image, LV_OPA_COVER, 0);
+    if (frame != nullptr) {
+        memset(&s_gezipai_sstv_dsc, 0, sizeof(s_gezipai_sstv_dsc));
+        s_gezipai_sstv_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+        s_gezipai_sstv_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+        s_gezipai_sstv_dsc.header.w = 320;
+        s_gezipai_sstv_dsc.header.h = 256;
+        s_gezipai_sstv_dsc.header.stride = 320u * 2u;
+        s_gezipai_sstv_dsc.data = reinterpret_cast<const uint8_t *>(frame);
+        s_gezipai_sstv_dsc.data_size = 320u * 256u * 2u;
+        lv_image_set_src(s_gezipai_sstv_image, &s_gezipai_sstv_dsc);
+    }
+
+    s_gezipai_sstv_status = makeLabel(content, &lv_font_montserrat_14,
+                                      kColorCallIdle);
+    lv_obj_set_pos(s_gezipai_sstv_status, 0, kContentHeight - 22);
+    lv_obj_set_size(s_gezipai_sstv_status, kWidth, 22);
+    lv_obj_set_style_text_align(s_gezipai_sstv_status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_pad_top(s_gezipai_sstv_status, 3, 0);
+    lv_obj_set_style_bg_color(s_gezipai_sstv_status, lv_color_hex(0x070B11), 0);
+    lv_obj_set_style_bg_opa(s_gezipai_sstv_status, LV_OPA_80, 0);
+
+    s_gezipai_sstv_revision = UINT32_MAX;
+    s_gezipai_sstv_status_cache[0] = '\0';
+    refreshGezipaiSstvRx();
+}
+#endif
+
 void buildMenuUi()
 {
 #if NRL_BOARD == NRL_BOARD_BI4UMD
@@ -2686,6 +2848,8 @@ void buildMenuUi()
 #if NRL_BOARD == NRL_BOARD_BI4UMD
     else if (s_menu_page == MenuPage::Map) buildMapMenu();
     else if (s_menu_page == MenuPage::Sstv) buildSstvMenu();
+#elif NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_GEZIPAI_4G
+    else if (s_menu_page == MenuPage::Sstv) buildGezipaiSstvRxMenu();
 #endif
     else buildMainMenu();
 #if NRL_BOARD == NRL_BOARD_BI4UMD
@@ -3984,8 +4148,11 @@ void refreshOtaNotice()
 size_t menuItemCount()
 {
 #if NRL_BOARD == NRL_BOARD_BI4UMD
-    if (s_menu_page == MenuPage::Main) return 12u;
+    if (s_menu_page == MenuPage::Main) return kMainMenuActionCount;
     if (s_menu_page == MenuPage::Map) return 1u;
+    if (s_menu_page == MenuPage::Sstv) return 1u;
+#elif NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_GEZIPAI_4G
+    if (s_menu_page == MenuPage::Main) return kMainMenuActionCount;
     if (s_menu_page == MenuPage::Sstv) return 1u;
 #else
     if (s_menu_page == MenuPage::Main) return 10u;
@@ -4015,13 +4182,14 @@ void activateMainMenu()
 
 void confirmMainMenu()
 {
-    switch (s_menu_index) {
-        case 0:
+    if (s_menu_index >= kMainMenuActionCount) return;
+    switch (kMainMenuActions[s_menu_index]) {
+        case MainMenuAction::Back:
             s_menu_active = false;
             s_menu_message[0] = '\0';
             buildHomeContent();
             break;
-        case 1: {
+        case MainMenuAction::PttMode: {
             const bool select_espnow = ESPNOW_LINK_GetPttMode() == 0u;
             if (ESPNOW_LINK_SetEnabled(select_espnow)) {
                 setMenuMessage(select_espnow ? "PTT -> ESP-NOW" : "PTT -> NRL");
@@ -4031,7 +4199,7 @@ void confirmMainMenu()
             buildMenuUi();
             break;
         }
-        case 2: {
+        case MainMenuAction::NrlCodec: {
             const uint8_t codec = NRLAudioBridge_GetVoiceCodec() == 1u ? 0u : 1u;
             if (NRLAudioBridge_SetVoiceCodec(codec)) {
                 setMenuMessage(codec == 1u ? "NRL CODEC -> OPUS" : "NRL CODEC -> G711");
@@ -4041,7 +4209,7 @@ void confirmMainMenu()
             buildMenuUi();
             break;
         }
-        case 3: {
+        case MainMenuAction::NowCodec: {
             const uint8_t codec = ESPNOW_LINK_GetTxCodec() == 1u ? 0u : 1u;
             if (ESPNOW_LINK_SetTxCodec(codec)) {
                 setMenuMessage(codec == 1u ? "NOW CODEC -> OPUS" : "NOW CODEC -> G711");
@@ -4051,17 +4219,17 @@ void confirmMainMenu()
             buildMenuUi();
             break;
         }
-        case 4:
+        case MainMenuAction::Cw:
             s_menu_page = MenuPage::Cw;
             s_menu_index = 0u;
             buildMenuUi();
             break;
-        case 5:
+        case MainMenuAction::Signaling:
             s_menu_page = MenuPage::Signaling;
             s_menu_index = 0u;
             buildMenuUi();
             break;
-        case 6: {
+        case MainMenuAction::Ota: {
             const NrlOtaStatus *ota = otaUiSnapshot();
             s_menu_page = MenuPage::Ota;
             s_menu_index = 0u;
@@ -4074,37 +4242,39 @@ void confirmMainMenu()
             buildMenuUi();
             break;
         }
-        case 7:
+        case MainMenuAction::Aprs:
             s_menu_page = MenuPage::Aprs;
             s_menu_index = 0u;
             s_menu_aprs_refresh_ms = 0u;
             s_menu_aprs_revision = APRS_SERVICE_GetStationRevision();
             buildMenuUi();
             break;
-        case 8:
+        case MainMenuAction::Language:
             s_menu_page = MenuPage::Language;
             s_menu_index = 0u;
             buildMenuUi();
             break;
-        case 9:
+        case MainMenuAction::About:
             s_menu_page = MenuPage::About;
             s_menu_index = 0u;
             buildMenuUi();
             break;
+        case MainMenuAction::Map:
 #if NRL_BOARD == NRL_BOARD_BI4UMD
-        case 10:
             s_menu_page = MenuPage::Map;
             s_menu_index = 0u;
             buildMenuUi();
+#endif
             break;
-        case 11:
+        case MainMenuAction::Sstv:
             s_menu_page = MenuPage::Sstv;
             s_menu_index = 0u;
+#if NRL_BOARD == NRL_BOARD_BI4UMD
             sstvScanFiles();
-            buildMenuUi();
-            break;
+#else
+            (void)SSTV_SERVICE_StartRx(s_gezipai_sstv_source);
 #endif
-        default:
+            buildMenuUi();
             break;
     }
 }
@@ -4345,6 +4515,10 @@ void processMenuInput(uint32_t now)
         STATUS_IO_SetSoftPtt(false);
         s_bi4umd_page = Bi4umdPage::Radio;
         s_bi4umd_aprs_from_settings = false;
+#elif NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_GEZIPAI_4G
+        if (s_menu_page == MenuPage::Sstv) {
+            (void)SSTV_SERVICE_StopRx();
+        }
 #endif
         s_menu_nav_pending = 0;
         s_menu_confirm_pending = 0u;
@@ -4356,16 +4530,36 @@ void processMenuInput(uint32_t now)
     const int nav = s_menu_nav_pending;
     s_menu_nav_pending = 0;
     if (nav != 0) {
-        const size_t count = menuItemCount();
-        const int steps = nav > 0 ? nav : -nav;
-        for (int i = 0; i < steps; ++i) {
-            if (nav > 0) { // VOL+ = up
-                s_menu_index = s_menu_index == 0u ? count - 1u : s_menu_index - 1u;
-            } else {       // VOL- = down
-                s_menu_index = (s_menu_index + 1u) % count;
+#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_GEZIPAI_4G
+        if (s_menu_page == MenuPage::Sstv) {
+            if (nav > 0) {
+                // VOL+ toggles between the local microphone and decoded NRL
+                // downlink PCM, resetting only the header detector. The last
+                // frame remains visible until VOL- or a new VIS header.
+                s_gezipai_sstv_source =
+                    s_gezipai_sstv_source == SSTV_SOURCE_MIC
+                        ? SSTV_SOURCE_NRL : SSTV_SOURCE_MIC;
+                (void)SSTV_SERVICE_StartRx(s_gezipai_sstv_source);
+            } else {
+                // VOL- clears the picture but leaves the selected input route
+                // and decoder running, ready for the next frame.
+                (void)SSTV_SERVICE_ClearRxImage();
             }
+            refreshGezipaiSstvRx();
+        } else
+#endif
+        {
+            const size_t count = menuItemCount();
+            const int steps = nav > 0 ? nav : -nav;
+            for (int i = 0; i < steps; ++i) {
+                if (nav > 0) { // VOL+ = up
+                    s_menu_index = s_menu_index == 0u ? count - 1u : s_menu_index - 1u;
+                } else {       // VOL- = down
+                    s_menu_index = (s_menu_index + 1u) % count;
+                }
+            }
+            buildMenuUi();
         }
-        buildMenuUi();
     }
 
     if (s_menu_confirm_pending != 0u) {
@@ -4385,6 +4579,12 @@ void processMenuInput(uint32_t now)
         else if (s_menu_page == MenuPage::Ctcss) confirmCtcssMenu();
         else if (s_menu_page == MenuPage::Mdc) confirmProtocolMenu(true);
         else if (s_menu_page == MenuPage::Dtmf) confirmProtocolMenu(false);
+        else if (s_menu_page == MenuPage::Sstv) {
+#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_GEZIPAI_4G
+            (void)SSTV_SERVICE_StopRx();
+            activateMainMenu();
+#endif
+        }
         else if (s_menu_page == MenuPage::Map) {
             // Touch-driven page: confirm would fall through to the OTA branch.
         }
@@ -4469,6 +4669,10 @@ void processMenuInput(uint32_t now)
             buildMenuUi();
         }
     }
+#elif NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_GEZIPAI_4G
+    if (s_menu_page == MenuPage::Sstv) {
+        refreshGezipaiSstvRx();
+    }
 #endif
 }
 
@@ -4496,8 +4700,11 @@ extern "C" void Display_MenuNavigate(const int direction)
     }
     // Map page pans/zooms by touch only; VOL swipe would rebuild it.
     if (s_menu_page == MenuPage::Map) return;
-    // SSTV page is touch-only as well.
+    // BI4UMD SSTV is touch-driven. Gezipai queues VOL+/- here so the display
+    // task can safely switch the MIC/NRL audio-router source.
+#if NRL_BOARD == NRL_BOARD_BI4UMD
     if (s_menu_page == MenuPage::Sstv) return;
+#endif
     int pending = s_menu_nav_pending + (direction > 0 ? 1 : -1);
     if (pending > 8) pending = 8;
     if (pending < -8) pending = -8;

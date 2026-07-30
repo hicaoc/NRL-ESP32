@@ -779,6 +779,16 @@ static void logChangedFields(const ExternalRadioConfig *before,
         return;
     }
 
+#if defined(NRL_AUDIO_CODEC_ES8389) && NRL_AUDIO_CODEC_ES8389
+    if (before->mic_volume != after->mic_volume) {
+        const unsigned step = (static_cast<unsigned>(after->mic_volume) * 14u + 127u) / 255u;
+        ESP_LOGI(TAG, "[CFG]   ES8389 mic PGA: volume=%u gain=%u dB",
+                 static_cast<unsigned>(after->mic_volume),
+                 step * 3u);
+    }
+#endif
+
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
     // For ES8311-backed fields, print the affected register address, its full
     // 8-bit value (hex + binary), and the bit breakdown so the change can be
     // cross-checked against the datasheet without having to recompute the
@@ -990,6 +1000,7 @@ static void logChangedFields(const ExternalRadioConfig *before,
     if (before->daceq_b0 != after->daceq_b0) log_eq("REG38-3B", after->daceq_b0, "daceq_b0");
     if (before->daceq_b1 != after->daceq_b1) log_eq("REG3C-3F", after->daceq_b1, "daceq_b1");
     if (before->daceq_a1 != after->daceq_a1) log_eq("REG40-43", after->daceq_a1, "daceq_a1");
+#endif
 }
 
 // Reply to /save_* with {"ok": bool, "fields": {name: stored_value, ...}}.
@@ -2239,6 +2250,7 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
     if (ok && config != nullptr && have_snapshot) {
         logChangedFields(&before_snapshot, config);
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
         ES8311_ApplyAudioConfig(config->mic_volume,
                                 config->line_out_volume,
                                 config->hp_drive_enabled,
@@ -2277,6 +2289,7 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
                                 config->adceq_a2,
                                 config->adceq_b1,
                                 config->adceq_b2);
+#endif
         const bool restart_udp = strcmp(before_snapshot.server_host, config->server_host) != 0 ||
                                  before_snapshot.server_port != config->server_port;
         if (restart_udp) {
