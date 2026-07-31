@@ -1,10 +1,13 @@
 #include "services/signaling_service.h"
 
 #include "audio/audio_router.h"
+#include "lib/nrl_audio_bridge.h"
+#include "lib/nrl_g711.h"
 #include "lib/ctcss_decoder.h"
 #include "lib/cw_codec.h"
 #include "lib/dtmf_codec.h"
 #include "lib/nrl_psram.h"
+#include "media/opus_voice.h"
 #include "services/display_notice.h"
 #include "services/cw_service.h"
 
@@ -38,6 +41,8 @@ constexpr size_t kDtmfToneSamples = 1600u;
 constexpr size_t kDtmfGapSamples = 800u;
 constexpr size_t kMdcCacheSamples = 16384u;
 constexpr size_t kDtmfCacheSamples = 16u * (kDtmfToneSamples + kDtmfGapSamples);
+constexpr size_t kPreEncMaxG711 = 4096u;   // max A-law bytes per pre-encoded burst
+constexpr size_t kPreEncMaxOpusFrames = 16u; // max 20 ms Opus frames per burst
 constexpr uint32_t kDecodeNoticeDurationMs = 8000u;
 constexpr double kPi = 3.14159265358979323846;
 
@@ -60,6 +65,18 @@ struct PcmCache {
     size_t count;
 };
 
+// Pre-encoded signaling tail packets stored in PSRAM. Built once when the
+// MDC/DTMF PCM cache is generated; at send time the signaling task just
+// wraps these in NRL headers and pushes them out -- zero encoding work on
+// the send path, so no Opus stack concerns.
+struct PreEncodedCache {
+    uint8_t g711[kPreEncMaxG711];
+    size_t g711_count;
+    uint8_t opus_data[kPreEncMaxOpusFrames][OPUS_VOICE_MAX_FRAME_BYTES];
+    uint16_t opus_sizes[kPreEncMaxOpusFrames];
+    size_t opus_frames;
+};
+
 portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 SignalingConfig s_config = {};
 DecoderContext s_mic = {DecodeSource::Mic, nullptr, {}, {}, {}, {}, {}, 0u};
@@ -73,6 +90,8 @@ NRL_PSRAM_BSS int16_t s_mdc_pcm_storage[kMdcCacheSamples];
 NRL_PSRAM_BSS int16_t s_dtmf_pcm_storage[kDtmfCacheSamples];
 PcmCache s_mdc_cache = {s_mdc_pcm_storage, 0u};
 PcmCache s_dtmf_cache = {s_dtmf_pcm_storage, 0u};
+NRL_PSRAM_BSS PreEncodedCache s_mdc_pre_enc = {};
+NRL_PSRAM_BSS PreEncodedCache s_dtmf_pre_enc = {};
 char s_last_result[96] = {};
 uint32_t s_last_result_ms = 0u;
 uint32_t s_revision = 0u;
@@ -285,6 +304,40 @@ bool ensureCacheMutex()
     return s_cache_mutex != nullptr;
 }
 
+// Pre-encode the PCM cache into both G.711 A-law bytes and Opus frames so
+// the send path (signaling task) never touches a codec -- just wraps the
+// pre-built payloads in NRL headers and pushes UDP.
+void encodePreEncoded(const int16_t *pcm, const size_t count, PreEncodedCache *out)
+{
+    memset(out, 0, sizeof(*out));
+
+    // G.711: 16k -> 8k pair-average, then A-law encode.
+    const size_t pairs = count / 2u;
+    for (size_t i = 0u; i < pairs && out->g711_count < kPreEncMaxG711; ++i) {
+        const int32_t a = pcm[i * 2u];
+        const int32_t b = pcm[i * 2u + 1u];
+        out->g711[out->g711_count++] =
+            NRL_G711_EncodeALaw(static_cast<int16_t>((a + b) / 2));
+    }
+
+    // Opus: encode each 320-sample (20 ms) frame independently.
+    OpusVoiceEnc *enc = OPUS_VOICE_EncOpen(20u);
+    if (enc != nullptr) {
+        size_t offset = 0u;
+        while (offset + kOpusFrameSamples <= count && out->opus_frames < kPreEncMaxOpusFrames) {
+            const int n = OPUS_VOICE_EncProcess(enc, pcm + offset, kOpusFrameSamples,
+                                                out->opus_data[out->opus_frames],
+                                                OPUS_VOICE_MAX_FRAME_BYTES);
+            if (n > 0) {
+                out->opus_sizes[out->opus_frames] = static_cast<uint16_t>(n);
+                ++out->opus_frames;
+            }
+            offset += kOpusFrameSamples;
+        }
+        OPUS_VOICE_EncClose(enc);
+    }
+}
+
 bool ensureMdcEncoder()
 {
     if (s_encoder_mutex == nullptr) s_encoder_mutex = xSemaphoreCreateMutex();
@@ -392,9 +445,8 @@ bool rebuildMdcCache(const SignalingConfig &cfg)
     }
     s_mdc_cache.count = replacement.count;
     xSemaphoreGive(s_cache_mutex);
-    ESP_LOGI(TAG, "MDC PCM cached in PSRAM: %u samples (%u bytes)",
-             static_cast<unsigned>(replacement.count),
-             static_cast<unsigned>(replacement.count * sizeof(int16_t)));
+    ESP_LOGI(TAG, "MDC PCM cached in PSRAM: %u samples",
+             static_cast<unsigned>(replacement.count));
     return true;
 }
 
@@ -409,9 +461,8 @@ bool rebuildDtmfCache(const SignalingConfig &cfg)
     }
     s_dtmf_cache.count = replacement.count;
     xSemaphoreGive(s_cache_mutex);
-    ESP_LOGI(TAG, "DTMF PCM cached in PSRAM: %u samples (%u bytes)",
-             static_cast<unsigned>(replacement.count),
-             static_cast<unsigned>(replacement.count * sizeof(int16_t)));
+    ESP_LOGI(TAG, "DTMF PCM cached in PSRAM: %u samples",
+             static_cast<unsigned>(replacement.count));
     return true;
 }
 
@@ -429,15 +480,53 @@ bool ensureTxCache(bool mdc, const SignalingConfig &cfg)
     return mdc ? rebuildMdcCache(cfg) : rebuildDtmfCache(cfg);
 }
 
+// Send pre-encoded signaling tail packets to the NRL uplink. No codec work
+// here -- just NRL header wrapping + UDP send + pacing. Safe on any stack.
+void sendPreEncodedNrl(const PreEncodedCache &cache)
+{
+    const uint8_t codec = NRLAudioBridge_GetVoiceCodec();
+    if (codec == 0u) {
+        // G.711: send A-law bytes as type-1 voice packets.
+        const size_t payload = 160u; // 20 ms at 8 kHz
+        size_t offset = 0u;
+        while (offset < cache.g711_count) {
+            const size_t take = (cache.g711_count - offset < payload)
+                                    ? cache.g711_count - offset : payload;
+            NRLAudioBridge_SendTyped(1u, cache.g711 + offset, take);
+            offset += take;
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+    } else {
+        // Opus: send each pre-encoded frame as a type-8 packet.
+        for (size_t i = 0u; i < cache.opus_frames; ++i) {
+            NRLAudioBridge_SendTyped(8u, cache.opus_data[i], cache.opus_sizes[i]);
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+    }
+}
+
 void sendCached(TailDestination destination, bool mdc)
 {
     if (s_cache_mutex == nullptr) return;
-    const uint8_t source = mdc
-        ? (destination == TailDestination::Nrl ? AUDIO_SRC_MDC_NRL : AUDIO_SRC_MDC_SPEAKER)
-        : (destination == TailDestination::Nrl ? AUDIO_SRC_DTMF_NRL : AUDIO_SRC_DTMF_SPEAKER);
     xSemaphoreTake(s_cache_mutex, portMAX_DELAY);
-    const PcmCache &cache = mdc ? s_mdc_cache : s_dtmf_cache;
-    if (cache.samples != nullptr && cache.count != 0u) pushPaced(source, cache.samples, cache.count);
+    if (destination == TailDestination::Nrl) {
+        // Pre-encoded path: no codec on the signaling task at send time.
+        // Lazy encode on first use so the heavy Opus encoder never runs on
+        // the main task during SIGNALING_Init.
+        PcmCache &pcm = mdc ? s_mdc_cache : s_dtmf_cache;
+        PreEncodedCache &pre = mdc ? s_mdc_pre_enc : s_dtmf_pre_enc;
+        if (pcm.count != 0u && pre.g711_count == 0u && pre.opus_frames == 0u) {
+            encodePreEncoded(pcm.samples, pcm.count, &pre);
+        }
+        if (pcm.count != 0u) sendPreEncodedNrl(pre);
+    } else {
+        // Speaker path: raw PCM through the audio router.
+        const uint8_t source = mdc ? AUDIO_SRC_MDC_SPEAKER : AUDIO_SRC_DTMF_SPEAKER;
+        const PcmCache &cache = mdc ? s_mdc_cache : s_dtmf_cache;
+        if (cache.samples != nullptr && cache.count != 0u) {
+            pushPaced(source, cache.samples, cache.count);
+        }
+    }
     xSemaphoreGive(s_cache_mutex);
 }
 
@@ -461,7 +550,10 @@ bool ensureTailWorker()
     if (s_task != nullptr) return true;
     if (s_tail_queue == nullptr) s_tail_queue = xQueueCreate(4u, sizeof(TailDestination));
     if (s_tail_queue == nullptr) return false;
-    if (xTaskCreatePinnedToCoreWithCaps(signalingTask, "signaling", 4096u,
+    // 32 KB (PSRAM): the first send lazily runs the Opus encoder
+    // (encodePreEncoded) which needs ~10 KB stack; subsequent sends are
+    // just UDP pushes. PSRAM makes the size nearly free.
+    if (xTaskCreatePinnedToCoreWithCaps(signalingTask, "signaling", 32768u,
                                         nullptr, 5u, &s_task, 0,
                                         MALLOC_CAP_SPIRAM) != pdPASS) {
         s_task = nullptr;

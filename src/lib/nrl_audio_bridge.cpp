@@ -448,17 +448,19 @@ static bool uplinkGateOpen(void)
     return true;
 }
 
+static uint8_t alaw_accumulator[kG711PayloadMaxBytes];
+static size_t alaw_accumulator_count = 0u;
+
 static void sendVoiceFrameInternal(const int16_t *pcm8k, const size_t sample_count, const bool gated)
 {
     if (pcm8k == nullptr || sample_count == 0u) {
         return;
     }
+
     if (gated && !uplinkGateOpen()) {
+        alaw_accumulator_count = 0u; // drop stale partial frame on squelch close
         return;
     }
-
-    static uint8_t alaw_accumulator[kG711PayloadMaxBytes];
-    static size_t alaw_accumulator_count = 0u;
 
     const size_t target_bytes = currentVoicePayloadBytes();
     // If the configured size shrunk while we already had more accumulated,
@@ -1502,9 +1504,11 @@ bool NRLAudioBridge_Init(void)
     NRL_G711_Init();
 
     // Restore the persisted TX voice codec (0 = G.711 type 1, 1 = Opus type 8).
-    // Opus pre-allocates its encoders/decoders here; if boot-time RAM cannot
-    // hold them, run this session as G.711 (NVS keeps the user's choice, so a
-    // later boot or manual re-switch can succeed).
+    // Do NOT prewarm the Opus encoder here: this runs on the main task whose
+    // stack (~24 KB) cannot accommodate the silk encoder init (~10 KB on top
+    // of all the other init frames already on the stack).  The encoder is
+    // lazily created in sendOpusVoice16k() on the audio_passthrough task
+    // (32 KB stack) the first time an Opus frame is actually produced.
     {
         nvs_handle_t nvs;
         uint8_t codec = 0u;
@@ -1512,13 +1516,7 @@ bool NRLAudioBridge_Init(void)
             (void)nvs_get_u8(nvs, "codec", &codec);
             nvs_close(nvs);
         }
-        codec = (codec <= 1u) ? codec : 0u;
-        if (codec == 1u && !bridgePrewarmOpus()) {
-            ESP_LOGW(TAG, "[NRL] persisted Opus codec needs RAM that isn't available; "
-                          "falling back to G.711 for this session");
-            codec = 0u;
-        }
-        s_voice_codec = codec;
+        s_voice_codec = (codec <= 1u) ? codec : 0u;
     }
 
     if (s_udp_mutex == nullptr) {
