@@ -2,6 +2,8 @@
 
 #include "audio/audio_focus.h"
 #include "audio/voice_resampler.h"
+#include "esp_ae_ch_cvt.h"
+#include "esp_ae_rate_cvt.h"
 #include "services/config_notify.h"
 #include "driver/board_pins.h"
 #include "driver/es8311.h"
@@ -13,6 +15,7 @@
 #include "services/smb_vfs.h"
 #include "services/storage_service.h"
 
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
@@ -21,6 +24,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "MUSIC";
@@ -97,66 +101,105 @@ static size_t s_net_capacity = kNetScratchSamples;
 // Local output device (speaker hi-fi path vs BT headset A2DP).
 static volatile int s_output = MUSIC_OUTPUT_SPEAKER;
 
-// 44.1 kHz stereo scratch + linear resampler state for the A2DP branch.
+// 44.1 kHz stereo scratch for the A2DP branch.
 NRL_PSRAM_BSS static int16_t s_bt_storage[kBtScratchSamples];
 static int16_t *s_bt_buffer = s_bt_storage;
 static size_t s_bt_capacity = kBtScratchSamples; // in interleaved samples
 
+// Arbitrary-rate mono/stereo PCM16 -> 44.1 kHz stereo for A2DP, built on
+// esp_audio_effects (mono is upmixed with esp_ae_ch_cvt first). Replaces the
+// old hand-written linear interpolator -- band-limited filtering now.
 struct BtResampler {
-    float pos;
-    float step;
     uint8_t channels;
-    int16_t carry_l;
-    int16_t carry_r;
-    int has_carry;
+    esp_ae_ch_cvt_handle_t ch_cvt;   // mono->stereo upmix (NULL if stereo)
+    esp_ae_rate_cvt_handle_t rate_cvt;
+    int16_t *stereo_buf;             // upmix scratch, grown on demand (mono only)
+    size_t stereo_cap_frames;
 };
 
-static void bt_resampler_init(BtResampler *rs, const uint32_t in_rate, const uint8_t channels)
+static void bt_resampler_deinit(BtResampler *rs)
 {
-    memset(rs, 0, sizeof(*rs));
-    rs->step = static_cast<float>(in_rate) / 44100.0f;
+    if (rs->ch_cvt != nullptr) {
+        esp_ae_ch_cvt_close(rs->ch_cvt);
+        rs->ch_cvt = nullptr;
+    }
+    if (rs->rate_cvt != nullptr) {
+        esp_ae_rate_cvt_close(rs->rate_cvt);
+        rs->rate_cvt = nullptr;
+    }
+    free(rs->stereo_buf);
+    rs->stereo_buf = nullptr;
+    rs->stereo_cap_frames = 0;
+}
+
+// Idempotent re-init per output acquisition (focus suspend/resume re-runs
+// this). Returns false on handle allocation failure; caller falls back to
+// the speaker path.
+static bool bt_resampler_init(BtResampler *rs, const uint32_t in_rate, const uint8_t channels)
+{
+    if (channels != 1u && channels != 2u) {
+        return false;
+    }
+    bt_resampler_deinit(rs);
     rs->channels = channels;
+
+    if (channels == 1u) {
+        esp_ae_ch_cvt_cfg_t ch_cfg = {};
+        ch_cfg.sample_rate = in_rate;
+        ch_cfg.bits_per_sample = 16u;
+        ch_cfg.src_ch = 1u;
+        ch_cfg.dest_ch = 2u;
+        if (esp_ae_ch_cvt_open(&ch_cfg, &rs->ch_cvt) != ESP_AE_ERR_OK) {
+            bt_resampler_deinit(rs);
+            return false;
+        }
+    }
+    esp_ae_rate_cvt_cfg_t rate_cfg = {};
+    rate_cfg.src_rate = in_rate;
+    rate_cfg.dest_rate = 44100u;
+    rate_cfg.channel = 2u;
+    rate_cfg.bits_per_sample = 16u;
+    rate_cfg.complexity = 2u; // music-grade, unlike the voice uplink path
+    rate_cfg.perf_type = ESP_AE_RATE_CVT_PERF_TYPE_MEMORY; // internal SRAM is scarce
+    if (esp_ae_rate_cvt_open(&rate_cfg, &rs->rate_cvt) != ESP_AE_ERR_OK) {
+        bt_resampler_deinit(rs);
+        return false;
+    }
+    return true;
 }
 
 // in: interleaved PCM16 (mono or stereo) frames; out: 44.1 kHz stereo
-// interleaved. Same floorf/carry scheme as voice_resampler so chunk
-// boundaries stay continuous.
+// interleaved, at most out_cap_frames frames.
 static size_t bt_resampler_process(BtResampler *rs, const int16_t *in, const size_t in_frames,
                                    int16_t *out, const size_t out_cap_frames)
 {
-    if (in_frames == 0u) {
+    if (in_frames == 0u || out_cap_frames == 0u || rs->rate_cvt == nullptr) {
         return 0;
     }
-    const uint8_t ch = rs->channels;
-    size_t produced = 0;
-    float pos = rs->pos;
-    while (produced < out_cap_frames) {
-        const float fbase = floorf(pos);
-        const long base = static_cast<long>(fbase);
-        if (base + 1 >= static_cast<long>(in_frames)) {
-            break;
+    const int16_t *stereo = in;
+    if (rs->channels == 1u) {
+        if (in_frames > rs->stereo_cap_frames) {
+            int16_t *buf = static_cast<int16_t *>(
+                heap_caps_malloc(in_frames * 2u * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+            if (buf == nullptr) {
+                return 0;
+            }
+            free(rs->stereo_buf);
+            rs->stereo_buf = buf;
+            rs->stereo_cap_frames = in_frames;
         }
-        const float frac = pos - fbase;
-        int16_t l0, r0;
-        if (base < 0) {
-            l0 = rs->has_carry ? rs->carry_l : in[0];
-            r0 = rs->has_carry ? rs->carry_r : ((ch == 2u) ? in[1] : in[0]);
-        } else {
-            l0 = in[base * ch];
-            r0 = (ch == 2u) ? in[base * ch + 1] : l0;
+        if (esp_ae_ch_cvt_process(rs->ch_cvt, static_cast<uint32_t>(in_frames),
+                                  const_cast<int16_t *>(in), rs->stereo_buf) != ESP_AE_ERR_OK) {
+            return 0;
         }
-        const size_t nf = (base < 0) ? 0u : static_cast<size_t>(base + 1);
-        const int16_t l1 = in[nf * ch];
-        const int16_t r1 = (ch == 2u) ? in[nf * ch + 1] : l1;
-        out[produced * 2u] = static_cast<int16_t>(l0 + (l1 - l0) * frac);
-        out[produced * 2u + 1u] = static_cast<int16_t>(r0 + (r1 - r0) * frac);
-        ++produced;
-        pos += rs->step;
+        stereo = rs->stereo_buf;
     }
-    rs->pos = pos - static_cast<float>(in_frames);
-    rs->carry_l = in[(in_frames - 1u) * ch];
-    rs->carry_r = (ch == 2u) ? in[(in_frames - 1u) * ch + 1u] : rs->carry_l;
-    rs->has_carry = 1;
+    uint32_t produced = static_cast<uint32_t>(out_cap_frames);
+    if (esp_ae_rate_cvt_process(rs->rate_cvt, const_cast<int16_t *>(stereo),
+                                static_cast<uint32_t>(in_frames), out,
+                                &produced) != ESP_AE_ERR_OK) {
+        return 0;
+    }
     return produced;
 }
 
@@ -302,10 +345,15 @@ static void player_task(void *)
             }
             bt_active = NRL_BtA2dp_IsStreaming();
             if (bt_active) {
-                bt_resampler_init(&bt_resampler, info.sample_rate_hz, info.channels);
-                return true;
+                if (bt_resampler_init(&bt_resampler, info.sample_rate_hz, info.channels)) {
+                    return true;
+                }
+                ESP_LOGW(TAG, "A2DP resampler init failed, falling back to speaker");
+                NRL_BtA2dp_RequestStop();
+                bt_active = false;
+            } else {
+                ESP_LOGW(TAG, "A2DP not ready, falling back to speaker");
             }
-            ESP_LOGW(TAG, "A2DP not ready, falling back to speaker");
         }
         const uint8_t speaker_bits = speaker_24bit ? 32u : 16u;
         if (!speaker_hifi_acquire(info.sample_rate_hz, speaker_bits, 2u)) {
@@ -535,6 +583,8 @@ static void player_task(void *)
 
     ESP_LOGI(TAG, "%s: %s", s_current_path, s_stop_requested ? "stopped" : "finished");
 
+    VOICE_RESAMPLER_Deinit(&resampler);
+    bt_resampler_deinit(&bt_resampler);
     release_outputs();
     if (decoder != nullptr) {
         MEDIA_DECODER_Close(decoder);

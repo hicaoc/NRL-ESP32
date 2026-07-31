@@ -6,6 +6,8 @@ set(app_sources
     audio/audio_router.cpp
     audio/voice_resampler.cpp
     media/cover_decoder.cpp
+    media/gmf_io_radio.cpp
+    media/gmf_io_smb.cpp
     media/media_decoder.cpp
     media/media_metadata.cpp
     media/opus_voice.cpp

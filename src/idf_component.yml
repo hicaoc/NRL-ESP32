@@ -17,6 +17,22 @@ dependencies:
   # component dependency on registry lvgl conflicts with our vendored LVGL.
   espressif/esp_new_jpeg:
     version: "^1.0.2"
+  # ESP-GMF (Espressif General Multimedia Framework): audio pipeline for the
+  # media playback chain (media_decoder internals). Elements are registered
+  # manually -- gmf_loader is deliberately NOT used to avoid pulling in the
+  # video/ai_audio dependencies. esp_audio_effects is also used standalone
+  # (esp_ae_rate_cvt/ch_cvt) to replace the hand-written resamplers.
+  espressif/gmf_core:
+    version: "^1.0"
+  espressif/gmf_io:
+    version: "^1.0"
+  espressif/gmf_audio:
+    version: "^1.0"
+  espressif/esp_audio_effects:
+    version: "^1.3"
+  # HLS (m3u8) source as a GMF IO for internet radio streams.
+  espressif/esp_hls_stream:
+    version: "^1.0"
   # USB flash drive playback: USB-OTG Host MSC -> FatFS at /usb
   # (docs/architecture.md 3.5). S31-only -- that's the board with the
   # USB-OTG host port.
