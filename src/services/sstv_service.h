@@ -60,6 +60,9 @@ typedef struct {
 
 void SSTV_SERVICE_Init(void);
 
+// True when the worker and synchronization primitives were created.
+bool SSTV_SERVICE_IsReady(void);
+
 // Resolve the shared TF-card SSTV image directory ("<mount>/sstv"), creating
 // it on demand. TX pickers and RX saves use this single location.
 bool SSTV_SERVICE_GetImageDirectory(char *out_path, size_t out_path_size);

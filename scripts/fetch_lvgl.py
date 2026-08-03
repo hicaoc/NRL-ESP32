@@ -145,7 +145,10 @@ def _extract(tarball: Path, dest: Path) -> None:
             # filter="data" became the recommended default in Python 3.12+
             # (strips device files / setuid bits / etc.). Pass it explicitly
             # to silence the DeprecationWarning that lands in 3.14.
-            tar.extractall(staging, filter="data")
+            if sys.version_info >= (3, 12):
+                tar.extractall(staging, filter="data")
+            else:
+                tar.extractall(staging)
         entries = [p for p in staging.iterdir() if not p.name.startswith(".")]
         if len(entries) == 1 and entries[0].is_dir():
             entries[0].rename(dest)

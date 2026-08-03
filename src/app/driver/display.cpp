@@ -69,6 +69,7 @@
 #include <string.h>
 #include <strings.h>
 #include <dirent.h>
+#include <sys/stat.h>
 
 #include <driver/gpio.h>
 #include <driver/spi_master.h>
@@ -167,6 +168,9 @@ esp_lcd_panel_io_handle_t s_touch_io = nullptr;
 lv_indev_t *s_touch_indev = nullptr;
 #elif NRL_BOARD == NRL_BOARD_BI4UMD
 lv_indev_t *s_touch_indev = nullptr;
+uint8_t s_bi4umd_touch_count = 0u;
+uint16_t s_bi4umd_touch_x[2] = {};
+uint16_t s_bi4umd_touch_y[2] = {};
 #endif
 
 lv_obj_t *s_lbl_caption = nullptr;
@@ -185,7 +189,7 @@ lv_obj_t *s_bar_ota = nullptr;
 lv_obj_t *s_content = nullptr;
 lv_obj_t *s_lbl_signaling = nullptr;
 #if NRL_BOARD == NRL_BOARD_BI4UMD
-enum class Bi4umdPage : uint8_t { Radio, Music, MusicList, Settings };
+enum class Bi4umdPage : uint8_t { Radio, Music, MusicList, Settings, Debug };
 Bi4umdPage s_bi4umd_page = Bi4umdPage::Radio;
 lv_obj_t *s_lbl_music_title = nullptr;
 lv_obj_t *s_lbl_music_artist = nullptr;
@@ -203,6 +207,8 @@ size_t s_music_tap_index = SIZE_MAX;
 uint32_t s_music_tap_ms = 0u;
 lv_obj_t *s_music_tap_row = nullptr;
 bool s_bi4umd_aprs_from_settings = false;
+bool s_bi4umd_sstv_from_settings = false;
+bool s_bi4umd_map_from_settings = false;
 
 // Map page (slippy tiles + APRS station overlay, touch-driven). The viewport
 // sits between the EXIT/title row and the zoom button row; a 2x2 grid of
@@ -212,7 +218,7 @@ constexpr int kMapCols = 2;
 constexpr int kMapRows = 2;
 constexpr int kMapTilePx = 256;
 constexpr int kMapViewY = 28;   // below the EXIT/title row
-constexpr int kMapViewH = 180;  // leaves the zoom button row at y=212
+constexpr int kMapViewH = 220;  // nearly fills the content area below the title
 constexpr uint8_t kMapZoomMin = 3u;
 constexpr uint8_t kMapZoomMax = 17u;
 constexpr uint8_t kMapZoomDefault = 12u;
@@ -246,6 +252,15 @@ lv_obj_t *s_sstv_lbl_status = nullptr;
 lv_obj_t *s_sstv_btn_send = nullptr;
 uint32_t s_sstv_rev = UINT32_MAX;
 volatile bool s_sstv_exit_requested = false;
+bool s_sstv_rx_view = false;
+lv_obj_t *s_sstv_rx_image = nullptr;
+lv_obj_t *s_sstv_rx_status = nullptr;
+lv_image_dsc_t s_sstv_rx_dsc = {};
+uint32_t s_sstv_rx_revision = UINT32_MAX;
+uint32_t s_sstv_rx_saved_revision = UINT32_MAX;
+bool s_sstv_rx_save_ok = false;
+SstvRxSource s_sstv_rx_source = SSTV_SOURCE_MIC;
+char s_sstv_rx_status_cache[80] = {};
 #endif
 
 #if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_GEZIPAI_4G
@@ -471,6 +486,7 @@ void menuTouchReleased(lv_event_t *event);
 void buildBi4umdMusicContent();
 void buildBi4umdMusicListContent();
 void buildBi4umdSettingsContent();
+void buildBi4umdDebugContent();
 void refreshBi4umdMusic();
 void rebuildBi4umdMusicList();
 #endif
@@ -700,11 +716,11 @@ bool initLvgl()
 #if NRL_BOARD == NRL_BOARD_BI4UMD
 void bi4umdTouchRead(lv_indev_t *, lv_indev_data_t *data)
 {
-    uint16_t x = 0;
-    uint16_t y = 0;
-    if (data != nullptr && BI4UMD_Touch_Read(&x, &y)) {
-        data->point.x = static_cast<int16_t>(x);
-        data->point.y = static_cast<int16_t>(y);
+    s_bi4umd_touch_count = BI4UMD_Touch_ReadPoints(
+        s_bi4umd_touch_x, s_bi4umd_touch_y, 2u);
+    if (data != nullptr && s_bi4umd_touch_count != 0u) {
+        data->point.x = static_cast<int16_t>(s_bi4umd_touch_x[0]);
+        data->point.y = static_cast<int16_t>(s_bi4umd_touch_y[0]);
         data->state = LV_INDEV_STATE_PRESSED;
     } else if (data != nullptr) {
         data->state = LV_INDEV_STATE_RELEASED;
@@ -792,6 +808,13 @@ void bi4umdShowSettingsPage(lv_event_t *)
     buildBi4umdSettingsContent();
 }
 
+void bi4umdShowDebugPage(lv_event_t *)
+{
+    STATUS_IO_SetSoftPtt(false);
+    s_bi4umd_page = Bi4umdPage::Debug;
+    buildBi4umdDebugContent();
+}
+
 void bi4umdOpenMainMenu(lv_event_t *)
 {
     s_bi4umd_aprs_from_settings = false;
@@ -826,6 +849,20 @@ void bi4umdOpenAprsListPage(lv_event_t *)
     bi4umdOpenAprsPage(MenuPage::AprsList);
 }
 
+void bi4umdOpenMapPage(lv_event_t *)
+{
+    STATUS_IO_SetSoftPtt(false);
+    s_menu_active = true;
+    s_menu_open_requested = false;
+    s_menu_nav_pending = 0;
+    s_menu_confirm_pending = 0u;
+    s_menu_message[0] = '\0';
+    s_menu_page = MenuPage::Map;
+    s_menu_index = 0u;
+    s_bi4umd_map_from_settings = true;
+    buildMenuUi();
+}
+
 void bi4umdMenuUp(lv_event_t *) { Display_MenuNavigate(1); }
 void bi4umdMenuDown(lv_event_t *) { Display_MenuNavigate(-1); }
 void bi4umdMenuConfirm(lv_event_t *) { Display_MenuConfirm(); }
@@ -839,12 +876,13 @@ void addBi4umdMenuButtons()
     if (s_menu_page == MenuPage::Map) return;
     // The SSTV page is touch-driven too (picker + SEND/STOP buttons).
     if (s_menu_page == MenuPage::Sstv) return;
-    auto menu_button = [](int x, const char *text, lv_event_cb_t callback) {
+    auto menu_button = [](int x, const char *text, lv_event_cb_t callback,
+                          int width = 64, int height = 38) {
         lv_obj_t *button = lv_button_create(s_content);
         lv_obj_set_pos(button, x,
                        s_menu_page == MenuPage::AprsList || s_menu_page == MenuPage::AprsGps
                            ? 208 : 178);
-        lv_obj_set_size(button, 64, 38);
+        lv_obj_set_size(button, width, height);
         lv_obj_set_style_radius(button, 6, 0);
         lv_obj_set_style_bg_color(button, lv_color_hex(0x10212A), 0);
         lv_obj_set_style_bg_color(button, lv_color_hex(0x087A82), LV_STATE_PRESSED);
@@ -857,11 +895,11 @@ void addBi4umdMenuButtons()
     };
 #if NRL_BOARD == NRL_BOARD_BI4UMD
     if (s_menu_page == MenuPage::AprsList || s_menu_page == MenuPage::AprsGps) {
-        menu_button(166, menuText("BACK", "返回"), bi4umdMenuConfirm);
+        menu_button(kWidth - 48, LV_SYMBOL_LEFT, bi4umdMenuConfirm, 40, 40);
         return;
     }
     if (s_menu_page == MenuPage::About) {
-        menu_button(88, menuText("BACK", "返回"), bi4umdMenuConfirm);
+        menu_button((kWidth - 40) / 2, LV_SYMBOL_LEFT, bi4umdMenuConfirm, 40, 40);
         return;
     }
 #endif
@@ -1223,6 +1261,9 @@ void resetCenterWidgets()
     s_btn_music_repeat_label = nullptr;
     s_lbl_settings_mic = nullptr;
     s_lbl_settings_volume = nullptr;
+    s_sstv_rx_image = nullptr;
+    s_sstv_rx_status = nullptr;
+    s_sstv_rx_status_cache[0] = '\0';
 #endif
 #if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_GEZIPAI_4G
     s_gezipai_sstv_image = nullptr;
@@ -2265,6 +2306,10 @@ void buildCwMenu()
 
 void layoutMapTiles();
 void layoutMapMarkers();
+void mapZoomStep(int delta);
+
+bool s_map_pinching = false;
+float s_map_pinch_distance = 0.0f;
 
 void clampMapCenter()
 {
@@ -2389,6 +2434,26 @@ void layoutMapMarkers()
 // the vect is the pixel delta since the previous read.
 void mapPanEvent(lv_event_t *event)
 {
+    if (s_bi4umd_touch_count >= 2u) {
+        const float dx = static_cast<float>(s_bi4umd_touch_x[1]) - s_bi4umd_touch_x[0];
+        const float dy = static_cast<float>(s_bi4umd_touch_y[1]) - s_bi4umd_touch_y[0];
+        const float distance = sqrtf(dx * dx + dy * dy);
+        if (!s_map_pinching) {
+            s_map_pinching = true;
+            s_map_pinch_distance = distance;
+        } else if (distance > s_map_pinch_distance * 1.25f) {
+            mapZoomStep(1);
+            s_map_pinch_distance = distance;
+        } else if (distance < s_map_pinch_distance * 0.80f) {
+            mapZoomStep(-1);
+            s_map_pinch_distance = distance;
+        }
+        return;
+    }
+    if (s_map_pinching) {
+        s_map_pinching = false;
+        return;
+    }
     lv_indev_t *indev = lv_event_get_indev(event);
     if (indev == nullptr) {
         return;
@@ -2473,23 +2538,10 @@ void buildMapMenu()
         s_map_centered = true;
     }
 
-    // Buttonless board: the title row carries a touch EXIT button and the
-    // title shrinks to make room, mirroring the CW page.
-    lv_obj_t *exit_btn = lv_button_create(scr);
-    lv_obj_set_pos(exit_btn, 5, 0);
-    lv_obj_set_size(exit_btn, 48, 24);
-    lv_obj_set_style_radius(exit_btn, 6, 0);
-    lv_obj_set_style_bg_color(exit_btn, lv_color_hex(0x10212A), 0);
-    lv_obj_set_style_bg_color(exit_btn, lv_color_hex(0x087A82), LV_STATE_PRESSED);
-    lv_obj_add_event_cb(exit_btn, mapExitClicked, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t *exit_label = makeLabel(exit_btn, menuFont(&lv_font_montserrat_14), kColorCallIdle);
-    lv_label_set_text(exit_label, menuText("EXIT", "退出"));
-    lv_obj_center(exit_label);
-
     s_map_lbl_title = makeLabel(scr, menuFont(&lv_font_montserrat_16), kColorAccent);
-    lv_obj_set_width(s_map_lbl_title, kWidth - 64);
+    lv_obj_set_width(s_map_lbl_title, kWidth);
     lv_obj_set_style_text_align(s_map_lbl_title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(s_map_lbl_title, 56, 2);
+    lv_obj_set_pos(s_map_lbl_title, 0, 2);
     mapUpdateTitle();
 
     s_map_view = lv_obj_create(scr);
@@ -2540,21 +2592,10 @@ void buildMapMenu()
         s_map_marker_labels[i] = tag;
     }
 
-    // Required visible attribution for tile.openstreetmap.org.
-    lv_obj_t *attribution = makeLabel(s_map_view, &lv_font_montserrat_14, kColorCallIdle);
-    lv_label_set_text(attribution,
-                      "(c) OpenStreetMap contributors\nopenstreetmap.org/copyright");
-    lv_obj_set_style_text_align(attribution, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_style_bg_color(attribution, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(attribution, LV_OPA_60, 0);
-    lv_obj_set_style_pad_all(attribution, 1, 0);
-    lv_obj_align(attribution, LV_ALIGN_BOTTOM_RIGHT, -2, -2);
-    lv_obj_remove_flag(attribution, LV_OBJ_FLAG_CLICKABLE);
-
-    auto zoom_button = [scr](int x, const char *text, lv_event_cb_t callback) {
+    auto zoom_button = [scr](int y, const char *text, lv_event_cb_t callback) {
         lv_obj_t *button = lv_button_create(scr);
-        lv_obj_set_pos(button, x, 212);
-        lv_obj_set_size(button, 72, 34);
+        lv_obj_set_pos(button, kWidth - 41, y);
+        lv_obj_set_size(button, 36, 36);
         lv_obj_set_style_radius(button, 6, 0);
         lv_obj_set_style_bg_color(button, lv_color_hex(0x10212A), 0);
         lv_obj_set_style_bg_color(button, lv_color_hex(0x087A82), LV_STATE_PRESSED);
@@ -2563,8 +2604,9 @@ void buildMapMenu()
         lv_label_set_text(label, text);
         lv_obj_center(label);
     };
-    zoom_button(16, "-", mapZoomOutClicked);
-    zoom_button(152, "+", mapZoomInClicked);
+    zoom_button(kContentHeight - 120, "+", mapZoomInClicked);
+    zoom_button(kContentHeight - 80, "-", mapZoomOutClicked);
+    zoom_button(kContentHeight - 40, LV_SYMBOL_LEFT, mapExitClicked);
 
     layoutMapTiles();
     layoutMapMarkers();
@@ -2575,6 +2617,117 @@ void buildMapMenu()
 // ---- SSTV TX page ------------------------------------------------------------
 
 void sstvExitClicked(lv_event_t *) { s_sstv_exit_requested = true; }
+
+void sstvRxSourceClicked(lv_event_t *)
+{
+    s_sstv_rx_source = s_sstv_rx_source == SSTV_SOURCE_MIC
+                           ? SSTV_SOURCE_NRL : SSTV_SOURCE_MIC;
+    (void)SSTV_SERVICE_StartRx(s_sstv_rx_source);
+    buildMenuUi();
+}
+
+void sstvRxClearClicked(lv_event_t *)
+{
+    (void)SSTV_SERVICE_ClearRxImage();
+}
+
+void refreshBi4umdSstvRx()
+{
+    if (s_sstv_rx_status == nullptr) return;
+    SstvSnapshot snap{};
+    SSTV_SERVICE_GetSnapshot(&snap);
+    if (snap.rx_state == SSTV_RX_DONE &&
+        snap.rx_revision != s_sstv_rx_saved_revision) {
+        // JPEG encoding and TF writes belong on the display/main task, not in
+        // the real-time audio decoder callback. Mark the revision first so a
+        // failed write is not retried on every display refresh.
+        s_sstv_rx_saved_revision = snap.rx_revision;
+        char saved_path[160];
+        s_sstv_rx_save_ok = SSTV_SERVICE_SaveRxJpeg(saved_path, sizeof(saved_path));
+    }
+    char text[80];
+    const char *source = snap.rx_source == SSTV_SOURCE_MIC ? "MIC" : "NRL";
+    if (SSTV_SERVICE_RxImage() == nullptr) {
+        snprintf(text, sizeof(text), "NO RX BUFFER");
+    } else if (!snap.rx_active) {
+        snprintf(text, sizeof(text), "RX START FAILED");
+    } else if (snap.rx_state == SSTV_RX_LINES || snap.rx_state == SSTV_RX_DONE) {
+        const char *state = snap.rx_state == SSTV_RX_DONE
+                                ? (s_sstv_rx_save_ok ? "SAVED" : "SAVE ERR")
+                                : "RX";
+        snprintf(text, sizeof(text), "%s %s %s %u/%u Q%u", state, source,
+                 snap.rx_mode == SSTV_MODE_ROBOT36 ? "R36" : "M1",
+                 static_cast<unsigned>(snap.rx_lines),
+                 static_cast<unsigned>(snap.rx_lines_total),
+                 static_cast<unsigned>(snap.rx_quality));
+    } else {
+        snprintf(text, sizeof(text), "%s %s Q%u",
+                 snap.rx_state == SSTV_RX_VIS ? "VIS" : "LISTEN", source,
+                 static_cast<unsigned>(snap.rx_quality));
+    }
+    if (strncmp(s_sstv_rx_status_cache, text, sizeof(s_sstv_rx_status_cache)) != 0) {
+        snprintf(s_sstv_rx_status_cache, sizeof(s_sstv_rx_status_cache), "%s", text);
+        lv_label_set_text(s_sstv_rx_status, text);
+    }
+    if (snap.rx_revision != s_sstv_rx_revision) {
+        s_sstv_rx_revision = snap.rx_revision;
+        if (s_sstv_rx_image != nullptr) lv_obj_invalidate(s_sstv_rx_image);
+    }
+}
+
+void buildBi4umdSstvRxMenu()
+{
+    lv_obj_t *content = prepareContent();
+    const uint16_t *frame = SSTV_SERVICE_RxImage();
+    s_sstv_rx_image = lv_image_create(content);
+    lv_obj_set_size(s_sstv_rx_image, 320, 256);
+    lv_obj_align(s_sstv_rx_image, LV_ALIGN_CENTER, 0, -15);
+    lv_image_set_scale(s_sstv_rx_image, 160u);
+    lv_obj_set_style_bg_color(s_sstv_rx_image, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(s_sstv_rx_image, LV_OPA_COVER, 0);
+    if (frame != nullptr) {
+        memset(&s_sstv_rx_dsc, 0, sizeof(s_sstv_rx_dsc));
+        s_sstv_rx_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+        s_sstv_rx_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+        s_sstv_rx_dsc.header.w = 320;
+        s_sstv_rx_dsc.header.h = 256;
+        s_sstv_rx_dsc.header.stride = 320u * 2u;
+        s_sstv_rx_dsc.data = reinterpret_cast<const uint8_t *>(frame);
+        s_sstv_rx_dsc.data_size = 320u * 256u * 2u;
+        lv_image_set_src(s_sstv_rx_image, &s_sstv_rx_dsc);
+    }
+    lv_obj_t *title = makeLabel(content, &lv_font_montserrat_16, kColorAccent);
+    lv_obj_set_pos(title, 58, 2);
+    lv_obj_set_width(title, kWidth - 116);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "SSTV RX");
+    s_sstv_rx_status = makeLabel(content, &s_font_aprs_16, kColorCaption);
+    lv_obj_set_pos(s_sstv_rx_status, 4, 192);
+    lv_obj_set_size(s_sstv_rx_status, kWidth - 8, 22);
+    lv_obj_set_style_text_align(s_sstv_rx_status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_bg_color(s_sstv_rx_status, lv_color_hex(0x070B11), 0);
+    lv_obj_set_style_bg_opa(s_sstv_rx_status, LV_OPA_80, 0);
+    s_sstv_rx_revision = UINT32_MAX;
+    s_sstv_rx_status_cache[0] = '\0';
+    refreshBi4umdSstvRx();
+
+    auto button = [content](int x, int w, const char *text, lv_event_cb_t cb) {
+        lv_obj_t *obj = lv_button_create(content);
+        lv_obj_set_pos(obj, x, kContentHeight - 36);
+        lv_obj_set_size(obj, w, 32);
+        lv_obj_set_style_radius(obj, 6, 0);
+        lv_obj_set_style_bg_color(obj, lv_color_hex(0x10212A), 0);
+        lv_obj_set_style_bg_color(obj, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+        lv_obj_add_event_cb(obj, cb, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *label = makeLabel(obj, &lv_font_montserrat_14, kColorCallIdle);
+        lv_label_set_text(label, text);
+        lv_obj_center(label);
+    };
+    button(5, 90, s_sstv_rx_source == SSTV_SOURCE_MIC ? "MIC" : "NRL", sstvRxSourceClicked);
+    button(100, 60, "CLR", sstvRxClearClicked);
+    button(kWidth - 45, 40, LV_SYMBOL_LEFT, sstvExitClicked);
+
+}
 
 void sstvScanFiles()
 {
@@ -2591,11 +2744,19 @@ void sstvScanFiles()
            (entry = readdir(dir)) != nullptr) {
         const char *name = entry->d_name;
         const size_t len = strlen(name);
-        if (entry->d_type != DT_REG || len < 5u || len >= kSstvNameLen) continue;
+        if (len < 5u || len >= kSstvNameLen) continue;
         const char *ext = name + len - 4u;
         const bool jpg = strcasecmp(ext, ".jpg") == 0 ||
                          (len >= 5u && strcasecmp(name + len - 5u, ".jpeg") == 0);
         if (!jpg) continue;
+        // FatFS commonly reports DT_UNKNOWN, so d_type cannot reliably tell
+        // files from directories on the TF card. Verify the full path instead.
+        char file_path[160];
+        const int path_len = snprintf(file_path, sizeof(file_path), "%s/%s",
+                                      dir_path, name);
+        if (path_len < 0 || static_cast<size_t>(path_len) >= sizeof(file_path)) continue;
+        struct stat info = {};
+        if (stat(file_path, &info) != 0 || !S_ISREG(info.st_mode)) continue;
         snprintf(s_sstv_files[s_sstv_file_count], kSstvNameLen, "%s", name);
         ++s_sstv_file_count;
     }
@@ -2611,7 +2772,32 @@ void sstvScanFiles()
         }
         snprintf(s_sstv_files[j], kSstvNameLen, "%s", key);
     }
+    if (s_sstv_file_count > 0u) s_sstv_selected = 0;
 }
+
+void bi4umdOpenSstvPage(const bool receive)
+{
+    STATUS_IO_SetSoftPtt(false);
+    s_menu_active = true;
+    s_menu_open_requested = false;
+    s_menu_nav_pending = 0;
+    s_menu_confirm_pending = 0u;
+    s_menu_message[0] = '\0';
+    s_menu_page = MenuPage::Sstv;
+    s_menu_index = 0u;
+    s_bi4umd_sstv_from_settings = true;
+    s_sstv_rx_view = receive;
+    if (receive) {
+        (void)SSTV_SERVICE_StartRx(s_sstv_rx_source);
+    } else {
+        (void)SSTV_SERVICE_StopRx();
+        sstvScanFiles();
+    }
+    buildMenuUi();
+}
+
+void bi4umdOpenSstvRxPage(lv_event_t *) { bi4umdOpenSstvPage(true); }
+void bi4umdOpenSstvTxPage(lv_event_t *) { bi4umdOpenSstvPage(false); }
 
 void sstvFileClicked(lv_event_t *event)
 {
@@ -2643,15 +2829,54 @@ void sstvSendClicked(lv_event_t *)
     SstvSnapshot snap{};
     SSTV_SERVICE_GetSnapshot(&snap);
     if (snap.state == SSTV_STATE_PREPARING || snap.state == SSTV_STATE_SENDING) {
-        (void)SSTV_SERVICE_Stop();
+        if (s_sstv_lbl_status != nullptr) {
+            lv_label_set_text(s_sstv_lbl_status,
+                              SSTV_SERVICE_Stop() ? "STOPPING..." : "STOP FAILED");
+        }
         return;
     }
-    if (s_sstv_selected < 0 || static_cast<size_t>(s_sstv_selected) >= s_sstv_file_count) return;
+    if (s_sstv_selected < 0 ||
+        static_cast<size_t>(s_sstv_selected) >= s_sstv_file_count) {
+        // The SD card may have mounted or changed after the page was opened.
+        // Rescan here and use the first JPEG so SEND never silently depends on
+        // a separate picker tap when an image is already available.
+        sstvScanFiles();
+        if (s_sstv_file_count == 0u) {
+            if (s_sstv_lbl_status != nullptr) {
+                lv_label_set_text(s_sstv_lbl_status, "NO JPEG IN /SSTV");
+            }
+            return;
+        }
+        s_sstv_selected = 0;
+    }
     char directory[96];
-    if (!SSTV_SERVICE_GetImageDirectory(directory, sizeof(directory))) return;
+    if (!SSTV_SERVICE_GetImageDirectory(directory, sizeof(directory))) {
+        if (s_sstv_lbl_status != nullptr) {
+            lv_label_set_text(s_sstv_lbl_status, "SSTV DIR ERROR");
+        }
+        return;
+    }
     char path[128];
     snprintf(path, sizeof(path), "%s/%s", directory, s_sstv_files[s_sstv_selected]);
-    (void)SSTV_SERVICE_SendJpeg(path, s_sstv_mode);
+    if (snap.rx_active) {
+        (void)SSTV_SERVICE_StopRx();
+    }
+    if (!SSTV_SERVICE_IsReady()) {
+        if (s_sstv_lbl_status != nullptr) {
+            lv_label_set_text(s_sstv_lbl_status, "SERVICE NOT READY");
+        }
+        return;
+    }
+    // SSTV owns both the speaker and NRL uplink for the duration. Stop any
+    // background player first so it cannot retain media-uplink exclusivity or
+    // mix music into the modulation waveform.
+    if (MUSIC_IsPlaying()) {
+        MUSIC_Stop();
+    }
+    const bool queued = SSTV_SERVICE_SendJpeg(path, s_sstv_mode);
+    if (s_sstv_lbl_status != nullptr) {
+        lv_label_set_text(s_sstv_lbl_status, queued ? "STARTING..." : "SEND FAILED");
+    }
 }
 
 void buildSstvMenu()
@@ -2661,22 +2886,11 @@ void buildSstvMenu()
     SSTV_SERVICE_GetSnapshot(&snap);
     const bool busy = snap.state == SSTV_STATE_PREPARING || snap.state == SSTV_STATE_SENDING;
 
-    lv_obj_t *exit_btn = lv_button_create(scr);
-    lv_obj_set_pos(exit_btn, 5, 0);
-    lv_obj_set_size(exit_btn, 48, 24);
-    lv_obj_set_style_radius(exit_btn, 6, 0);
-    lv_obj_set_style_bg_color(exit_btn, lv_color_hex(0x10212A), 0);
-    lv_obj_set_style_bg_color(exit_btn, lv_color_hex(0x087A82), LV_STATE_PRESSED);
-    lv_obj_add_event_cb(exit_btn, sstvExitClicked, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t *exit_label = makeLabel(exit_btn, menuFont(&lv_font_montserrat_14), kColorCallIdle);
-    lv_label_set_text(exit_label, menuText("EXIT", "退出"));
-    lv_obj_center(exit_label);
-
     lv_obj_t *title = makeLabel(scr, menuFont(&lv_font_montserrat_16), kColorAccent);
-    lv_obj_set_width(title, kWidth - 64);
+    lv_obj_set_width(title, kWidth);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(title, 56, 2);
-    lv_label_set_text(title, "SSTV");
+    lv_obj_set_pos(title, 0, 2);
+    lv_label_set_text(title, "SSTV TX");
 
     // JPEG picker: 6 rows, paged; tap selects (highlighted).
     const size_t first = s_sstv_page * kSstvRows;
@@ -2694,15 +2908,18 @@ void buildSstvMenu()
             lv_obj_add_event_cb(item, sstvFileClicked, LV_EVENT_CLICKED,
                                 reinterpret_cast<void *>(static_cast<intptr_t>(idx)));
         }
-        lv_obj_t *label = makeLabel(item, &lv_font_montserrat_14, kColorCallIdle);
+        lv_obj_t *label = makeLabel(item, &s_font_aprs_16, kColorCallIdle);
+        lv_obj_set_width(label, kWidth - 28);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
         lv_obj_align(label, LV_ALIGN_LEFT_MID, 6, 0);
         lv_label_set_text(label, idx < s_sstv_file_count ? s_sstv_files[idx]
                           : (!STORAGE_SdMounted() ? menuText("NO SD CARD", "无TF卡")
                                                   : menuText("NO JPEG", "无图片")));
     }
 
-    s_sstv_lbl_status = makeLabel(scr, &lv_font_montserrat_14, kColorCaption);
+    s_sstv_lbl_status = makeLabel(scr, &s_font_aprs_16, kColorCaption);
     lv_obj_set_width(s_sstv_lbl_status, kWidth - 8);
+    lv_label_set_long_mode(s_sstv_lbl_status, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(s_sstv_lbl_status, LV_TEXT_ALIGN_CENTER, 0);
     constexpr int kSstvButtonHeight = 32;
     constexpr int kSstvButtonY = kContentHeight - kSstvButtonHeight - 4;
@@ -2738,11 +2955,21 @@ void buildSstvMenu()
         lv_obj_center(label);
         return button;
     };
-    small_button(5, 40, "<", sstvPageClicked, reinterpret_cast<void *>(static_cast<intptr_t>(-1)));
-    small_button(50, 40, ">", sstvPageClicked, reinterpret_cast<void *>(static_cast<intptr_t>(1)));
-    small_button(95, 60, s_sstv_mode == SSTV_MODE_ROBOT36 ? "R36" : "M1",
+    constexpr int kSstvBottomButtonWidth = 42;
+    constexpr int kSstvBottomButtonStep = 47;
+    small_button(5, kSstvBottomButtonWidth, "<",
+                 sstvPageClicked, reinterpret_cast<void *>(static_cast<intptr_t>(-1)));
+    small_button(5 + kSstvBottomButtonStep, kSstvBottomButtonWidth, ">",
+                 sstvPageClicked, reinterpret_cast<void *>(static_cast<intptr_t>(1)));
+    small_button(5 + kSstvBottomButtonStep * 2, kSstvBottomButtonWidth,
+                 s_sstv_mode == SSTV_MODE_ROBOT36 ? "R36" : "M1",
                  sstvModeClicked, nullptr);
-    s_sstv_btn_send = small_button(160, 75, busy ? "STOP" : "SEND", sstvSendClicked, nullptr);
+    s_sstv_btn_send = small_button(5 + kSstvBottomButtonStep * 3,
+                                   kSstvBottomButtonWidth,
+                                   busy ? "STOP" : "SEND",
+                                   sstvSendClicked, nullptr);
+    small_button(5 + kSstvBottomButtonStep * 4, kSstvBottomButtonWidth,
+                 LV_SYMBOL_LEFT, sstvExitClicked, nullptr);
     if (busy) {
         lv_obj_set_style_bg_color(s_sstv_btn_send, lv_color_hex(0x7A2A2A), 0);
     }
@@ -2850,7 +3077,10 @@ void buildMenuUi()
     else if (s_menu_page == MenuPage::Cw) buildCwMenu();
 #if NRL_BOARD == NRL_BOARD_BI4UMD
     else if (s_menu_page == MenuPage::Map) buildMapMenu();
-    else if (s_menu_page == MenuPage::Sstv) buildSstvMenu();
+    else if (s_menu_page == MenuPage::Sstv) {
+        if (s_sstv_rx_view) buildBi4umdSstvRxMenu();
+        else buildSstvMenu();
+    }
 #elif NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_GEZIPAI_4G
     else if (s_menu_page == MenuPage::Sstv) buildGezipaiSstvRxMenu();
 #endif
@@ -3213,8 +3443,8 @@ void buildBi4umdMusicListContent()
 
     lv_obj_t *back = lv_button_create(content);
     lv_obj_set_pos(back, 8, 6);
-    lv_obj_set_size(back, 32, 30);
-    lv_obj_set_style_radius(back, 5, 0);
+    lv_obj_set_size(back, 40, 40);
+    lv_obj_set_style_radius(back, 6, 0);
     lv_obj_add_event_cb(back, bi4umdShowMusicPage, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *back_label = makeLabel(back, &lv_font_montserrat_16, kColorCallIdle);
     lv_label_set_text(back_label, LV_SYMBOL_LEFT);
@@ -3247,9 +3477,10 @@ void buildBi4umdSettingsContent()
 {
     lv_obj_t *content = prepareContent();
 
-    auto nav_button = [content](int x, int width, const char *text, lv_event_cb_t callback) {
+    auto nav_button = [content](int x, int y, int width, const char *text,
+                                lv_event_cb_t callback) {
         lv_obj_t *button = lv_button_create(content);
-        lv_obj_set_pos(button, x, 22);
+        lv_obj_set_pos(button, x, y);
         lv_obj_set_size(button, width, 40);
         lv_obj_set_style_radius(button, 6, 0);
         lv_obj_set_style_bg_color(button, lv_color_hex(0x10212A), 0);
@@ -3264,9 +3495,75 @@ void buildBi4umdSettingsContent()
         lv_label_set_text(label, text);
         lv_obj_center(label);
     };
-    nav_button(8, 72, menuText("MAIN MENU", "主菜单"), bi4umdOpenMainMenu);
-    nav_button(86, 54, "GPS", bi4umdOpenGpsPage);
-    nav_button(146, 86, menuText("APRS RX", "APRS接收"), bi4umdOpenAprsListPage);
+    nav_button(8, kContentHeight - 48, 72,
+               menuText("MAIN MENU", "主菜单"), bi4umdOpenMainMenu);
+    nav_button(86, 22, 54, "GPS", bi4umdOpenGpsPage);
+    nav_button(146, 22, 86,
+               menuText("APRS RX", "APRS接收"), bi4umdOpenAprsListPage);
+
+    lv_obj_t *debug = lv_button_create(content);
+    lv_obj_set_pos(debug, 8, 22);
+    lv_obj_set_size(debug, 72, 40);
+    lv_obj_set_style_radius(debug, 6, 0);
+    lv_obj_set_style_bg_color(debug, lv_color_hex(0x10212A), 0);
+    lv_obj_set_style_bg_color(debug, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(debug, lv_color_hex(0x1C6B73), 0);
+    lv_obj_set_style_border_width(debug, 1, 0);
+    lv_obj_add_event_cb(debug, bi4umdShowDebugPage, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *debug_label = makeLabel(debug, &s_font_aprs_16, kColorCallIdle);
+    lv_label_set_text(debug_label, menuText("DEBUG", "调试"));
+    lv_obj_center(debug_label);
+
+    auto sstv_button = [content](int x, const char *text, lv_event_cb_t callback) {
+        lv_obj_t *button = lv_button_create(content);
+        lv_obj_set_pos(button, x, 82);
+        lv_obj_set_size(button, 108, 40);
+        lv_obj_set_style_radius(button, 6, 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x10212A), 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(button, lv_color_hex(0x1C6B73), 0);
+        lv_obj_set_style_border_width(button, 1, 0);
+        lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *label = makeLabel(button, &s_font_aprs_16, kColorCallIdle);
+        lv_obj_set_width(label, 100);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(label, text);
+        lv_obj_center(label);
+    };
+    sstv_button(8, menuText("SSTV RX", "SSTV接收"), bi4umdOpenSstvRxPage);
+    sstv_button(124, menuText("SSTV TX", "SSTV发射"), bi4umdOpenSstvTxPage);
+    nav_button(66, 142, 108, menuText("MAP", "地图"), bi4umdOpenMapPage);
+
+    lv_obj_t *home = lv_button_create(content);
+    lv_obj_set_pos(home, kWidth - 48, kContentHeight - 48);
+    lv_obj_set_size(home, 40, 40);
+    lv_obj_set_style_radius(home, 6, 0);
+    lv_obj_set_style_bg_color(home, lv_color_hex(0x10212A), 0);
+    lv_obj_set_style_bg_color(home, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(home, lv_color_hex(0x1C6B73), 0);
+    lv_obj_set_style_border_width(home, 1, 0);
+    lv_obj_add_event_cb(home, bi4umdShowRadioPage, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *home_label = makeLabel(home, &lv_font_montserrat_16, kColorCallIdle);
+    lv_label_set_text(home_label, LV_SYMBOL_HOME);
+    lv_obj_center(home_label);
+}
+
+void buildBi4umdDebugContent()
+{
+    lv_obj_t *content = prepareContent();
+
+    lv_obj_t *back = lv_button_create(content);
+    lv_obj_set_pos(back, 8, 22);
+    lv_obj_set_size(back, 40, 40);
+    lv_obj_set_style_radius(back, 6, 0);
+    lv_obj_set_style_bg_color(back, lv_color_hex(0x10212A), 0);
+    lv_obj_set_style_bg_color(back, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(back, lv_color_hex(0x1C6B73), 0);
+    lv_obj_set_style_border_width(back, 1, 0);
+    lv_obj_add_event_cb(back, bi4umdShowSettingsPage, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *back_label = makeLabel(back, &lv_font_montserrat_16, kColorCallIdle);
+    lv_label_set_text(back_label, LV_SYMBOL_LEFT);
+    lv_obj_center(back_label);
 
     auto square_button = [content](int x, int y, const char *text, lv_event_cb_t callback) {
         lv_obj_t *button = lv_button_create(content);
@@ -3322,19 +3619,6 @@ void buildBi4umdSettingsContent()
     lv_obj_t *ptt_label = makeLabel(ptt, &lv_font_montserrat_20, kColorCallIdle);
     lv_label_set_text(ptt_label, "PTT");
     lv_obj_center(ptt_label);
-
-    lv_obj_t *home = lv_button_create(content);
-    lv_obj_set_pos(home, kWidth - 48, kContentHeight - 48);
-    lv_obj_set_size(home, 40, 40);
-    lv_obj_set_style_radius(home, 6, 0);
-    lv_obj_set_style_bg_color(home, lv_color_hex(0x10212A), 0);
-    lv_obj_set_style_bg_color(home, lv_color_hex(0x087A82), LV_STATE_PRESSED);
-    lv_obj_set_style_border_color(home, lv_color_hex(0x1C6B73), 0);
-    lv_obj_set_style_border_width(home, 1, 0);
-    lv_obj_add_event_cb(home, bi4umdShowRadioPage, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t *home_label = makeLabel(home, &lv_font_montserrat_16, kColorCallIdle);
-    lv_label_set_text(home_label, LV_SYMBOL_HOME);
-    lv_obj_center(home_label);
 
     refreshBi4umdSettingsValues();
 }
@@ -4264,6 +4548,7 @@ void confirmMainMenu()
             break;
         case MainMenuAction::Map:
 #if NRL_BOARD == NRL_BOARD_BI4UMD
+            s_bi4umd_map_from_settings = false;
             s_menu_page = MenuPage::Map;
             s_menu_index = 0u;
             buildMenuUi();
@@ -4273,6 +4558,8 @@ void confirmMainMenu()
             s_menu_page = MenuPage::Sstv;
             s_menu_index = 0u;
 #if NRL_BOARD == NRL_BOARD_BI4UMD
+            s_bi4umd_sstv_from_settings = false;
+            s_sstv_rx_view = false;
             sstvScanFiles();
 #else
             (void)SSTV_SERVICE_StartRx(s_gezipai_sstv_source);
@@ -4497,27 +4784,47 @@ void processMenuInput(uint32_t now)
 #if NRL_BOARD == NRL_BOARD_BI4UMD
     if (s_map_exit_requested) {
         s_map_exit_requested = false;
-        s_menu_active = false;
         s_menu_message[0] = '\0';
-        s_bi4umd_page = Bi4umdPage::Radio;
-        buildHomeContent();
+        if (s_bi4umd_map_from_settings) {
+            s_bi4umd_map_from_settings = false;
+            s_menu_active = false;
+            s_bi4umd_page = Bi4umdPage::Settings;
+            buildBi4umdSettingsContent();
+        } else {
+            s_bi4umd_page = Bi4umdPage::Radio;
+            activateMainMenu();
+        }
         return;
     }
     if (s_sstv_exit_requested) {
         s_sstv_exit_requested = false;
+        (void)SSTV_SERVICE_StopRx();
+        s_sstv_rx_view = false;
         s_menu_active = false;
         s_menu_message[0] = '\0';
-        s_bi4umd_page = Bi4umdPage::Radio;
-        buildHomeContent();
+        if (s_bi4umd_sstv_from_settings) {
+            s_bi4umd_sstv_from_settings = false;
+            s_bi4umd_page = Bi4umdPage::Settings;
+            buildBi4umdSettingsContent();
+        } else {
+            s_menu_active = true;
+            s_bi4umd_page = Bi4umdPage::Radio;
+            activateMainMenu();
+        }
         return;
     }
 #endif
     if (s_menu_open_requested) {
         s_menu_open_requested = false;
 #if NRL_BOARD == NRL_BOARD_BI4UMD
+        if (s_menu_page == MenuPage::Sstv) {
+            (void)SSTV_SERVICE_StopRx();
+            s_sstv_rx_view = false;
+        }
         STATUS_IO_SetSoftPtt(false);
         s_bi4umd_page = Bi4umdPage::Radio;
         s_bi4umd_aprs_from_settings = false;
+        s_bi4umd_map_from_settings = false;
 #elif NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_GEZIPAI_4G
         if (s_menu_page == MenuPage::Sstv) {
             (void)SSTV_SERVICE_StopRx();
@@ -4664,6 +4971,10 @@ void processMenuInput(uint32_t now)
         refreshMapMenu();
     }
     if (s_menu_page == MenuPage::Sstv) {
+        if (s_sstv_rx_view) {
+            refreshBi4umdSstvRx();
+            return;
+        }
         SstvSnapshot snap{};
         SSTV_SERVICE_GetSnapshot(&snap);
         if (snap.revision != s_sstv_rev) {

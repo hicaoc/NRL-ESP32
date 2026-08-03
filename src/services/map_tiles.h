@@ -7,8 +7,9 @@
 //    level, standard Web-Mercator formulas.
 //  - Async loading: a worker task pulls tiles from the TF card first
 //    ({SD}/tiles/{z}/{x}/{y}.jpg, pre-packed JPEG), falling back to a direct
-//    HTTP(S) download. Downloads write through to the card (re-encoded to
-//    JPEG) when one is mounted, so the cache warms up for offline use.
+//    HTTP(S) download. User-provided /tiles packs remain read-only; downloads
+//    write through to a separate versioned cache on the card (re-encoded to
+//    JPEG), so cache invalidation cannot hide offline packs.
 //  - Decoded 256x256 RGB565 tiles live in a PSRAM LRU cache; consumers poll
 //    a bump-counter revision to know when a repaint is worthwhile.
 

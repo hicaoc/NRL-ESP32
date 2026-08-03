@@ -94,6 +94,10 @@ constexpr char kTileUserAgent[] = NRL_FIRMWARE_NAME "/" NRL_FIRMWARE_VERSION
 // detected; OSM returns those error images with HTTP 200, so older firmware
 // could have cached them as ordinary JPEG tiles.
 constexpr char kTileCacheDir[] = "osm_tiles_v2";
+// Offline packs produced by scripts/fetch_tiles.py use the public, stable
+// layout documented in map_tiles.h. Keep them separate from the versioned
+// write-through cache so cache invalidation never hides user-provided maps.
+constexpr char kOfflineTileDir[] = "tiles";
 
 struct TileKey {
     uint8_t z;
@@ -246,21 +250,19 @@ uint8_t *slotPixels(uint8_t index)
 
 // ---- tile sources -----------------------------------------------------------
 
-void tilePath(const TileKey &key, char *out, size_t out_size)
+void tilePath(const TileKey &key, const char *directory, char *out, size_t out_size)
 {
     const char *mnt = STORAGE_SdMountPoint();
     snprintf(out, out_size, "%s/%s/%u/%ld/%ld.jpg", mnt != nullptr ? mnt : "",
-             kTileCacheDir, static_cast<unsigned>(key.z), static_cast<long>(key.x),
+             directory, static_cast<unsigned>(key.z), static_cast<long>(key.x),
              static_cast<long>(key.y));
 }
 
-bool readSdTile(const TileKey &key, uint8_t *buf, size_t cap, size_t *out_size)
+bool readTileFile(const TileKey &key, const char *directory,
+                  uint8_t *buf, size_t cap, size_t *out_size)
 {
-    if (!STORAGE_SdMounted()) {
-        return false;
-    }
     char path[128];
-    tilePath(key, path, sizeof(path));
+    tilePath(key, directory, path, sizeof(path));
     FILE *file = fopen(path, "rb");
     if (file == nullptr) {
         return false;
@@ -276,6 +278,15 @@ bool readSdTile(const TileKey &key, uint8_t *buf, size_t cap, size_t *out_size)
     }
     fclose(file);
     return ok;
+}
+
+bool readSdTile(const TileKey &key, uint8_t *buf, size_t cap, size_t *out_size)
+{
+    if (!STORAGE_SdMounted()) {
+        return false;
+    }
+    return readTileFile(key, kOfflineTileDir, buf, cap, out_size) ||
+           readTileFile(key, kTileCacheDir, buf, cap, out_size);
 }
 
 // Substitute {z}/{x}/{y} in the URL template.
@@ -519,7 +530,7 @@ void writeThroughSd(const TileKey &key, const uint8_t *rgb565)
     (void)mkdir(dir, 0775);
 
     char path[128];
-    tilePath(key, path, sizeof(path));
+    tilePath(key, kTileCacheDir, path, sizeof(path));
     FILE *file = fopen(path, "wb");
     if (file != nullptr) {
         ok = fwrite(jpeg, 1, static_cast<size_t>(jpeg_size), file) ==

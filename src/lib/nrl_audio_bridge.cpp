@@ -552,12 +552,17 @@ static void uplinkSinkWrite(const uint8_t source_id,
                             const size_t sample_count,
                             void *)
 {
+    // Locally generated signaling already owns its transmit timing and must
+    // not depend on the radio SQL/PTT capture gate. SSTV is a long generated
+    // waveform just like CW; gating it would play locally while silently
+    // dropping every network frame when SQL is closed.
     const bool signaling_tail = source_id == AUDIO_SRC_MDC_NRL ||
                                 source_id == AUDIO_SRC_DTMF_NRL ||
-                                source_id == AUDIO_SRC_CW_NRL;
+                                source_id == AUDIO_SRC_CW_NRL ||
+                                source_id == AUDIO_SRC_SSTV_NRL;
     // A media stream (nanny/beacon) owns the uplink exclusively while
     // active: captured audio would garble the G.711 accumulator.
-    if (s_media_uplink_active) {
+    if (s_media_uplink_active && source_id != AUDIO_SRC_SSTV_NRL) {
         return;
     }
     // When a Bluetooth headset is connected, its mic is the uplink source;

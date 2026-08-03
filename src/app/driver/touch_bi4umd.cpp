@@ -63,29 +63,42 @@ bool BI4UMD_Touch_Init(void)
 
 bool BI4UMD_Touch_Read(uint16_t *x, uint16_t *y)
 {
-    if (!s_ready || x == nullptr || y == nullptr) {
-        return false;
-    }
+    return BI4UMD_Touch_ReadPoints(x, y, 1u) != 0u;
+}
+
+uint8_t BI4UMD_Touch_ReadPoints(uint16_t *x, uint16_t *y, uint8_t capacity)
+{
+    if (!s_ready || x == nullptr || y == nullptr || capacity == 0u) return 0u;
 
     // Reading while INT is high is still needed once to observe release, but
     // the controller's touch-count register makes that read unambiguous.
-    uint8_t point[5] = {};
-    if (!readRegisters(kRegTouchCount, point, sizeof(point))) {
-        return false;
-    }
-    const uint8_t count = point[0] & 0x0F;
-    if (count == 0 || count > kMaxTouchCount) {
-        return false;
-    }
+    constexpr uint8_t kPointBytes = 6u;
+    const uint8_t requested = capacity < 2u ? capacity : 2u;
+    uint8_t data[1u + 2u * kPointBytes] = {};
+    const uint8_t read_size = static_cast<uint8_t>(1u + requested * kPointBytes);
+    if (!readRegisters(kRegTouchCount, data, read_size)) return 0u;
+    const uint8_t reported = data[0] & 0x0Fu;
+    if (reported == 0u || reported > kMaxTouchCount) return 0u;
 
-    *x = static_cast<uint16_t>(((point[1] & 0x0F) << 8) | point[2]);
-    *y = static_cast<uint16_t>(((point[3] & 0x0F) << 8) | point[4]);
-    return *x < NRL_DISPLAY_WIDTH && *y < NRL_DISPLAY_HEIGHT;
+    const uint8_t count = reported < requested ? reported : requested;
+    uint8_t valid = 0u;
+    for (uint8_t i = 0u; i < count; ++i) {
+        const uint8_t *point = data + 1u + i * kPointBytes;
+        const uint16_t px = static_cast<uint16_t>(((point[0] & 0x0Fu) << 8) | point[1]);
+        const uint16_t py = static_cast<uint16_t>(((point[2] & 0x0Fu) << 8) | point[3]);
+        if (px < NRL_DISPLAY_WIDTH && py < NRL_DISPLAY_HEIGHT) {
+            x[valid] = px;
+            y[valid] = py;
+            ++valid;
+        }
+    }
+    return valid;
 }
 
 #else
 
 bool BI4UMD_Touch_Init(void) { return false; }
 bool BI4UMD_Touch_Read(uint16_t *, uint16_t *) { return false; }
+uint8_t BI4UMD_Touch_ReadPoints(uint16_t *, uint16_t *, uint8_t) { return 0u; }
 
 #endif
