@@ -97,10 +97,11 @@ TF/HTTP → 解码器 ──┬──│ 原生率 44.1k/48k/96k/192k, 16/24bit,
   - 改用 MCLK (板级已接 GPIO2, 现配置 `use_mclk=false`), 高采样率必需;
   - 96k/192k、24bit 在 esp_codec_dev es8389 驱动中的实测支持
     (若驱动时钟表未覆盖 192k, 需补充其 coeff 配置)。
-- **SRC 重采样器**: 已统一为 esp_audio_effects (`esp_ae_rate_cvt/ch_cvt`) ——
-  媒体→8k 上行 (`audio/voice_resampler`)、媒体→44.1k BT A2DP
-  (`services/music_player`)、AEC 16k→8k (`app/aec/aec_processor`) 三处共用;
-  AudioRouter 边缘的 2:1 定点转换因 bit-exact 要求保留自研。
+- **SRC 重采样器**: 媒体→8k 上行 (`audio/voice_resampler`) 与媒体→44.1k BT
+  A2DP (`services/music_player`) 用 **esp_asrc**（ESP32-S31 走硬件 ASRC 外设,
+  ESP32-S3 自动回退优化软件路径, AUTO 模式）; AEC 16k→8k
+  (`app/aec/aec_processor`, 负载小且延迟敏感) 用 esp_audio_effects 软件
+  重采样; AudioRouter 边缘的 2:1 定点转换因 bit-exact 要求保留自研。
 - **域冲突策略** (App 管理器仲裁, 可配置): 打断(默认, 先做) / 闪避混音(后期) / 忽略。
 - **保姆"同时"模式**: 解码 PCM 出口 fan-out 两路 (原生率→喇叭 + SRC→NRL 上行),
   一次解码两处消费。

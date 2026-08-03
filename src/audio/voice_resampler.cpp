@@ -1,14 +1,35 @@
 #include "audio/voice_resampler.h"
 
-#include <esp_heap_caps.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "esp_ae_ch_cvt.h"
-#include "esp_ae_rate_cvt.h"
+#include "esp_asrc.h"
 
 namespace {
 constexpr uint32_t kVoiceRateHz = 8000u;
+// Hardware-path frame timeout. Generous: even a 8192-frame 8 kHz chunk is
+// ~1 s of audio, and the ASRC peripheral converts far faster than real time.
+constexpr int32_t kAsrcTimeoutMs = 500;
+
+// Grow `*buf`/`*cap` to at least `need` bytes with the alignment the ASRC
+// hardware path requires. Returns false on allocation failure.
+bool grow_aligned(uint8_t **buf, size_t *cap, const size_t need,
+                  const uint32_t addr_align, const uint32_t size_align)
+{
+    if (need <= *cap) {
+        return true;
+    }
+    uint32_t allocated = 0;
+    void *p = esp_asrc_align_alloc(static_cast<uint32_t>(need), addr_align,
+                                   size_align, &allocated);
+    if (p == nullptr) {
+        return false;
+    }
+    free(*buf);
+    *buf = static_cast<uint8_t *>(p);
+    *cap = allocated;
+    return true;
+}
 } // namespace
 
 extern "C" void VOICE_RESAMPLER_Deinit(VoiceResampler *rs)
@@ -16,17 +37,16 @@ extern "C" void VOICE_RESAMPLER_Deinit(VoiceResampler *rs)
     if (rs == nullptr) {
         return;
     }
-    if (rs->ch_cvt != nullptr) {
-        esp_ae_ch_cvt_close(rs->ch_cvt);
-        rs->ch_cvt = nullptr;
+    if (rs->asrc != nullptr) {
+        esp_asrc_close(rs->asrc);
+        rs->asrc = nullptr;
     }
-    if (rs->rate_cvt != nullptr) {
-        esp_ae_rate_cvt_close(rs->rate_cvt);
-        rs->rate_cvt = nullptr;
-    }
-    free(rs->mono_buf);
-    rs->mono_buf = nullptr;
-    rs->mono_cap_frames = 0;
+    free(rs->in_buf);
+    rs->in_buf = nullptr;
+    rs->in_cap_bytes = 0;
+    free(rs->out_buf);
+    rs->out_buf = nullptr;
+    rs->out_cap_bytes = 0;
 }
 
 extern "C" int VOICE_RESAMPLER_Init(VoiceResampler *rs, const uint32_t in_rate_hz, const uint8_t channels)
@@ -39,30 +59,19 @@ extern "C" int VOICE_RESAMPLER_Init(VoiceResampler *rs, const uint32_t in_rate_h
     rs->in_rate_hz = in_rate_hz;
     rs->channels = channels;
 
-    if (channels == 2u) {
-        // Default weights (1/src_ch per channel) give the same (L+R)/2
-        // downmix the old hand-written resampler used.
-        esp_ae_ch_cvt_cfg_t ch_cfg = {};
-        ch_cfg.sample_rate = in_rate_hz;
-        ch_cfg.bits_per_sample = 16u;
-        ch_cfg.src_ch = 2u;
-        ch_cfg.dest_ch = 1u;
-        if (esp_ae_ch_cvt_open(&ch_cfg, &rs->ch_cvt) != ESP_AE_ERR_OK) {
-            VOICE_RESAMPLER_Deinit(rs);
-            return 0;
-        }
-    }
-
-    // Internal SRAM is scarce (WiFi/BT/ESP-NOW/LVGL), so pick the low-IRAM
-    // variant; the player task has CPU headroom on either core.
-    esp_ae_rate_cvt_cfg_t rate_cfg = {};
-    rate_cfg.src_rate = in_rate_hz;
-    rate_cfg.dest_rate = kVoiceRateHz;
-    rate_cfg.channel = 1u;
-    rate_cfg.bits_per_sample = 16u;
-    rate_cfg.complexity = 1u; // voice-grade 8 kHz telephony output
-    rate_cfg.perf_type = ESP_AE_RATE_CVT_PERF_TYPE_MEMORY;
-    if (esp_ae_rate_cvt_open(&rate_cfg, &rs->rate_cvt) != ESP_AE_ERR_OK) {
+    // AUTO: hardware ASRC on ESP32-S31, optimized software elsewhere. The
+    // NULL weight makes the stereo->mono downmix (L+R)/2, same as before.
+    esp_asrc_cfg_t cfg = {};
+    cfg.src_info.sample_rate = in_rate_hz;
+    cfg.src_info.channel = channels;
+    cfg.src_info.bits_per_sample = 16u;
+    cfg.dest_info.sample_rate = kVoiceRateHz;
+    cfg.dest_info.channel = 1u;
+    cfg.dest_info.bits_per_sample = 16u;
+    cfg.perf_type = ESP_ASRC_PERF_TYPE_AUTO;
+    cfg.complexity = 1u; // voice-grade 8 kHz telephony output (software path)
+    cfg.timeout_ms = kAsrcTimeoutMs;
+    if (esp_asrc_open(&cfg, &rs->asrc) != ESP_ASRC_ERR_OK) {
         VOICE_RESAMPLER_Deinit(rs);
         return 0;
     }
@@ -74,34 +83,38 @@ extern "C" size_t VOICE_RESAMPLER_Process(VoiceResampler *rs,
                                           int16_t *out, const size_t out_capacity)
 {
     if (rs == nullptr || in == nullptr || out == nullptr || in_frames == 0u ||
-        rs->rate_cvt == nullptr || out_capacity == 0u) {
+        rs->asrc == nullptr || out_capacity == 0u) {
         return 0;
     }
 
-    const int16_t *mono = in;
-    if (rs->channels == 2u) {
-        if (in_frames > rs->mono_cap_frames) {
-            int16_t *buf = static_cast<int16_t *>(
-                heap_caps_malloc(in_frames * sizeof(int16_t), MALLOC_CAP_SPIRAM));
-            if (buf == nullptr) {
-                return 0;
-            }
-            free(rs->mono_buf);
-            rs->mono_buf = buf;
-            rs->mono_cap_frames = in_frames;
-        }
-        if (esp_ae_ch_cvt_process(rs->ch_cvt, static_cast<uint32_t>(in_frames),
-                                  const_cast<int16_t *>(in), rs->mono_buf) != ESP_AE_ERR_OK) {
-            return 0;
-        }
-        mono = rs->mono_buf;
-    }
-
-    uint32_t produced = static_cast<uint32_t>(out_capacity);
-    if (esp_ae_rate_cvt_process(rs->rate_cvt, const_cast<int16_t *>(mono),
-                                static_cast<uint32_t>(in_frames), out,
-                                &produced) != ESP_AE_ERR_OK) {
+    esp_asrc_buffer_alignment_t align = {};
+    if (esp_asrc_get_buffer_alignment(&align) != ESP_ASRC_ERR_OK) {
         return 0;
     }
-    return produced;
+    const size_t in_bytes = in_frames * rs->channels * sizeof(int16_t);
+    uint32_t out_frames_max = 0;
+    if (esp_asrc_get_out_sample_num(rs->asrc, static_cast<uint32_t>(in_frames),
+                                    &out_frames_max) != ESP_ASRC_ERR_OK) {
+        return 0;
+    }
+    const size_t out_bytes = static_cast<size_t>(out_frames_max) * sizeof(int16_t);
+    if (!grow_aligned(&rs->in_buf, &rs->in_cap_bytes, in_bytes,
+                      align.inbuf_addr_align, align.inbuf_size_align) ||
+        !grow_aligned(&rs->out_buf, &rs->out_cap_bytes, out_bytes,
+                      align.outbuf_addr_align, align.outbuf_size_align)) {
+        return 0;
+    }
+
+    memcpy(rs->in_buf, in, in_bytes);
+    uint32_t produced = out_frames_max;
+    if (esp_asrc_process(rs->asrc, rs->in_buf, static_cast<uint32_t>(in_frames),
+                         rs->out_buf, &produced) != ESP_ASRC_ERR_OK) {
+        return 0;
+    }
+    size_t n = produced;
+    if (n > out_capacity) {
+        n = out_capacity; // caller sized out per the header contract; clamp defensively
+    }
+    memcpy(out, rs->out_buf, n * sizeof(int16_t));
+    return n;
 }

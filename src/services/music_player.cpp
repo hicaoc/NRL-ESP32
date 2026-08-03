@@ -2,8 +2,7 @@
 
 #include "audio/audio_focus.h"
 #include "audio/voice_resampler.h"
-#include "esp_ae_ch_cvt.h"
-#include "esp_ae_rate_cvt.h"
+#include "esp_asrc.h"
 #include "services/config_notify.h"
 #include "driver/board_pins.h"
 #include "driver/es8311.h"
@@ -15,7 +14,6 @@
 #include "services/smb_vfs.h"
 #include "services/storage_service.h"
 
-#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
@@ -107,29 +105,54 @@ static int16_t *s_bt_buffer = s_bt_storage;
 static size_t s_bt_capacity = kBtScratchSamples; // in interleaved samples
 
 // Arbitrary-rate mono/stereo PCM16 -> 44.1 kHz stereo for A2DP, built on
-// esp_audio_effects (mono is upmixed with esp_ae_ch_cvt first). Replaces the
-// old hand-written linear interpolator -- band-limited filtering now.
+// esp_asrc: channel conversion (weights) and band-limited rate conversion in
+// one pass, hardware-accelerated on ESP32-S31 with an automatic
+// optimized-software fallback on ESP32-S3.
 struct BtResampler {
     uint8_t channels;
-    esp_ae_ch_cvt_handle_t ch_cvt;   // mono->stereo upmix (NULL if stereo)
-    esp_ae_rate_cvt_handle_t rate_cvt;
-    int16_t *stereo_buf;             // upmix scratch, grown on demand (mono only)
-    size_t stereo_cap_frames;
+    esp_asrc_handle_t asrc;
+    // Staging buffers (esp_asrc_align_alloc): the hardware path requires
+    // cache-line-aligned buffers, and callers' pointers cannot guarantee that.
+    uint8_t *in_buf;
+    size_t in_cap_bytes;
+    uint8_t *out_buf;
+    size_t out_cap_bytes;
 };
+
+// Hardware-path frame timeout; the ASRC peripheral converts far faster than
+// real time, so 500 ms can only fire on a genuine hardware wedge.
+constexpr int32_t kBtAsrcTimeoutMs = 500;
+
+static bool bt_grow_aligned(uint8_t **buf, size_t *cap, const size_t need,
+                            const uint32_t addr_align, const uint32_t size_align)
+{
+    if (need <= *cap) {
+        return true;
+    }
+    uint32_t allocated = 0;
+    void *p = esp_asrc_align_alloc(static_cast<uint32_t>(need), addr_align,
+                                   size_align, &allocated);
+    if (p == nullptr) {
+        return false;
+    }
+    free(*buf);
+    *buf = static_cast<uint8_t *>(p);
+    *cap = allocated;
+    return true;
+}
 
 static void bt_resampler_deinit(BtResampler *rs)
 {
-    if (rs->ch_cvt != nullptr) {
-        esp_ae_ch_cvt_close(rs->ch_cvt);
-        rs->ch_cvt = nullptr;
+    if (rs->asrc != nullptr) {
+        esp_asrc_close(rs->asrc);
+        rs->asrc = nullptr;
     }
-    if (rs->rate_cvt != nullptr) {
-        esp_ae_rate_cvt_close(rs->rate_cvt);
-        rs->rate_cvt = nullptr;
-    }
-    free(rs->stereo_buf);
-    rs->stereo_buf = nullptr;
-    rs->stereo_cap_frames = 0;
+    free(rs->in_buf);
+    rs->in_buf = nullptr;
+    rs->in_cap_bytes = 0;
+    free(rs->out_buf);
+    rs->out_buf = nullptr;
+    rs->out_cap_bytes = 0;
 }
 
 // Idempotent re-init per output acquisition (focus suspend/resume re-runs
@@ -143,25 +166,18 @@ static bool bt_resampler_init(BtResampler *rs, const uint32_t in_rate, const uin
     bt_resampler_deinit(rs);
     rs->channels = channels;
 
-    if (channels == 1u) {
-        esp_ae_ch_cvt_cfg_t ch_cfg = {};
-        ch_cfg.sample_rate = in_rate;
-        ch_cfg.bits_per_sample = 16u;
-        ch_cfg.src_ch = 1u;
-        ch_cfg.dest_ch = 2u;
-        if (esp_ae_ch_cvt_open(&ch_cfg, &rs->ch_cvt) != ESP_AE_ERR_OK) {
-            bt_resampler_deinit(rs);
-            return false;
-        }
-    }
-    esp_ae_rate_cvt_cfg_t rate_cfg = {};
-    rate_cfg.src_rate = in_rate;
-    rate_cfg.dest_rate = 44100u;
-    rate_cfg.channel = 2u;
-    rate_cfg.bits_per_sample = 16u;
-    rate_cfg.complexity = 2u; // music-grade, unlike the voice uplink path
-    rate_cfg.perf_type = ESP_AE_RATE_CVT_PERF_TYPE_MEMORY; // internal SRAM is scarce
-    if (esp_ae_rate_cvt_open(&rate_cfg, &rs->rate_cvt) != ESP_AE_ERR_OK) {
+    // NULL weight: stereo stays put, mono duplicates to both channels.
+    esp_asrc_cfg_t cfg = {};
+    cfg.src_info.sample_rate = in_rate;
+    cfg.src_info.channel = channels;
+    cfg.src_info.bits_per_sample = 16u;
+    cfg.dest_info.sample_rate = 44100u;
+    cfg.dest_info.channel = 2u;
+    cfg.dest_info.bits_per_sample = 16u;
+    cfg.perf_type = ESP_ASRC_PERF_TYPE_AUTO;
+    cfg.complexity = 2u; // music-grade, unlike the voice uplink path
+    cfg.timeout_ms = kBtAsrcTimeoutMs;
+    if (esp_asrc_open(&cfg, &rs->asrc) != ESP_ASRC_ERR_OK) {
         bt_resampler_deinit(rs);
         return false;
     }
@@ -173,34 +189,38 @@ static bool bt_resampler_init(BtResampler *rs, const uint32_t in_rate, const uin
 static size_t bt_resampler_process(BtResampler *rs, const int16_t *in, const size_t in_frames,
                                    int16_t *out, const size_t out_cap_frames)
 {
-    if (in_frames == 0u || out_cap_frames == 0u || rs->rate_cvt == nullptr) {
+    if (in_frames == 0u || out_cap_frames == 0u || rs->asrc == nullptr) {
         return 0;
     }
-    const int16_t *stereo = in;
-    if (rs->channels == 1u) {
-        if (in_frames > rs->stereo_cap_frames) {
-            int16_t *buf = static_cast<int16_t *>(
-                heap_caps_malloc(in_frames * 2u * sizeof(int16_t), MALLOC_CAP_SPIRAM));
-            if (buf == nullptr) {
-                return 0;
-            }
-            free(rs->stereo_buf);
-            rs->stereo_buf = buf;
-            rs->stereo_cap_frames = in_frames;
-        }
-        if (esp_ae_ch_cvt_process(rs->ch_cvt, static_cast<uint32_t>(in_frames),
-                                  const_cast<int16_t *>(in), rs->stereo_buf) != ESP_AE_ERR_OK) {
-            return 0;
-        }
-        stereo = rs->stereo_buf;
-    }
-    uint32_t produced = static_cast<uint32_t>(out_cap_frames);
-    if (esp_ae_rate_cvt_process(rs->rate_cvt, const_cast<int16_t *>(stereo),
-                                static_cast<uint32_t>(in_frames), out,
-                                &produced) != ESP_AE_ERR_OK) {
+    esp_asrc_buffer_alignment_t align = {};
+    if (esp_asrc_get_buffer_alignment(&align) != ESP_ASRC_ERR_OK) {
         return 0;
     }
-    return produced;
+    const size_t in_bytes = in_frames * rs->channels * sizeof(int16_t);
+    uint32_t out_frames_max = 0;
+    if (esp_asrc_get_out_sample_num(rs->asrc, static_cast<uint32_t>(in_frames),
+                                    &out_frames_max) != ESP_ASRC_ERR_OK) {
+        return 0;
+    }
+    const size_t out_bytes = static_cast<size_t>(out_frames_max) * 2u * sizeof(int16_t);
+    if (!bt_grow_aligned(&rs->in_buf, &rs->in_cap_bytes, in_bytes,
+                         align.inbuf_addr_align, align.inbuf_size_align) ||
+        !bt_grow_aligned(&rs->out_buf, &rs->out_cap_bytes, out_bytes,
+                         align.outbuf_addr_align, align.outbuf_size_align)) {
+        return 0;
+    }
+    memcpy(rs->in_buf, in, in_bytes);
+    uint32_t produced = out_frames_max;
+    if (esp_asrc_process(rs->asrc, rs->in_buf, static_cast<uint32_t>(in_frames),
+                         rs->out_buf, &produced) != ESP_ASRC_ERR_OK) {
+        return 0;
+    }
+    size_t frames = produced;
+    if (frames > out_cap_frames) {
+        frames = out_cap_frames; // clamp defensively
+    }
+    memcpy(out, rs->out_buf, frames * 2u * sizeof(int16_t));
+    return frames;
 }
 
 // Playback target + net-radio station persist in NVS so the web portal and

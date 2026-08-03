@@ -30,6 +30,11 @@ dependencies:
     version: "^1.0"
   espressif/esp_audio_effects:
     version: "^1.3"
+  # Hardware-accelerated sample rate / channel conversion (ESP32-S31 ASRC
+  # peripheral; automatic software fallback on ESP32-S3). Used by
+  # voice_resampler and the BT A2DP resampler in music_player.
+  espressif/esp_asrc:
+    version: "^1.0"
   # HLS (m3u8) source as a GMF IO for internet radio streams.
   espressif/esp_hls_stream:
     version: "^1.0"

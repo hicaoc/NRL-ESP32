@@ -3,11 +3,11 @@
 
 // Stateful media -> voice-domain resampler (docs/architecture.md 3.2 SRC):
 // arbitrary-rate stereo/mono PCM16 (8k-192k) down to 8 kHz mono for the NRL
-// G.711 uplink. Built on esp_audio_effects: stereo is downmixed with
-// esp_ae_ch_cvt first, then band-limited resampled with esp_ae_rate_cvt
-// (replaces the old hand-written linear interpolator -- proper anti-alias
-// filtering now, and less custom DSP to maintain). Voice-grade target by
-// design: the network path is 8 kHz telephony anyway.
+// G.711 uplink. Built on esp_asrc: the stereo downmix (channel weights) and
+// band-limited rate conversion happen in one pass, hardware-accelerated on
+// ESP32-S31 (ASRC peripheral) with an automatic optimized-software fallback
+// on ESP32-S3. Voice-grade target by design: the network path is 8 kHz
+// telephony anyway.
 
 #include <stddef.h>
 #include <stdint.h>
@@ -19,10 +19,13 @@ extern "C" {
 typedef struct {
     uint32_t in_rate_hz;
     uint8_t channels;      // 1 or 2 (interleaved)
-    void *ch_cvt;          // esp_ae_ch_cvt_handle_t, stereo downmix (NULL if mono)
-    void *rate_cvt;        // esp_ae_rate_cvt_handle_t
-    int16_t *mono_buf;     // downmix scratch, grown on demand (stereo only)
-    size_t mono_cap_frames;
+    void *asrc;            // esp_asrc_handle_t
+    // Staging buffers (esp_asrc_align_alloc): the hardware path requires
+    // cache-line-aligned buffers, and callers' pointers cannot guarantee that.
+    uint8_t *in_buf;
+    size_t in_cap_bytes;
+    uint8_t *out_buf;
+    size_t out_cap_bytes;
 } VoiceResampler;
 
 // Initialise / re-initialise for an input format. Idempotent: safe to call
@@ -37,7 +40,7 @@ size_t VOICE_RESAMPLER_Process(VoiceResampler *rs,
                                const int16_t *in, size_t in_frames,
                                int16_t *out, size_t out_capacity);
 
-// Release the esp_audio_effects handles and scratch buffer. Safe on a
+// Release the esp_asrc handle and staging buffers. Safe on a
 // zero-initialised struct.
 void VOICE_RESAMPLER_Deinit(VoiceResampler *rs);
 
