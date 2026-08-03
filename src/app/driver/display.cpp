@@ -236,7 +236,7 @@ uint32_t s_map_station_rev = UINT32_MAX;
 // SSTV TX page: SD-card JPEG picker + mode toggle + send/progress.
 constexpr size_t kSstvMaxFiles = 24u;
 constexpr size_t kSstvNameLen = 48u;
-constexpr size_t kSstvRows = 7u;
+constexpr size_t kSstvRows = 6u;
 char s_sstv_files[kSstvMaxFiles][kSstvNameLen] = {};
 size_t s_sstv_file_count = 0u;
 size_t s_sstv_page = 0u;
@@ -2678,7 +2678,7 @@ void buildSstvMenu()
     lv_obj_set_pos(title, 56, 2);
     lv_label_set_text(title, "SSTV");
 
-    // JPEG picker: 7 rows, paged; tap selects (highlighted).
+    // JPEG picker: 6 rows, paged; tap selects (highlighted).
     const size_t first = s_sstv_page * kSstvRows;
     for (size_t row = 0u; row < kSstvRows; ++row) {
         const size_t idx = first + row;
@@ -2704,7 +2704,10 @@ void buildSstvMenu()
     s_sstv_lbl_status = makeLabel(scr, &lv_font_montserrat_14, kColorCaption);
     lv_obj_set_width(s_sstv_lbl_status, kWidth - 8);
     lv_obj_set_style_text_align(s_sstv_lbl_status, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(s_sstv_lbl_status, 4, 224);
+    constexpr int kSstvButtonHeight = 32;
+    constexpr int kSstvButtonY = kContentHeight - kSstvButtonHeight - 4;
+    constexpr int kSstvStatusY = kSstvButtonY - 22;
+    lv_obj_set_pos(s_sstv_lbl_status, 4, kSstvStatusY);
     char line[96];
     if (busy) {
         snprintf(line, sizeof(line), "TX %s %u%%",
@@ -2724,8 +2727,8 @@ void buildSstvMenu()
     auto small_button = [scr](int x, int w, const char *text,
                               lv_event_cb_t callback, void *user_data) {
         lv_obj_t *button = lv_button_create(scr);
-        lv_obj_set_pos(button, x, 246);
-        lv_obj_set_size(button, w, 32);
+        lv_obj_set_pos(button, x, kSstvButtonY);
+        lv_obj_set_size(button, w, kSstvButtonHeight);
         lv_obj_set_style_radius(button, 6, 0);
         lv_obj_set_style_bg_color(button, lv_color_hex(0x10212A), 0);
         lv_obj_set_style_bg_color(button, lv_color_hex(0x087A82), LV_STATE_PRESSED);
