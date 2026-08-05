@@ -691,6 +691,7 @@ void ModemInit(void)
 		sinFull[i] = (uint8_t)(128.f + 127.f * sinf(2.f * 3.14159265f * (float)i / (float)SIN_LEN));
 
 	memset(demodState, 0, sizeof(demodState));
+	dcd = 0;
 
 	if (ModemConfig.modem > MODEM_9600)
 		ModemConfig.modem = MODEM_1200;
@@ -731,6 +732,9 @@ void ModemInit(void)
 		demodState[1].dcdDec = DCD1200_DEC;
 		demodState[1].dcdTune = DCD1200_TUNE * (float)((uint32_t)1 << PLL_TUNE_BITS);
 
+		// The NRL downlink is already flat digital audio. Keep its dedicated
+		// demodulator unfiltered; applying the analog MIC preemphasis here makes
+		// DCD chatter and delays carrier lock until the frame is already starting.
 		demodState[1].prefilter = PREFILTER_NONE;
 		demodState[1].lpf.coeffs = (int16_t *)lpf1200;
 		demodState[1].lpf.taps = sizeof(lpf1200) / sizeof(*lpf1200);

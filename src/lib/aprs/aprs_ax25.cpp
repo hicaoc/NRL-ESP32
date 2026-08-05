@@ -51,7 +51,7 @@ struct Ax25ProtoConfig Ax25Config;
 #endif
 #define FRAME_BUFFER_SIZE (FRAME_MAX_COUNT * AX25_FRAME_MAX_SIZE) //circular frame buffer length
 
-#define STATIC_HEADER_FLAG_COUNT 4 //number of flags sent before each frame
+#define STATIC_HEADER_FLAG_COUNT 8 // flags after carrier lock, before frame data
 #define STATIC_FOOTER_FLAG_COUNT 1 //number of flags sent after each frame
 
 #define MAX_TRANSMIT_RETRY_COUNT 8 //max number of retries if channel is busy
@@ -1122,9 +1122,22 @@ void Ax25TransmitCheck(void)
 void Ax25Init(uint8_t fx25Mode)
 {
 	txCrc = 0xFFFF;
+	// Clear all RX-side state as well.  These were previously only zeroed at
+	// power-up, so a malformed/noisy frame could leave the multiplex gate or
+	// queued-frame bookkeeping stale for the lifetime of the task.
+	lastCrc = 0;
+	rxMultiplexDelay = 0;
+	frameReceived = 0;
+	rxFrameHead = 0;
+	rxFrameTail = 0;
+	rxFrameBufferFull = false;
+	rxBufferHead = 0;
     memset(&Ax25Config, 0, sizeof(Ax25Config));
     Ax25Config.quietTime = 2000;
-	Ax25Config.txDelayLength = 300;
+    // Network/G.711 receivers in this port need roughly 340 ms to assert DCD.
+    // Keep a comfortable flag preamble after that point so the HDLC decoder
+    // sees complete opening flags instead of locking as frame data begins.
+    Ax25Config.txDelayLength = 600;
 	Ax25Config.txTailLength = 1;
 	if(fx25Mode==0){
 		Ax25Config.fx25 = 0;
