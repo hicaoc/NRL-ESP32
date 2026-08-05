@@ -569,3 +569,17 @@ extern "C" void MEDIA_META_Free(MediaTrackInfo *info)
     info->cover_size = 0;
     info->cover_type = MEDIA_COVER_NONE;
 }
+
+extern "C" void MEDIA_META_ReleaseCover(MediaTrackInfo *info)
+{
+    // Same cover cleanup as MEDIA_META_Free, without touching anything else.
+    if (info == nullptr) {
+        return;
+    }
+    if (info->cover_data != nullptr) {
+        heap_caps_free(info->cover_data);
+        info->cover_data = nullptr;
+    }
+    info->cover_size = 0;
+    info->cover_type = MEDIA_COVER_NONE;
+}

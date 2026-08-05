@@ -97,14 +97,23 @@ TF/HTTP → 解码器 ──┬──│ 原生率 44.1k/48k/96k/192k, 16/24bit,
   - 改用 MCLK (板级已接 GPIO2, 现配置 `use_mclk=false`), 高采样率必需;
   - 96k/192k、24bit 在 esp_codec_dev es8389 驱动中的实测支持
     (若驱动时钟表未覆盖 192k, 需补充其 coeff 配置)。
-- **SRC 重采样器** (`audio/resampler`, 公用): esp_audio_effects resample 或
-  esp-dsp 自组。跨域处统一使用。
+- **SRC 重采样器**: 媒体→8k 上行 (`audio/voice_resampler`) 与媒体→44.1k BT
+  A2DP (`services/music_player`) 用 **esp_asrc**（ESP32-S31 走硬件 ASRC 外设,
+  ESP32-S3 自动回退优化软件路径, AUTO 模式）; AEC 16k→8k
+  (`app/aec/aec_processor`, 负载小且延迟敏感) 用 esp_audio_effects 软件
+  重采样; AudioRouter 边缘的 2:1 定点转换因 bit-exact 要求保留自研。
 - **域冲突策略** (App 管理器仲裁, 可配置): 打断(默认, 先做) / 闪避混音(后期) / 忽略。
 - **保姆"同时"模式**: 解码 PCM 出口 fan-out 两路 (原生率→喇叭 + SRC→NRL 上行),
   一次解码两处消费。
 
 ### 3.3 MediaPlayer (媒体引擎) — 收音机/保姆/音乐共用
 
+- 实现 (2026-07 起): 解码链基于乐鑫 **ESP-GMF** pipeline —— 输入为 GMF IO
+  (`io_file` 本地/U盘, 自写 `io_smb` 包装 SmbStream 专用连接, 自写 `io_radio`
+  包装 TLS 先验证后降级重试的 HTTP 电台流, 官方 `io_hls` 处理 m3u8) →
+  `aud_dec` (按内容嗅探格式, 底层 esp_audio_codec, 只注册 wav/mp3/flac/m4a/aac
+  所需解码器以防分区溢出) → 回调 out-port 推 PCM 入 2MB PSRAM 环形缓冲;
+  公开 API 仍是 `media_decoder.h` 的 Open/Decode/GetInfo/Close。
 - 输入抽象: TF 卡文件 (VFS) 与 HTTP 流同一接口。
 - 解码器插件 (`open(stream)/decode_frame()/seek()`, 按文件头探测格式):
 

@@ -44,7 +44,10 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=24576
 
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=512
+# Keep the always-internal threshold tiny: a 512-byte malloc (GMF payload
+# buffers are exactly 512) used to land in internal RAM and die whenever the
+# audio/Wi-Fi stacks squeezed it; 128 keeps only genuinely small allocs there.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=128
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
 CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 # Tile loader worker keeps its 8 KB stack in PSRAM (blocks on HTTP for seconds).
@@ -206,10 +209,17 @@ CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y
 # only low-bandwidth G.711 voice (UDP) plus config traffic, so the stock buffer
 # counts are wildly oversized here; cutting them reclaims tens of KB of internal
 # RAM for the BT stack with no audible effect on the voice path.
+#
+# 2026 update: that justification predates SMB/HTTP streaming. Sustained TCP
+# bulk over an AMPDU win:64 link with only 8 dynamic RX buffers collapsed the
+# link under directory scans / media streaming (driver could not absorb
+# aggregation bursts, AP then deauthed). Dynamic RX is back near the IDF
+# default; buffers are allocated on demand, so the cost only materializes
+# under load, and BT uses SPIRAM-first allocations when it is on.
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=4
-CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=8
-CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=8
-CONFIG_ESP_WIFI_RX_MGMT_BUF_NUM_DEF=2
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_RX_MGMT_BUF_NUM_DEF=4
 CONFIG_ESP_WIFI_MGMT_SBUF_NUM=8
 # Keep AMPDU RX ON but with the smallest Block-Ack window (RX_BA_WIN=2 above).
 # Turning aggregation fully OFF was tried and caused continuous WiFi stutter: the
@@ -285,7 +295,9 @@ CONFIG_FATFS_API_ENCODING_UTF_8=y
 # Shared LVGL defaults for display-equipped boards.
 
 CONFIG_LV_COLOR_DEPTH_16=y
-CONFIG_LV_USE_CLIB_MALLOC=y
+# lv_malloc routes through src/app/lv_mem_psram.cpp (PSRAM-first):
+# CLIB malloc strands thousands of <=128B LVGL objects in internal RAM.
+CONFIG_LV_USE_CUSTOM_MALLOC=y
 CONFIG_LV_USE_CLIB_STRING=y
 CONFIG_LV_USE_CLIB_SPRINTF=y
 # lodepng (vendored in LVGL) decodes directly-downloaded PNG map tiles.
@@ -311,8 +323,8 @@ CONFIG_LV_DRAW_BUF_ALIGN=64
 CONFIG_LV_USE_PPA=y
 CONFIG_LV_USE_PPA_IMG=y
 CONFIG_LV_PPA_BURST_LENGTH=128
-# CONFIG_LV_DRAW_SW_ASM_NONE is not set
-CONFIG_LV_DRAW_SW_ASM_RISCV_V=y
+CONFIG_LV_DRAW_SW_ASM_NONE=y
+# CONFIG_LV_DRAW_SW_ASM_RISCV_V is not set
 # CONFIG_LV_USE_FREETYPE is not set
 CONFIG_CAMERA_OV3660=y
 CONFIG_CAMERA_OV3660_DVP_JPEG_1280X720_12FPS=y
@@ -324,5 +336,11 @@ CONFIG_LWIP_MAX_SOCKETS=16
 # window cycles and smb_stream tops out around 1-2 MB/s -- 24/96 FLAC
 # (~4.5 Mbps) has almost no jitter margin. 16KB covers a full
 # kWireReadBytes reply per cycle; gezipai already runs 32768.
-CONFIG_LWIP_TCP_WND_DEFAULT=16384
+# 8 KB receive window: each SMB streaming lane's pbufs are internal RAM, and
+# two lanes at 16 KB could pin 32 KB. LAN RTT is ~1 ms, so 8 KB still gives
+# many MB/s -- far above what FLAC playback needs.
+CONFIG_LWIP_TCP_WND_DEFAULT=8192
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
+# Per-task heap census (AT+MEM): tags every allocation with its owning
+# task so 'who ate the internal DRAM' is answerable without a debug build.
+CONFIG_HEAP_TASK_TRACKING=y

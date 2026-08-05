@@ -344,6 +344,14 @@
     <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsRfRx">RF Receive (AFSK)</label><input type="hidden" name="aprs_rx_present" value="1"><label class="hint"><input type="checkbox" name="aprs_rx" value="1" onchange="submitSwitch(this)" {{APRS_RX_CHECKED}}><span data-i18n="aprsRfRxText">Demodulate APRS audio heard on the microphone/radio</span></label></form>
     <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsAuto">Auto interval</label><input type="hidden" name="aprs_auto_present" value="1"><label class="hint"><input type="checkbox" name="aprs_auto" value="1" onchange="submitSwitch(this)" {{APRS_AUTO_CHECKED}}><span data-i18n="aprsAutoText">With a GPS fix, beacon faster while moving (30 s at 60+ km/h, or after a 300 m jump); the interval below is the ceiling when parked</span></label></form>
     <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsFixed">Fixed beacon without GPS</label><input type="hidden" name="aprs_fixed_present" value="1"><label class="hint"><input type="checkbox" name="aprs_fixed" value="1" onchange="submitSwitch(this)" {{APRS_FIXED_CHECKED}}><span data-i18n="aprsFixedText">When GPS has no fix, allow periodic beacons using the configured default position</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsNrlTx">NRL Network Transmit (AFSK)</label><input type="hidden" name="aprs_nrl_tx_present" value="1"><label class="hint"><input type="checkbox" name="aprs_nrl_tx" value="1" onchange="submitSwitch(this)" {{APRS_NRL_TX_CHECKED}}><span data-i18n="aprsNrlTxText">Modulate beacons/messages out through the NRL network voice uplink</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsNrlRx">NRL Network Receive (AFSK)</label><input type="hidden" name="aprs_nrl_rx_present" value="1"><label class="hint"><input type="checkbox" name="aprs_nrl_rx" value="1" onchange="submitSwitch(this)" {{APRS_NRL_RX_CHECKED}}><span data-i18n="aprsNrlRxText">Demodulate APRS audio arriving over the NRL network voice downlink</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsFwdRfIs">Gateway RF &#8594; APRS-IS</label><input type="hidden" name="aprs_fwd_rf_is_present" value="1"><label class="hint"><input type="checkbox" name="aprs_fwd_rf_is" value="1" onchange="submitSwitch(this)" {{APRS_FWD_RF_IS_CHECKED}}><span data-i18n="aprsFwdRfIsText">iGate upload: relay packets heard on the microphone/radio to APRS-IS</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsFwdIsRf">Gateway APRS-IS &#8594; RF</label><input type="hidden" name="aprs_fwd_is_rf_present" value="1"><label class="hint"><input type="checkbox" name="aprs_fwd_is_rf" value="1" onchange="submitSwitch(this)" {{APRS_FWD_IS_RF_CHECKED}}><span data-i18n="aprsFwdIsRfText">Relay packets from APRS-IS out as AFSK through the radio (needs RF Transmit)</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsFwdNrlIs">Gateway NRL &#8594; APRS-IS</label><input type="hidden" name="aprs_fwd_nrl_is_present" value="1"><label class="hint"><input type="checkbox" name="aprs_fwd_nrl_is" value="1" onchange="submitSwitch(this)" {{APRS_FWD_NRL_IS_CHECKED}}><span data-i18n="aprsFwdNrlIsText">Relay packets heard on the NRL network downlink to APRS-IS</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsFwdIsNrl">Gateway APRS-IS &#8594; NRL</label><input type="hidden" name="aprs_fwd_is_nrl_present" value="1"><label class="hint"><input type="checkbox" name="aprs_fwd_is_nrl" value="1" onchange="submitSwitch(this)" {{APRS_FWD_IS_NRL_CHECKED}}><span data-i18n="aprsFwdIsNrlText">Relay packets from APRS-IS out as AFSK through the NRL network (needs NRL Transmit)</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsFwdRfNrl">Gateway RF &#8594; NRL</label><input type="hidden" name="aprs_fwd_rf_nrl_present" value="1"><label class="hint"><input type="checkbox" name="aprs_fwd_rf_nrl" value="1" onchange="submitSwitch(this)" {{APRS_FWD_RF_NRL_CHECKED}}><span data-i18n="aprsFwdRfNrlText">Relay packets heard on the microphone/radio out through the NRL network (needs NRL Transmit)</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsFwdNrlRf">Gateway NRL &#8594; RF</label><input type="hidden" name="aprs_fwd_nrl_rf_present" value="1"><label class="hint"><input type="checkbox" name="aprs_fwd_nrl_rf" value="1" onchange="submitSwitch(this)" {{APRS_FWD_NRL_RF_CHECKED}}><span data-i18n="aprsFwdNrlRfText">Relay packets heard on the NRL network out as AFSK through the radio (needs RF Transmit)</span></label></form>
   </div>
 </section>
 <section class="panel" id="gps-live-panel" hidden>
@@ -379,6 +387,18 @@
         <div class="span-2"><label data-i18n="aprsComment">Beacon comment (up to 219 UTF-8 bytes)</label><input name="aprs_comment" value="{{APRS_COMMENT}}" maxlength="219" data-max-utf8-bytes="219"></div>
       </div>
       <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button><button class="btn-small" type="button" onclick="submitFormAction(this, 'aprs_beacon', 'sent', 'sendFailed')" data-i18n="aprsBeaconNow">Beacon now</button></div>
+    </form>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="aprsMessage">Manual APRS Message</h2><span class="hint" data-i18n="aprsMessageHint">Sent over APRS-IS when linked, and as AFSK on every enabled audio path.</span></div>
+  <div class="grid">
+    <form class="item-form span-2" method="post" action="/save_aprs">
+      <div class="subgrid">
+        <div><label data-i18n="aprsMsgDest">Addressee callsign (A-Z 0-9 -, e.g. BI4UMD-9)</label><input name="aprs_msg_dest" maxlength="9" placeholder="BI4UMD-9"></div>
+        <div><label data-i18n="aprsMsgText">Message text (up to 67 bytes)</label><input name="aprs_msg_text" maxlength="67"></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="button" onclick="submitFormAction(this, 'aprs_msg', 'aprsMsgSent', 'sendFailed')" data-i18n="aprsMsgSend">Send message</button></div>
     </form>
   </div>
 </section>

@@ -34,10 +34,12 @@ void VIDEO_Init(void);
 bool VIDEO_SetTxEnabled(bool enabled);
 bool VIDEO_TxEnabled(void);
 
-// Latest completely received JPEG frame. Returns true when `*seq` differs
-// from the caller's previous value; the data stays valid until the next
-// VIDEO_AcquireFrame call. Pattern: acquire -> decode -> render.
-bool VIDEO_AcquireFrame(const uint8_t **jpeg, size_t *jpeg_size, uint32_t *seq);
+// Latest completely received JPEG frame, copied into `dst` under the
+// internal lock so the caller can decode at its own pace with no tear risk
+// (the RX reassembly overwrites the ready buffer at any moment). Returns
+// true when a frame newer than `*seq` was copied. Pattern: acquire -> decode
+// -> render.
+bool VIDEO_AcquireFrame(uint8_t *dst, size_t dst_cap, size_t *jpeg_size, uint32_t *seq);
 
 // Latest locally captured JPEG frame (only while camera TX is enabled),
 // copied into `dst` under the internal lock so the caller can decode at its

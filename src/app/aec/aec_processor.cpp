@@ -6,13 +6,13 @@
 
 #include <esp_afe_config.h>
 #include <esp_afe_sr_models.h>
+#include <esp_ae_rate_cvt.h>
 #include <esp_err.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/idf_additions.h>
 #include <freertos/task.h>
-#include <math.h>
 #include <model_path.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,61 +22,9 @@ static const char *TAG = "AEC";
 namespace {
 
 // ---- Resampler ---------------------------------------------------------
-// Windowed-sinc low-pass FIR for the 16k->8k downsampler.
-// Cutoff 0.25 cycles/sample = 4 kHz at 16 kHz.
-constexpr size_t kFirTaps = 31;
-constexpr size_t kFirHalf = kFirTaps / 2; // 15
-float s_fir[kFirTaps];
-
-void fir_init(void) {
-    double sum = 0.0;
-    const double fc = 0.25;
-    for (size_t i = 0; i < kFirTaps; ++i) {
-        const int k = static_cast<int>(i) - static_cast<int>(kFirHalf);
-        const double sinc = (k == 0)
-            ? 2.0 * fc
-            : sin(2.0 * M_PI * fc * k) / (M_PI * k);
-        const double win = 0.54 - 0.46 * cos(2.0 * M_PI * i / (kFirTaps - 1));
-        s_fir[i] = static_cast<float>(sinc * win);
-        sum += s_fir[i];
-    }
-    for (size_t i = 0; i < kFirTaps; ++i) {
-        s_fir[i] = static_cast<float>(s_fir[i] / sum); // unity DC gain
-    }
-}
-
-inline int16_t clamp16(float v) {
-    long r = lroundf(v);
-    if (r > 32767) r = 32767;
-    if (r < -32768) r = -32768;
-    return static_cast<int16_t>(r);
-}
-
-// 16k->8k downsampler: history of recent 16 kHz input samples.
-struct Downsampler {
-    float hist[kFirTaps];
-    bool phase;
-};
-
-// out must hold n / 2 samples; returns the number produced.
-size_t downsample2x(Downsampler &s, const int16_t *in, size_t n, int16_t *out) {
-    size_t produced = 0;
-    for (size_t i = 0; i < n; ++i) {
-        for (size_t h = kFirTaps - 1; h > 0; --h) {
-            s.hist[h] = s.hist[h - 1];
-        }
-        s.hist[0] = static_cast<float>(in[i]);
-        s.phase = !s.phase;
-        if (!s.phase) { // emit one output per two inputs
-            float y = 0.0f;
-            for (size_t t = 0; t < kFirTaps; ++t) {
-                y += s_fir[t] * s.hist[t];
-            }
-            out[produced++] = clamp16(y);
-        }
-    }
-    return produced;
-}
+// 16k->8k downsampler backed by esp_audio_effects' band-limited rate
+// converter (replaces the old hand-written 31-tap windowed-sinc FIR).
+// esp_ae_rate_cvt_handle_t s_rate_cvt is opened in afe_create_pipeline().
 
 // ---- AFE state ---------------------------------------------------------
 constexpr size_t kOutFrameSamples = 80; // 8 kHz NRL uplink frame
@@ -91,7 +39,10 @@ size_t s_feed_cap = 0;         // per-channel capacity
 size_t s_feed_fill = 0;        // per-channel samples buffered
 size_t s_feed_channels = 1;    // 1=mic only, 2=mic+ref
 
-Downsampler s_down;
+// Downsampler state (see "Resampler" note above).
+esp_ae_rate_cvt_handle_t s_rate_cvt = nullptr;
+int16_t *s_down_buf = nullptr;   // 8 kHz scratch for the fetch task
+uint32_t s_down_buf_cap = 0;     // samples
 
 int16_t s_out_frame[kOutFrameSamples];
 size_t s_out_fill = 0;
@@ -114,7 +65,6 @@ const char *input_format_for(const bool use_ref_channel) {
 }
 
 void aec_fetch_task(void *) {
-    static int16_t down8[1024];
     while (s_running) {
         afe_fetch_result_t *res = s_iface->fetch(s_afe);
         if (res == nullptr || res->ret_value == ESP_FAIL) {
@@ -126,9 +76,15 @@ void aec_fetch_task(void *) {
         size_t off = 0;
         while (off < n16) {
             const size_t block = (n16 - off > 2048u) ? 2048u : (n16 - off);
-            const size_t n8 = downsample2x(s_down, res->data + off, block, down8);
-            for (size_t i = 0; i < n8; ++i) {
-                s_out_frame[s_out_fill++] = down8[i];
+            uint32_t n8 = s_down_buf_cap;
+            if (esp_ae_rate_cvt_process(s_rate_cvt,
+                                        const_cast<int16_t *>(res->data + off),
+                                        static_cast<uint32_t>(block),
+                                        s_down_buf, &n8) != ESP_AE_ERR_OK) {
+                n8 = 0;
+            }
+            for (uint32_t i = 0; i < n8; ++i) {
+                s_out_frame[s_out_fill++] = s_down_buf[i];
                 if (s_out_fill == kOutFrameSamples) {
                     if (s_out_cb != nullptr) {
                         s_out_cb(s_out_frame, kOutFrameSamples, s_out_user);
@@ -221,7 +177,39 @@ static bool afe_create_pipeline(bool enable_aec, bool enable_ai_noise) {
 
     s_feed_fill = 0;
     s_out_fill = 0;
-    memset(&s_down, 0, sizeof(s_down));
+
+    // 16k->8k band-limited downsampler for the AFE output (see "Resampler").
+    // Speech path: complexity 2 is a middle ground; the low-IRAM variant
+    // because internal SRAM is scarce (see the AFE PSRAM note above).
+    esp_ae_rate_cvt_cfg_t rate_cfg = {};
+    rate_cfg.src_rate = 16000u;
+    rate_cfg.dest_rate = 8000u;
+    rate_cfg.channel = 1u;
+    rate_cfg.bits_per_sample = 16u;
+    rate_cfg.complexity = 2u;
+    rate_cfg.perf_type = ESP_AE_RATE_CVT_PERF_TYPE_MEMORY;
+    if (esp_ae_rate_cvt_open(&rate_cfg, &s_rate_cvt) != ESP_AE_ERR_OK ||
+        esp_ae_rate_cvt_get_max_out_sample_num(s_rate_cvt, 2048u,
+                                               &s_down_buf_cap) != ESP_AE_ERR_OK) {
+        ESP_LOGE(TAG, "rate converter init failed");
+        free(s_feed_buf);
+        s_feed_buf = nullptr;
+        s_iface->destroy(s_afe);
+        s_afe = nullptr;
+        return false;
+    }
+    s_down_buf = static_cast<int16_t *>(
+        heap_caps_malloc(s_down_buf_cap * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    if (s_down_buf == nullptr) {
+        ESP_LOGE(TAG, "downsample buffer alloc failed");
+        esp_ae_rate_cvt_close(s_rate_cvt);
+        s_rate_cvt = nullptr;
+        free(s_feed_buf);
+        s_feed_buf = nullptr;
+        s_iface->destroy(s_afe);
+        s_afe = nullptr;
+        return false;
+    }
 
     s_running = true;
     // Stack in PSRAM (MALLOC_CAP_SPIRAM) like the passthrough task: with
@@ -236,6 +224,10 @@ static bool afe_create_pipeline(bool enable_aec, bool enable_ai_noise) {
                                         &s_fetch_task, 1, MALLOC_CAP_SPIRAM) != pdPASS) {
         ESP_LOGE(TAG, "fetch task create failed");
         s_running = false;
+        esp_ae_rate_cvt_close(s_rate_cvt);
+        s_rate_cvt = nullptr;
+        free(s_down_buf);
+        s_down_buf = nullptr;
         free(s_feed_buf);
         s_feed_buf = nullptr;
         s_iface->destroy(s_afe);
@@ -291,6 +283,13 @@ static void afe_destroy_pipeline(void) {
     }
     s_afe = nullptr;
     s_iface = nullptr;
+    if (s_rate_cvt != nullptr) {
+        esp_ae_rate_cvt_close(s_rate_cvt);
+        s_rate_cvt = nullptr;
+    }
+    free(s_down_buf);
+    s_down_buf = nullptr;
+    s_down_buf_cap = 0;
     if (s_feed_buf != nullptr) {
         free(s_feed_buf);
         s_feed_buf = nullptr;
@@ -310,8 +309,6 @@ bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
     if (!enable_aec && !enable_ai_noise) {
         return false;
     }
-
-    fir_init();
 
     s_models = esp_srmodel_init("model");
     if (s_models == nullptr) {

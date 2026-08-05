@@ -31,6 +31,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
+#include <strings.h>
 
 static const char *TAG = "APRS";
 
@@ -94,6 +96,9 @@ struct PersistBlob {
     char comment_v2[kPersistCommentV2Bytes + 1u]; // appended in 0.8.13
     uint8_t fixed_beacon_without_gps; // appended in 0.8.18
     char comment_v3[APRS_COMMENT_MAX_BYTES + 1u]; // appended in 0.8.18
+    uint8_t nrl_tx_enabled;  // appended in 0.8.49: AFSK out over the NRL uplink
+    uint8_t nrl_rx_enabled;  // appended in 0.8.49: demodulate NRL downlink
+    uint8_t fwd[APRS_FWD_COUNT]; // appended in 0.8.50: gateway forwarding switches
 } __attribute__((packed));
 
 struct StationRec {
@@ -149,24 +154,37 @@ portMUX_TYPE s_gps_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // NMEA ring, filled by the APRS task from dedicated UART2.
 constexpr size_t kNmeaRingSize = 1024u;
-uint8_t s_nmea_ring[kNmeaRingSize];
+NRL_PSRAM_BSS uint8_t s_nmea_ring[kNmeaRingSize];
 volatile size_t s_nmea_head = 0;
 volatile size_t s_nmea_tail = 0;
 char s_nmea_line[128];
 size_t s_nmea_line_len = 0;
 
-// RF RX PCM ring (producer: audio task via router sink, consumer: aprs task)
+// RX PCM rings (producer: audio task via router sink, consumer: aprs task).
+// Two independent rings so the mic tap and the NRL downlink tap demodulate
+// in parallel on separate modem instances instead of mixing into one stream:
+// ring 0 = AUDIO_SRC_MIC (demodulator 0), ring 1 = AUDIO_SRC_NRL_DOWNLINK
+// (demodulator 1). Decoded frames carry the demodulator index back out.
 NRL_PSRAM_BSS int16_t s_rx_ring_storage[kRxRingSamples];
 int16_t *s_rx_ring = s_rx_ring_storage;
 volatile size_t s_rx_head = 0;
 volatile size_t s_rx_tail = 0;
-// 16000 -> 9600 linear-interpolation resampler state (Q16 phase)
+NRL_PSRAM_BSS int16_t s_rx_nrl_ring_storage[kRxRingSamples];
+int16_t *s_rx_nrl_ring = s_rx_nrl_ring_storage;
+volatile size_t s_rx_nrl_head = 0;
+volatile size_t s_rx_nrl_tail = 0;
+// 16000 -> 9600 linear-interpolation resampler state (Q16 phase), one per ring
 uint32_t s_resample_phase = 0;
 int16_t s_resample_last = 0;
-// running RMS estimate of the mic tap, for the modem's signal report
+uint32_t s_resample_nrl_phase = 0;
+int16_t s_resample_nrl_last = 0;
+// running RMS estimate of each tap, for the modem's signal report
 uint32_t s_rx_level_acc = 0;
 uint16_t s_rx_level_mv = 0;
 uint32_t s_rx_level_n = 0;
+uint32_t s_rx_nrl_level_acc = 0;
+uint16_t s_rx_nrl_level_mv = 0;
+uint32_t s_rx_nrl_level_n = 0;
 
 // APRS-IS client state. The socket is owned exclusively by the APRS task;
 // other threads request a reconnect via the flag instead of closing it.
@@ -191,6 +209,20 @@ uint32_t s_last_packet_seq = 0;
 // TX pacing
 bool s_tx_pumping = false;
 uint32_t s_last_beacon_ms = 0; // 0 = beacon at the next enabled task tick
+
+// Manual text message: single pending slot filled by the public API from any
+// task, consumed (and transmitted) by the APRS task that owns the APRS-IS
+// socket and the modem TX queue.
+constexpr size_t kMsgDestMax = 9u;   // AX.25 callsign-SSID field width
+constexpr size_t kMsgTextMax = 67u;  // APRS message body limit (bytes)
+char s_msg_dest[kMsgDestMax + 1u] = {};
+char s_msg_text[kMsgTextMax + 1u] = {};
+volatile bool s_msg_pending = false;
+uint32_t s_msg_seq = 0;
+// Gateway: pacing for relayed AFSK frames so a busy APRS-IS feed or a
+// chattering RF channel cannot peg the modulator (beacons/messages share it).
+constexpr uint32_t kFwdAfskMinGapMs = 1000u;
+uint32_t s_last_fwd_afsk_ms = 0;
 // Position when the last beacon left with a live fix, for the auto-interval
 // movement trigger. Task-private (aprsTask writes and reads).
 double s_last_beacon_lat = 0.0;
@@ -274,6 +306,13 @@ void defaultConfig(AprsConfig &cfg)
     cfg.net_enabled = true;
     cfg.rf_tx_enabled = false;
     cfg.rf_rx_enabled = false;
+    cfg.nrl_tx_enabled = false;
+    cfg.nrl_rx_enabled = false;
+    memset(cfg.fwd, 0, sizeof(cfg.fwd));
+    // Classic iGate behaviour on by default: locally heard traffic is
+    // uploaded to APRS-IS; everything else stays off until opted in.
+    cfg.fwd[APRS_FWD_RF_TO_IS] = true;
+    cfg.fwd[APRS_FWD_NRL_TO_IS] = true;
     cfg.ssid = 5;
     cfg.symbol_table = '/';
     cfg.symbol_code = 'I'; // APRS TCP/IP symbol (/I)
@@ -314,6 +353,11 @@ void persistConfig()
                  s_cfg.comment, strlen(s_cfg.comment));
     copyUtf8Text(blob.comment_v3, sizeof(blob.comment_v3),
                  s_cfg.comment, strlen(s_cfg.comment));
+    blob.nrl_tx_enabled = s_cfg.nrl_tx_enabled ? 1 : 0;
+    blob.nrl_rx_enabled = s_cfg.nrl_rx_enabled ? 1 : 0;
+    for (size_t i = 0; i < APRS_FWD_COUNT; ++i) {
+        blob.fwd[i] = s_cfg.fwd[i] ? 1 : 0;
+    }
 
     nvs_handle_t nvs;
     if (nvs_open(kNvsNamespace, NVS_READWRITE, &nvs) == ESP_OK) {
@@ -395,6 +439,19 @@ void loadConfig()
                                                         : sizeof(blob.comment_legacy));
     copyUtf8Text(s_cfg.comment, sizeof(s_cfg.comment), saved_comment,
                  strnlen(saved_comment, saved_capacity));
+    const bool has_nrl_switches =
+        size >= offsetof(PersistBlob, nrl_rx_enabled) + sizeof(blob.nrl_rx_enabled);
+    if (has_nrl_switches) {
+        s_cfg.nrl_tx_enabled = blob.nrl_tx_enabled != 0;
+        s_cfg.nrl_rx_enabled = blob.nrl_rx_enabled != 0;
+    }
+    const bool has_fwd_switches =
+        size >= offsetof(PersistBlob, fwd) + sizeof(blob.fwd);
+    if (has_fwd_switches) {
+        for (size_t i = 0; i < APRS_FWD_COUNT; ++i) {
+            s_cfg.fwd[i] = blob.fwd[i] != 0;
+        }
+    } // else keep the defaults (RF/NRL -> IS on)
     const bool migrate_extended_comment = !has_comment_v3;
     if (migrate_zero_position || migrate_aprs_server || migrate_tcpip_symbol ||
         migrate_extended_comment) {
@@ -964,6 +1021,10 @@ bool parseTnc2(const char *line_in, bool via_rf)
 
 // --------------------------------------------------------------- APRS-IS ----
 
+// Gateway helpers implemented further down in the RF RX section.
+bool fwdIsOwnSource(const char *line, const char *call);
+bool fwdToAfsk(const char *line, bool sanitize, bool add_own_digi);
+
 void isDisconnect()
 {
     if (s_is_socket >= 0) {
@@ -1089,6 +1150,19 @@ void isPoll()
                     s_is_line[s_is_line_len] = '\0';
                     if (s_is_line[0] != '#') { // '#' = server chatter
                         parseTnc2(s_is_line, false);
+                        // Gateway: relay IS traffic onto the AFSK channels.
+                        // Each direction also needs its transmitter route on;
+                        // IS-only header entries get stripped before TX.
+                        lockCfg();
+                        const bool is_to_afsk =
+                            (s_cfg.fwd[APRS_FWD_IS_TO_RF] && s_cfg.rf_tx_enabled) ||
+                            (s_cfg.fwd[APRS_FWD_IS_TO_NRL] && s_cfg.nrl_tx_enabled);
+                        char call[16];
+                        myCallsign(call, sizeof(call));
+                        unlockCfg();
+                        if (is_to_afsk && !fwdIsOwnSource(s_is_line, call)) {
+                            fwdToAfsk(s_is_line, true, false);
+                        }
                     }
                     s_is_line_len = 0;
                 }
@@ -1165,7 +1239,9 @@ bool sendBeacon()
 {
     lockCfg();
     const bool net = s_cfg.net_enabled;
-    const bool rf = s_cfg.rf_tx_enabled;
+    // One modem TX queue feeds both audio destinations; the router fan-out
+    // (see applyRouteState) decides speaker and/or NRL uplink.
+    const bool rf = s_cfg.rf_tx_enabled || s_cfg.nrl_tx_enabled;
     const bool can_beacon = beaconPositionAllowed();
     char call[16];
     myCallsign(call, sizeof(call));
@@ -1276,6 +1352,67 @@ bool sendBeacon()
 
 // ------------------------------------------------------------------ RF TX ---
 
+// Transmit the pending manual text message on every enabled path. Runs on
+// the APRS task (socket + modem TX queue owner). The APRS message format is
+// ":ADDRESSEE:payload" with the addressee field space-padded to 9 chars;
+// a {seq suffix marks it as an acknowledged-style message.
+void sendMessage()
+{
+    char dest[kMsgDestMax + 1u];
+    char text[kMsgTextMax + 1u];
+    snprintf(dest, sizeof(dest), "%s", s_msg_dest);
+    snprintf(text, sizeof(text), "%s", s_msg_text);
+
+    lockCfg();
+    const bool net = s_cfg.net_enabled;
+    const bool rf = s_cfg.rf_tx_enabled || s_cfg.nrl_tx_enabled;
+    char call[16];
+    myCallsign(call, sizeof(call));
+    char path[17];
+    strncpy(path, s_cfg.path, sizeof(path));
+    path[sizeof(path) - 1] = '\0';
+    unlockCfg();
+
+    // 9-char addressee field, right-padded with spaces per APRS spec.
+    char addr[kMsgDestMax + 1u];
+    memset(addr, ' ', kMsgDestMax);
+    addr[kMsgDestMax] = '\0';
+    memcpy(addr, dest, strlen(dest));
+
+    s_msg_seq = (s_msg_seq + 1u) % 100000u;
+    char info[200];
+    snprintf(info, sizeof(info), ":%s:%s{%lu", addr, text,
+             static_cast<unsigned long>(s_msg_seq));
+
+    if (net && s_is_socket >= 0 && s_is_logged_in) {
+        char line[384];
+        snprintf(line, sizeof(line), "%s>NRLBOX,TCPIP*:%s", call, info);
+        isSendLine(line);
+        s_tx_count++;
+        ESP_LOGI(TAG, "message -> IS: %s", info);
+    }
+
+    if (rf) {
+        char frame_txt[320];
+        if (path[0] != '\0') {
+            snprintf(frame_txt, sizeof(frame_txt), "%s>NRLBOX,%s:%s", call, path, info);
+        } else {
+            snprintf(frame_txt, sizeof(frame_txt), "%s>NRLBOX:%s", call, info);
+        }
+        ax25frame frame;
+        if (ax25_encode(frame, frame_txt, (int)strlen(frame_txt))) {
+            static AX25Ctx ctx;
+            static uint8_t raw[AX25_FRAME_MAX_SIZE];
+            const int size = hdlcFrame(raw, sizeof(raw), &ctx, &frame);
+            if (size > 0 && Ax25WriteTxFrame(raw, (uint16_t)size) != nullptr) {
+                Ax25TransmitBuffer();
+                s_tx_count++;
+                ESP_LOGI(TAG, "message -> AFSK: %s", info);
+            }
+        }
+    }
+}
+
 void txPump()
 {
     static int16_t chunk[kTxChunkSamples];
@@ -1322,60 +1459,254 @@ void txPump()
 
 // ------------------------------------------------------------------ RF RX ---
 
-// Audio-router sink callback (runs on the audio task): stash the mic tap into
-// the PSRAM ring; the APRS task resamples and demodulates it.
-void aprsSinkWrite(uint8_t /*source_id*/, const int16_t *samples,
-                   size_t sample_count, void *)
+// ------------------------------------------------------------- gateway fwd --
+
+// True when the TNC2 line was originated by this station (our own
+// callsign-SSID right before '>'); such packets must never be relayed back
+// towards any channel or the gateway loops on its own traffic.
+bool fwdIsOwnSource(const char *line, const char *call)
 {
-    if (s_rx_ring == nullptr) {
-        return;
-    }
-    size_t head = s_rx_head;
-    for (size_t i = 0; i < sample_count; ++i) {
-        const size_t next = (head + 1) % kRxRingSamples;
-        if (next == s_rx_tail) {
-            break; // ring full; drop the rest
-        }
-        s_rx_ring[head] = samples[i];
-        head = next;
-    }
-    s_rx_head = head;
+    const size_t n = strlen(call);
+    return strncmp(line, call, n) == 0 && line[n] == '>';
 }
 
-void rxDemodPoll()
+// True when the header path contains an APRS-IS q construct (",qAR," etc.):
+// the packet already passed a gate and must not be gated to IS again.
+bool fwdHasQConstruct(const char *line)
 {
-    if (s_rx_ring == nullptr) {
+    const char *colon = strchr(line, ':');
+    const size_t head_len = (colon != nullptr)
+                                ? (size_t)(colon - line)
+                                : strlen(line);
+    for (size_t i = 1; i + 2 < head_len; ++i) {
+        if (line[i] == ',' && line[i + 1] == 'q' && isalpha((unsigned char)line[i + 2])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// True when the header path already lists `call` as a digipeater. Used to
+// stop RF<->NRL ping-pong between two gateway nodes: each hop appends its
+// own callsign when relaying, so a returning copy is recognized and dropped.
+bool fwdPathContainsCall(const char *line, const char *call)
+{
+    const char *gt = strchr(line, '>');
+    const char *colon = strchr(line, ':');
+    if (gt == nullptr || colon == nullptr || colon <= gt) {
+        return false;
+    }
+    const size_t call_len = strlen(call);
+    for (const char *p = gt + 1; p < colon; ++p) {
+        if (*p != ',') continue;
+        if ((size_t)(colon - (p + 1)) >= call_len &&
+            strncmp(p + 1, call, call_len) == 0) {
+            const char after = p[1 + call_len];
+            if (after == ',' || after == ':' || after == '*') {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Upload a locally heard packet to APRS-IS with the qAR construct (iGate).
+void fwdToIs(const char *line, const char *call)
+{
+    const char *colon = strchr(line, ':');
+    if (colon == nullptr) {
         return;
     }
-    // Resample 16 kHz -> 9600 Hz (linear interpolation, 5:3) and feed the
-    // demodulator sample-by-sample.
-    constexpr uint32_t kStep = (uint32_t)(65536.0 * 16000.0 / MODEM_RX_SAMPLE_RATE);
-    while (s_rx_tail != s_rx_head) {
-        const int16_t sample = s_rx_ring[s_rx_tail];
-        s_rx_tail = (s_rx_tail + 1) % kRxRingSamples;
+    char fwd[440];
+    snprintf(fwd, sizeof(fwd), "%.*s,qAR,%s%s",
+             (int)(colon - line), line, call, colon);
+    isSendLine(fwd);
+}
 
-        s_rx_level_acc += (uint32_t)abs(sample);
-        if (++s_rx_level_n >= 1024) {
+// Rebuild a TNC2 header stripping APRS-IS-only digipeaters (q constructs,
+// TCPIP) so the frame is legal on an AFSK channel. Returns false when the
+// line is malformed.
+bool fwdSanitizeHeader(const char *line, char *out, size_t out_size)
+{
+    const char *colon = strchr(line, ':');
+    const char *gt = strchr(line, '>');
+    if (colon == nullptr || gt == nullptr || colon <= gt) {
+        return false;
+    }
+    size_t used = 0;
+    // SRC>DST prefix verbatim
+    const size_t prefix_len = (size_t)(gt - line) + 1u; // includes '>'
+    if (prefix_len >= out_size) {
+        return false;
+    }
+    memcpy(out, line, prefix_len);
+    used = prefix_len;
+    out[used] = '\0';
+    // walk the comma-separated digi list, dropping q*/TCPIP entries
+    const char *p = gt + 1;
+    while (p < colon) {
+        const char *comma = strchr(p, ',');
+        const char *end = (comma != nullptr && comma < colon) ? comma : colon;
+        const size_t tok_len = (size_t)(end - p);
+        char tok[12] = {};
+        const bool is_q = tok_len >= 2 && p[0] == 'q' &&
+                          isalpha((unsigned char)p[1]);
+        bool is_tcpip = false;
+        if (tok_len == 5 && strncasecmp(p, "TCPIP", 5) == 0) {
+            is_tcpip = true;
+        }
+        if (!is_q && !is_tcpip && tok_len > 0 && tok_len < sizeof(tok)) {
+            memcpy(tok, p, tok_len);
+            // strip a trailing '*' (heard marker) -- we re-add ourselves below
+            if (tok_len > 1 && tok[tok_len - 1] == '*') {
+                tok[tok_len - 1] = '\0';
+            }
+            if (used + 1 + strlen(tok) + 1 < out_size) {
+                out[used++] = ',';
+                memcpy(out + used, tok, strlen(tok));
+                used += strlen(tok);
+                out[used] = '\0';
+            }
+        }
+        p = (comma != nullptr && comma < colon) ? comma + 1 : colon;
+    }
+    if (used + strlen(colon) + 1 > out_size) {
+        return false;
+    }
+    memcpy(out + used, colon, strlen(colon) + 1);
+    return true;
+}
+
+// Inject a TNC2 line into the modem TX queue (AFSK out over whatever routes
+// are enabled: speaker and/or NRL uplink). `sanitize` strips IS-only header
+// entries first; `add_own_digi` appends our callsign to the path so other
+// gateway nodes can detect the hop and break RF<->NRL loops. Runs on the
+// APRS task only.
+bool fwdToAfsk(const char *line, bool sanitize, bool add_own_digi)
+{
+    const uint32_t now = nowMs();
+    if (now - s_last_fwd_afsk_ms < kFwdAfskMinGapMs) {
+        return false;
+    }
+    char txt[400];
+    if (sanitize) {
+        if (!fwdSanitizeHeader(line, txt, sizeof(txt))) {
+            return false;
+        }
+    } else {
+        snprintf(txt, sizeof(txt), "%s", line);
+    }
+    if (add_own_digi) {
+        char call[16];
+        lockCfg();
+        myCallsign(call, sizeof(call));
+        unlockCfg();
+        char *colon = strchr(txt, ':');
+        if (colon != nullptr && strlen(txt) + strlen(call) + 1 < sizeof(txt)) {
+            memmove(colon + strlen(call) + 1, colon, strlen(colon) + 1);
+            *colon = ',';
+            memcpy(colon + 1, call, strlen(call));
+        }
+    }
+    ax25frame frame;
+    if (!ax25_encode(frame, txt, (int)strlen(txt))) {
+        return false;
+    }
+    static AX25Ctx ctx;
+    static uint8_t raw[AX25_FRAME_MAX_SIZE];
+    const int size = hdlcFrame(raw, sizeof(raw), &ctx, &frame);
+    if (size <= 0 || Ax25WriteTxFrame(raw, (uint16_t)size) == nullptr) {
+        return false;
+    }
+    Ax25TransmitBuffer();
+    s_last_fwd_afsk_ms = now;
+    ESP_LOGI(TAG, "gateway -> AFSK: %s", txt);
+    return true;
+}
+
+// Audio-router sink callback (runs on the audio task): stash each tap into
+// its own PSRAM ring; the APRS task resamples and demodulates both. Ring 0
+// takes the mic (RF), ring 1 the NRL downlink.
+void aprsSinkWrite(uint8_t source_id, const int16_t *samples,
+                   size_t sample_count, void *)
+{
+    int16_t *ring = s_rx_ring;
+    volatile size_t *head_ptr = &s_rx_head;
+    volatile size_t tail = s_rx_tail;
+    if (source_id == AUDIO_SRC_NRL_DOWNLINK) {
+        if (s_rx_nrl_ring == nullptr) {
+            return;
+        }
+        ring = s_rx_nrl_ring;
+        head_ptr = &s_rx_nrl_head;
+        tail = s_rx_nrl_tail;
+    } else if (s_rx_ring == nullptr) {
+        return;
+    }
+    size_t head = *head_ptr;
+    for (size_t i = 0; i < sample_count; ++i) {
+        const size_t next = (head + 1) % kRxRingSamples;
+        if (next == tail) {
+            break; // ring full; drop the rest
+        }
+        ring[head] = samples[i];
+        head = next;
+    }
+    *head_ptr = head;
+}
+
+// Resample one 16 kHz ring to 9600 Hz (linear interpolation, 5:3) and feed
+// the given demodulator instance sample-by-sample.
+void rxDemodRing(const int16_t *ring, volatile size_t *head_ptr,
+                 volatile size_t *tail_ptr, uint32_t *phase, int16_t *last,
+                 uint32_t *level_acc, uint16_t *level_mv, uint32_t *level_n,
+                 uint8_t demod)
+{
+    constexpr uint32_t kStep = (uint32_t)(65536.0 * 16000.0 / MODEM_RX_SAMPLE_RATE);
+    size_t tail = *tail_ptr;
+    const size_t head = *head_ptr;
+    while (tail != head) {
+        const int16_t sample = ring[tail];
+        tail = (tail + 1) % kRxRingSamples;
+
+        *level_acc += (uint32_t)abs(sample);
+        if (++(*level_n) >= 1024) {
             // rough mean-abs -> mV-ish figure for the modem signal report
-            s_rx_level_mv = (uint16_t)((s_rx_level_acc / 1024) >> 4);
-            s_rx_level_acc = 0;
-            s_rx_level_n = 0;
+            *level_mv = (uint16_t)((*level_acc / 1024) >> 4);
+            *level_acc = 0;
+            *level_n = 0;
         }
 
-        s_resample_phase += 65536u;
-        while (s_resample_phase >= kStep) {
-            s_resample_phase -= kStep;
+        *phase += 65536u;
+        while (*phase >= kStep) {
+            *phase -= kStep;
             // interpolate between the previous and current input sample --
             // linear is plenty for AFSK tones at this oversampling. frac in
             // [0..256]: 0 = at the current sample, 256 = at the previous one.
             const int32_t frac =
-                (int32_t)(((uint64_t)s_resample_phase << 8) / kStep);
+                (int32_t)(((uint64_t)*phase << 8) / kStep);
             const int32_t out =
                 (int32_t)sample +
-                ((((int32_t)s_resample_last - (int32_t)sample) * frac) >> 8);
-            MODEM_DECODE((int16_t)out, s_rx_level_mv);
+                ((((int32_t)*last - (int32_t)sample) * frac) >> 8);
+            MODEM_DECODE_CH((int16_t)out, *level_mv, demod);
         }
-        s_resample_last = sample;
+        *last = sample;
+    }
+    *tail_ptr = tail;
+}
+
+void rxDemodPoll()
+{
+    if (s_rx_ring != nullptr) {
+        rxDemodRing(s_rx_ring, &s_rx_head, &s_rx_tail, &s_resample_phase,
+                    &s_resample_last, &s_rx_level_acc, &s_rx_level_mv,
+                    &s_rx_level_n, 0);
+    }
+    if (s_rx_nrl_ring != nullptr) {
+        rxDemodRing(s_rx_nrl_ring, &s_rx_nrl_head, &s_rx_nrl_tail,
+                    &s_resample_nrl_phase, &s_resample_nrl_last,
+                    &s_rx_nrl_level_acc, &s_rx_nrl_level_mv,
+                    &s_rx_nrl_level_n, 1);
     }
 }
 
@@ -1387,7 +1718,9 @@ void rxFramePoll()
         int8_t peak = 0, valley = 0;
         uint8_t level = 0, corrected = 0;
         uint16_t mv = 0;
-        if (!Ax25ReadNextRxFrame(&frame, &size, &peak, &valley, &level, &corrected, &mv)) {
+        uint8_t rx_source = 0;
+        if (!Ax25ReadNextRxFrame(&frame, &size, &peak, &valley, &level,
+                                 &corrected, &mv, &rx_source)) {
             break;
         }
 
@@ -1422,25 +1755,38 @@ void rxFramePoll()
         memcpy(line + off, msg.info, info_len);
         line[off + (int)info_len] = '\0';
 
+        // Demodulator index tags the origin channel: 0 = mic (RF),
+        // 1 = NRL network downlink.
+        const bool via_nrl = rx_source == 1u;
         s_rx_count++;
-        ESP_LOGI(TAG, "RF RX: %s", line);
+        ESP_LOGI(TAG, "%s RX: %s", via_nrl ? "NRL" : "RF", line);
         parseTnc2(line, true);
 
-        // iGate: forward RF-heard traffic to APRS-IS with the qAR construct
+        // Gateway: relay the packet per the forwarding switches. Own traffic
+        // and already-gated packets (q constructs) are never re-gated to IS;
+        // RF<->NRL hops append our callsign so returning copies are dropped.
         lockCfg();
         const bool net = s_cfg.net_enabled;
+        const bool fwd_is = s_cfg.fwd[via_nrl ? APRS_FWD_NRL_TO_IS
+                                              : APRS_FWD_RF_TO_IS];
+        const bool fwd_afsk_sw = s_cfg.fwd[via_nrl ? APRS_FWD_NRL_TO_RF
+                                                   : APRS_FWD_RF_TO_NRL];
+        // AFSK relay only makes sense when the destination transmitter is on:
+        // RF->NRL needs the NRL uplink, NRL->RF the speaker route.
+        const bool fwd_afsk = fwd_afsk_sw &&
+            (via_nrl ? s_cfg.rf_tx_enabled : s_cfg.nrl_tx_enabled);
         char call[16];
         myCallsign(call, sizeof(call));
         unlockCfg();
-        if (net && s_is_socket >= 0 && s_is_logged_in) {
-            char fwd[440];
-            const char *colon = strchr(line, ':');
-            if (colon != nullptr) {
-                const size_t head_len = (size_t)(colon - line);
-                snprintf(fwd, sizeof(fwd), "%.*s,qAR,%s%s",
-                         (int)head_len, line, call, colon);
-                isSendLine(fwd);
-            }
+        if (fwdIsOwnSource(line, call)) {
+            continue;
+        }
+        if (fwd_is && net && s_is_socket >= 0 && s_is_logged_in &&
+            !fwdHasQConstruct(line)) {
+            fwdToIs(line, call);
+        }
+        if (fwd_afsk && !fwdPathContainsCall(line, call)) {
+            fwdToAfsk(line, false, true);
         }
     }
 }
@@ -1452,6 +1798,16 @@ void modemPtt(bool on)
     // VOX keying only: the TXDelay preamble gives the radio's VOX time to
     // open. Kept as a hook for boards that grow a hard PTT line.
     ESP_LOGI(TAG, "PTT %s", on ? "on" : "off");
+    // Exclusive NRL uplink while the AFSK frame is on air: the modem audio
+    // must be the only producer in the G.711/Opus accumulator, so the mic
+    // (and BT headset mic) routes are parked for the duration.
+    lockCfg();
+    const bool nrl_tx = s_cfg.enabled && s_cfg.nrl_tx_enabled;
+    unlockCfg();
+    if (nrl_tx) {
+        AudioRouter_SetRoute(AUDIO_SRC_MIC, AUDIO_SINK_NRL_UPLINK, !on);
+        AudioRouter_SetRoute(AUDIO_SRC_BT_HFP_MIC, AUDIO_SINK_NRL_UPLINK, !on);
+    }
 }
 
 void applyRouteState()
@@ -1459,9 +1815,16 @@ void applyRouteState()
     lockCfg();
     const bool rx = s_cfg.enabled && s_cfg.rf_rx_enabled;
     const bool tx = s_cfg.enabled && s_cfg.rf_tx_enabled;
+    const bool nrl_tx = s_cfg.enabled && s_cfg.nrl_tx_enabled;
+    const bool nrl_rx = s_cfg.enabled && s_cfg.nrl_rx_enabled;
     unlockCfg();
     AudioRouter_SetRoute(AUDIO_SRC_MIC, AUDIO_SINK_APRS, rx);
     AudioRouter_SetRoute(AUDIO_SRC_APRS, AUDIO_SINK_SPEAKER, tx);
+    // NRL network audio path: 8 kHz AFSK is upsampled to the 16 kHz uplink
+    // sink at the router edge; the downlink arrives 8 kHz and is upsampled
+    // to the 16 kHz demodulator tap the same way.
+    AudioRouter_SetRoute(AUDIO_SRC_APRS, AUDIO_SINK_NRL_UPLINK, nrl_tx);
+    AudioRouter_SetRoute(AUDIO_SRC_NRL_DOWNLINK, AUDIO_SINK_APRS, nrl_rx);
 }
 
 void aprsTask(void *)
@@ -1573,6 +1936,10 @@ void aprsTask(void *)
         }
 
         Ax25TransmitCheck();
+        if (s_msg_pending) {
+            s_msg_pending = false;
+            sendMessage();
+        }
         txPump();
         rxDemodPoll();
         rxFramePoll();
@@ -1619,9 +1986,10 @@ extern "C" void APRS_SERVICE_Init(void)
             s_task = nullptr;
         }
     }
-    ESP_LOGI(TAG, "init: enabled=%d net=%d rf_tx=%d rf_rx=%d server=%s:%u",
+    ESP_LOGI(TAG, "init: enabled=%d net=%d rf_tx=%d rf_rx=%d nrl_tx=%d nrl_rx=%d server=%s:%u",
              (int)s_cfg.enabled, (int)s_cfg.net_enabled, (int)s_cfg.rf_tx_enabled,
-             (int)s_cfg.rf_rx_enabled, s_cfg.server_host, (unsigned)s_cfg.server_port);
+             (int)s_cfg.rf_rx_enabled, (int)s_cfg.nrl_tx_enabled,
+             (int)s_cfg.nrl_rx_enabled, s_cfg.server_host, (unsigned)s_cfg.server_port);
 }
 
 extern "C" bool APRS_SERVICE_SetEnabled(bool enabled)
@@ -1678,6 +2046,44 @@ extern "C" bool APRS_SERVICE_SetRfRxEnabled(bool enabled)
     persistConfig();
     unlockCfg();
     applyRouteState();
+    return true;
+}
+
+extern "C" bool APRS_SERVICE_SetNrlTxEnabled(bool enabled)
+{
+    if (s_cfg_mutex == nullptr) {
+        return false;
+    }
+    lockCfg();
+    s_cfg.nrl_tx_enabled = enabled;
+    persistConfig();
+    unlockCfg();
+    applyRouteState();
+    return true;
+}
+
+extern "C" bool APRS_SERVICE_SetNrlRxEnabled(bool enabled)
+{
+    if (s_cfg_mutex == nullptr) {
+        return false;
+    }
+    lockCfg();
+    s_cfg.nrl_rx_enabled = enabled;
+    persistConfig();
+    unlockCfg();
+    applyRouteState();
+    return true;
+}
+
+extern "C" bool APRS_SERVICE_SetFwdEnabled(AprsFwdDir dir, bool enabled)
+{
+    if (s_cfg_mutex == nullptr || (int)dir < 0 || dir >= APRS_FWD_COUNT) {
+        return false;
+    }
+    lockCfg();
+    s_cfg.fwd[dir] = enabled;
+    persistConfig();
+    unlockCfg();
     return true;
 }
 
@@ -1916,6 +2322,45 @@ extern "C" bool APRS_SERVICE_SendBeaconNow(void)
         return false;
     }
     s_last_beacon_ms = 0;
+    return true;
+}
+
+extern "C" bool APRS_SERVICE_SendMessage(const char *dest, const char *text)
+{
+    if (s_task == nullptr || !s_cfg.enabled || dest == nullptr || text == nullptr) {
+        return false;
+    }
+    // Addressee: A-Z 0-9 '-' only, at most 9 characters (callsign plus SSID).
+    const size_t dest_len = strlen(dest);
+    if (dest_len == 0u || dest_len > kMsgDestMax) {
+        return false;
+    }
+    for (size_t i = 0u; i < dest_len; ++i) {
+        const char c = dest[i];
+        const bool valid = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                           (c >= '0' && c <= '9') || c == '-';
+        if (!valid) {
+            return false;
+        }
+    }
+    // Message body: valid UTF-8 only, bounded by the APRS message width.
+    const size_t text_len = strlen(text);
+    if (text_len == 0u || text_len > kMsgTextMax ||
+        validUtf8Prefix(text, text_len, text_len) != text_len) {
+        return false;
+    }
+    if (s_msg_pending) {
+        return false; // the previous manual message has not gone out yet
+    }
+    char upper[kMsgDestMax + 1u];
+    for (size_t i = 0u; i < dest_len; ++i) {
+        const char c = dest[i];
+        upper[i] = (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c;
+    }
+    upper[dest_len] = '\0';
+    snprintf(s_msg_dest, sizeof(s_msg_dest), "%s", upper);
+    copyUtf8Text(s_msg_text, sizeof(s_msg_text), text, text_len);
+    s_msg_pending = true;
     return true;
 }
 

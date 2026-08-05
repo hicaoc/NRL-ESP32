@@ -2,6 +2,7 @@
 #include "driver/board_pins.h"
 
 #include <atomic>
+#include <ctime>
 #include <esp_log.h>
 #include <stdio.h>
 #include <freertos/FreeRTOS.h>
@@ -364,6 +365,8 @@ namespace {
 
 constexpr const char *kSmbNvsNamespace = "smb";
 constexpr uint32_t kSmbRetryMs = 30000u;
+// How often the mount task re-checks session health once mounted.
+constexpr uint32_t kSmbSupervisorPollMs = 5000u;
 
 static char s_smb_server[64] = {};
 static char s_smb_share[64] = {};
@@ -371,6 +374,14 @@ static char s_smb_user[32] = {};
 static char s_smb_pass[64] = {};
 static TaskHandle_t s_smb_task = nullptr;
 static volatile bool s_smb_task_restart = false;
+// Static internal stack for the permanent mount supervisor: it can be
+// (re)started at runtime (SMB config change), when the heap is already too
+// fragmented for a fresh 6 KB stack (same failure class as "player task
+// create failed"). The task is never deleted -- restarts go through
+// s_smb_task_restart -- so one static TCB/stack covers its lifetime.
+constexpr size_t kSmbTaskStackBytes = 6144u;
+static StackType_t s_smb_task_stack[kSmbTaskStackBytes / sizeof(StackType_t)];
+static StaticTask_t s_smb_task_tcb;
 
 static bool smb_load_config(void)
 {
@@ -405,8 +416,12 @@ static bool smb_save_config(void)
     return ok;
 }
 
-// Waits for WiFi, then mounts; keeps retrying while unreachable. Restarted
-// (via s_smb_task_restart) when the configuration changes.
+// Waits for WiFi, then mounts; keeps retrying while unreachable. Stays alive
+// after a successful mount as a supervisor: when the network drops and the
+// SMB session dies with it (WiFi loss, NAS reboot), it remounts once the
+// network is back and refreshes the playlist, instead of leaving the library
+// empty until the user retries manually. Restarted (via s_smb_task_restart)
+// when the configuration changes.
 static void smb_mount_task(void *)
 {
     while (true) {
@@ -414,22 +429,46 @@ static void smb_mount_task(void *)
         while (!nrlNetworkConnected() && !s_smb_task_restart) {
             vTaskDelay(pdMS_TO_TICKS(2000));
         }
-        if (!s_smb_task_restart) {
-            if (SMB_VFS_Mount(s_smb_server, s_smb_share, s_smb_user, s_smb_pass)) {
-                (void)PLAYLIST_Scan();
-                break; // mounted; a config change spawns a fresh task
+        if (s_smb_task_restart) {
+            continue;
+        }
+        // The first SNTP sync steps the wall clock from 1970 to now, and
+        // libsmb2's synchronous waits use time(NULL): an in-flight connect
+        // then aborts with "Timeout expired and no connection exists". Wait
+        // for the clock to settle before mounting, but cap the wait so
+        // networks without NTP still mount.
+        for (uint32_t waited = 0; waited < 20000u && !s_smb_task_restart;
+             waited += 500u) {
+            if (time(nullptr) >= 1704067200) {  // 2024-01-01 UTC
+                break;
             }
-            // Unreachable (NAS down, wrong credentials...): retry later.
-            for (uint32_t waited = 0; waited < kSmbRetryMs && !s_smb_task_restart; waited += 1000u) {
-                vTaskDelay(pdMS_TO_TICKS(1000));
-            }
+            vTaskDelay(pdMS_TO_TICKS(500));
         }
         if (s_smb_task_restart) {
             continue;
         }
+        if (SMB_VFS_Mounted()) {
+            // Healthy session: poll again shortly. A stale-but-not-yet-detected
+            // socket reconnects on demand inside the VFS, nothing to do here.
+            for (uint32_t waited = 0; waited < kSmbSupervisorPollMs &&
+                                        !s_smb_task_restart; waited += 1000u) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
+            continue;
+        }
+        if (SMB_VFS_Mount(s_smb_server, s_smb_share, s_smb_user, s_smb_pass)) {
+            (void)PLAYLIST_Scan();
+            // Let the on-screen music browser pick up the new /smb source
+            // without a manual Rescan. Scans whatever directory the display
+            // session is currently showing (usually the sources root).
+            (void)PLAYLIST_ClientScanAsync(PLAYLIST_CLIENT_DISPLAY);
+            continue;
+        }
+        // Unreachable (NAS down, wrong credentials...): retry later.
+        for (uint32_t waited = 0; waited < kSmbRetryMs && !s_smb_task_restart; waited += 1000u) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
     }
-    s_smb_task = nullptr;
-    vTaskDelete(nullptr);
 }
 
 static void smb_start_mount_task(void)
@@ -438,13 +477,29 @@ static void smb_start_mount_task(void)
         s_smb_task_restart = true;
         return;
     }
-    if (xTaskCreatePinnedToCore(smb_mount_task, "smb_mount", 6144, nullptr, 3, &s_smb_task, 0) != pdPASS) {
+    s_smb_task = xTaskCreateStaticPinnedToCore(smb_mount_task, "smb_mount",
+                                               kSmbTaskStackBytes, nullptr, 3,
+                                               s_smb_task_stack, &s_smb_task_tcb, 0);
+    if (s_smb_task == nullptr) {
         ESP_LOGE(TAG, "smb mount task create failed");
-        s_smb_task = nullptr;
     }
 }
 
 } // namespace
+
+extern "C" void STORAGE_SmbAutoStart(void)
+{
+    // Lazy mount: the supervisor task is started by the first playlist
+    // browse/play that could reach the share, not at boot. A boot-time
+    // mount+scan storm (SMB session, directory listing, playlist index)
+    // transiently exhausts internal RAM exactly when the boot OTA check
+    // fires its TLS handshake.
+    static bool smb_started = false;
+    if (!smb_started && smb_load_config()) {
+        smb_started = true;
+        smb_start_mount_task();
+    }
+}
 
 extern "C" bool STORAGE_SmbConfigure(const char *server, const char *share,
                                      const char *user, const char *password)
@@ -543,11 +598,5 @@ extern "C" bool STORAGE_Init(void)
         storage_start_usb_host();
     }
 #endif
-    // SMB share configured earlier: mount once either network is up.
-    static bool smb_started = false;
-    if (!smb_started && smb_load_config()) {
-        smb_started = true;
-        smb_start_mount_task();
-    }
     return STORAGE_SdMounted() || STORAGE_UsbMounted() || STORAGE_SmbMounted();
 }

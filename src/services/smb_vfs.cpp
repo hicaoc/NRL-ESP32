@@ -4,6 +4,7 @@
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <esp_vfs.h>
+#include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -37,6 +38,8 @@ constexpr int kMaxOpenFiles = 8;
 // reads, especially for large music folders. Ten seconds caused libsmb2 to
 // abort QUERY_DIRECTORY and made the browser drop the selected folder.
 constexpr int kSmbTimeoutSeconds = 30;
+// Proactive reconnect after this much idle time; see smb_ensure_connected_locked.
+constexpr int kIdleReconnectSeconds = 60;
 constexpr size_t kMaxCachedDirEntries = 640;
 constexpr size_t kDirectoryCacheSlots = 2;
 // A 4 KB reply is accepted reliably by slower NAS implementations and still
@@ -47,6 +50,10 @@ constexpr size_t kMaxDirectoryQueries = 64;
 // Memory remains bounded by kMaxCachedDirEntries, so waiting longer no longer
 // risks the TLS/Web heap exhaustion caused by high-level smb2_opendir().
 constexpr int kDirectoryCommandTimeoutMs = 15000;
+// CREATE (directory open) gets a shorter fuse than QUERY_DIRECTORY: it is a
+// tiny metadata exchange, so 5 s of silence already means the connection is
+// dead, and the VFS lock is held for the whole wait.
+constexpr int kDirectoryOpenTimeoutMs = 5000;
 constexpr int kDirectoryScanBudgetMs = 30000;
 constexpr size_t kMaxSmbText = 128;
 
@@ -57,6 +64,8 @@ static struct smb2_context *s_smb = nullptr;
 static struct smb2fh *s_files[kMaxOpenFiles] = {};
 static int s_open_dirs = 0;
 static bool s_smb_bad = false;
+// Last successful SMB round trip on the VFS context (esp_timer_get_time us).
+static int64_t s_last_activity_us = 0;
 static std::atomic_bool s_cancel_directory_scan{false};
 static std::atomic_bool s_cancel_file_read{false};
 static char s_server[kMaxSmbText] = {};
@@ -79,6 +88,9 @@ struct SmbVfsDir {
     size_t index;
     bool truncated;
     bool context_stale;
+    // Set when the scan was canceled locally (caller switched directories):
+    // control flow, not a connection failure, so the SMB session stays usable.
+    bool canceled;
     bool remote_open;
     bool first_query;
     bool finished;
@@ -160,6 +172,11 @@ static void smb_destroy_context_locked(void)
     s_smb = nullptr;
 }
 
+static void smb_touch_locked(void)
+{
+    s_last_activity_us = esp_timer_get_time();
+}
+
 static bool smb_connect_locked(void)
 {
     if (smb_has_open_handles_locked()) {
@@ -185,12 +202,30 @@ static bool smb_connect_locked(void)
         smb_destroy_context_locked();
         return false;
     }
+    smb_touch_locked();
     return true;
 }
 
 static bool smb_ensure_connected_locked(void)
 {
     if (s_smb != nullptr && !s_smb_bad) {
+        // The media stream uses its own SMB connection (smb_stream
+        // lane), so this VFS context is completely idle during
+        // playback -- and an idle TCP session is reaped by the
+        // AP/NAT or the server after a minute or two. The socket
+        // still looks healthy locally; the next command would
+        // discover the loss only after the full command timeout and
+        // the operation would fail. Rebuild the session proactively.
+        if (!smb_has_open_handles_locked() &&
+            esp_timer_get_time() - s_last_activity_us >=
+                static_cast<int64_t>(kIdleReconnectSeconds) * 1000000LL) {
+            ESP_LOGI(TAG, "SMB connection idle, reconnecting //%s/%s",
+                     s_server, s_share);
+            if (!smb_connect_locked()) {
+                errno = ENODEV;
+                return false;
+            }
+        }
         return true;
     }
     if (smb_has_open_handles_locked()) {
@@ -251,6 +286,7 @@ static bool smb_wait_async_locked(volatile size_t *completed,
         }
     }
     if (!aborted) {
+        smb_touch_locked();
         return true;
     }
     s_smb_bad = true;
@@ -602,7 +638,11 @@ static bool raw_open_directory(const char *path, smb2_file_id file_id)
         return false;
     }
     smb2_queue_pdu(s_smb, pdu);
-    if (!raw_wait_for_reply(&result, kDirectoryCommandTimeoutMs) ||
+    // CREATE is pure metadata (fast on a healthy LAN); a shorter timeout than
+    // QUERY_DIRECTORY keeps a dead connection from holding the VFS lock for
+    // the full command timeout while every other VFS user (UI included)
+    // blocks behind it. Background remount is the mount supervisor's job.
+    if (!raw_wait_for_reply(&result, kDirectoryOpenTimeoutMs) ||
         result.status != SMB2_STATUS_SUCCESS) {
         return false;
     }
@@ -631,7 +671,7 @@ static bool raw_read_directory_batch(SmbVfsDir *dir)
     }
     if (s_cancel_directory_scan.load()) {
         ESP_LOGI(TAG, "directory scan canceled: %s", dir->path);
-        dir->context_stale = true;
+        dir->canceled = true;
         dir->truncated = true;
         dir->finished = true;
         return dir->count > 0u;
@@ -669,12 +709,13 @@ static bool raw_read_directory_batch(SmbVfsDir *dir)
         if (s_cancel_directory_scan.load()) {
             ESP_LOGI(TAG, "directory query canceled with %u entries cached",
                      static_cast<unsigned>(dir->count));
+            dir->canceled = true;
         } else {
             ESP_LOGW(TAG, "directory query %u timed out with %u entries cached",
                      static_cast<unsigned>(dir->query_count + 1u),
                      static_cast<unsigned>(dir->count));
+            dir->context_stale = true;
         }
-        dir->context_stale = true;
         dir->truncated = true;
         dir->finished = true;
         return dir->count > 0u;
@@ -735,10 +776,20 @@ static DIR *vfs_opendir(void *, const char *path)
 
     ESP_LOGI(TAG, "directory scan started: %s", path);
 
+    // Fail fast on a dead connection: the inline reconnect+retry that used to
+    // sit here held the VFS lock through a synchronous connect (15-30 s),
+    // freezing every other VFS user (the UI scan status included). Recovery is
+    // the mount supervisor's job; it remounts and rescans in the background.
     if (!raw_open_directory(path, dir->file_id)) {
         const char *error = s_smb != nullptr ? smb2_get_error(s_smb)
                                              : "connection aborted";
-        ESP_LOGW(TAG, "open directory %s failed: %s", path, error);
+        // Heap telemetry on the failure path: an internal-RAM squeeze stalls
+        // lwIP/AES allocs and looks exactly like a dead NAS (5 s CREATE
+        // timeout), so record whether memory was actually tight.
+        ESP_LOGW(TAG, "open directory %s failed: %s (dram free=%u largest=%u)",
+                 path, error,
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
         s_smb_bad = true;
         release_directory_cache(dir->cache_slot);
         free(dir);
@@ -761,6 +812,8 @@ static void finish_remote_dir_locked(SmbVfsDir *dir)
     if (dir->context_stale || s_smb == nullptr || s_smb_bad) {
         s_smb_bad = true;
     } else if (!raw_close_directory(dir->file_id)) {
+        // A canceled scan takes this branch too: the session is healthy, so
+        // the handle is closed normally and s_smb_bad is left alone.
         const char *error = s_smb != nullptr ? smb2_get_error(s_smb)
                                              : "connection aborted";
         ESP_LOGW(TAG, "close directory %s failed: %s", dir->path, error);
@@ -774,10 +827,12 @@ static void finish_remote_dir_locked(SmbVfsDir *dir)
         ESP_LOGW(TAG, "directory %s limited to %u entries", dir->path,
                  static_cast<unsigned>(dir->count));
     }
-    ESP_LOGI(TAG, "directory scan finished: %s, %u entries, %lld ms%s",
+    ESP_LOGI(TAG, "directory scan finished: %s, %u entries, %lld ms%s (dram free=%u min=%u)",
              dir->path, static_cast<unsigned>(dir->count),
              static_cast<long long>((esp_timer_get_time() - dir->scan_started_us) / 1000LL),
-             dir->truncated ? " (partial)" : "");
+             dir->truncated ? " (partial)" : "",
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)));
 }
 
 static struct dirent *vfs_readdir(void *, DIR *pdir)
@@ -790,7 +845,11 @@ static struct dirent *vfs_readdir(void *, DIR *pdir)
         LockGuard lock;
         if (s_smb == nullptr || s_smb_bad || !raw_read_directory_batch(dir)) {
             dir->finished = true;
-            dir->context_stale = true;
+            // A canceled empty scan returns false too; that is local control
+            // flow, not a stale connection.
+            if (!dir->canceled) {
+                dir->context_stale = true;
+            }
         }
         if (dir->finished) {
             finish_remote_dir_locked(dir);

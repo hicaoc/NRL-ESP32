@@ -85,6 +85,9 @@ bool BI4UMD_Display_Init(esp_lcd_panel_io_handle_t *panel_io)
     io_config.trans_queue_depth = 10;
     io_config.lcd_cmd_bits = 8;
     io_config.lcd_param_bits = 8;
+    // The LVGL render buffer lives in PSRAM: DMA straight from it instead of
+    // bounce-copying every flush through an internal temporary buffer.
+    io_config.flags.psram_dma_direct = 1;
     if (esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, panel_io) != ESP_OK) {
         return false;
     }

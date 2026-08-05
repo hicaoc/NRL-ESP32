@@ -7,6 +7,7 @@
 
 #include <esp_efuse.h>
 #include <esp_event.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_mac.h>
 #include <esp_netif.h>
@@ -111,9 +112,16 @@ namespace
                 s_sta_associated = false;
                 s_sta_has_ip = false;
                 s_last_disconnect_reason = e->reason;
-                ESP_LOGW(TAG, "evt STA_DISCONNECTED reason=%u (%s)",
+                int rssi = 0;
+                (void)esp_wifi_sta_get_rssi(&rssi);
+                // Heap snapshot pins "driver starved of internal RAM"
+                // vs RF/software causes when the link drops mid-traffic.
+                ESP_LOGW(TAG, "evt STA_DISCONNECTED reason=%u (%s) rssi=%d dram free=%u largest=%u min=%u",
                          static_cast<unsigned>(e->reason),
-                         disconnectReasonText(e->reason));
+                         disconnectReasonText(e->reason), rssi,
+                         static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+                         static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)));
                 break;
             }
             case WIFI_EVENT_AP_START:

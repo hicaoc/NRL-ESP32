@@ -12,6 +12,12 @@ endif()
 # pulls. This matters on S31, where the registry copy rejects the esp32s31 target;
 # the vendored copy supports it and registers as an empty component there (see
 # vendor/h2zero__esp-nimble-cpp/CMakeLists.txt), since S31 uses the Bluedroid host.
+# The vendored gmf_core overrides the registry copy: it carries the NRL patch
+# for the zero-copy payload leak in esp_gmf_io_acquire_read (every decode input
+# cycle orphaned a freshly realloc'd payload buffer, ~100 KB/s of PSRAM).
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/vendor/espressif__gmf_core/CMakeLists.txt")
+    list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/vendor/espressif__gmf_core")
+endif()
 if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/vendor/h2zero__esp-nimble-cpp/CMakeLists.txt")
     list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/vendor/h2zero__esp-nimble-cpp")
 endif()

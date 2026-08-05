@@ -7,10 +7,13 @@
 #include "../lib/nrl_wifi.h"
 #include "config_notify.h"
 #include "display_notice.h"
+#include "lib/nrl_psram.h"
+#include "music_player.h"
 
 #include <esp_crt_bundle.h>
 #include <esp_heap_caps.h>
 #include <esp_http_client.h>
+#include <esp_heap_caps.h>
 #include <esp_https_ota.h>
 #include <esp_log.h>
 #include <esp_mac.h>
@@ -34,6 +37,15 @@ constexpr const char *kNvsNamespace = "nrl_ota";
 constexpr const char *kDefaultServerUrl = "https://ota.nrlptt.com";
 constexpr uint32_t kCheckPeriodMs = 60u * 60u * 1000u;
 constexpr uint32_t kBootCheckDelayMs = 30u * 1000u;
+// A failed check retries in 5 minutes instead of waiting a full period: boot
+// checks land in the SMB-mount/scan window where internal RAM is transiently
+// exhausted, and that failure heals itself once boot settles.
+constexpr uint32_t kFailRetryMs = 5u * 60u * 1000u;
+// Automatic checks additionally wait for internal RAM headroom: below these
+// thresholds the check predictably dies in getaddrinfo/TLS allocation (see
+// the "check failed" heap logs). User-requested checks bypass the gate.
+constexpr uint32_t kMinInternalFreeForCheck = 16u * 1024u;
+constexpr uint32_t kMinInternalLargestForCheck = 8u * 1024u;
 
 struct OtaState {
     NrlOtaStatus status = {};
@@ -45,7 +57,7 @@ struct OtaState {
     SemaphoreHandle_t lock = nullptr;
 };
 
-OtaState s_ota;
+NRL_PSRAM_BSS OtaState s_ota;
 
 uint32_t nowMs()
 {
@@ -167,7 +179,9 @@ void finishReleaseCheck(bool ok)
 {
     xSemaphoreTake(s_ota.lock, portMAX_DELAY);
     s_ota.status.checking = false;
-    s_ota.status.last_check_ms = nowMs();
+    // Backdate failures so the next automatic check comes in kFailRetryMs
+    // rather than a full kCheckPeriodMs after a transient (memory-shaped) miss.
+    s_ota.status.last_check_ms = ok ? nowMs() : nowMs() - (kCheckPeriodMs - kFailRetryMs);
     if (ok) s_ota.status.last_error[0] = '\0';
     xSemaphoreGive(s_ota.lock);
 }
@@ -374,6 +388,7 @@ bool installVersion(const char *version)
 void otaTask(void *)
 {
     const uint32_t boot_ms = nowMs();
+    bool s_low_mem_defer_logged = false;
     while (true) {
         bool do_check = false, do_update = false, update_after_check = false;
         char version[NRL_OTA_VERSION_MAX] = {};
@@ -381,15 +396,57 @@ void otaTask(void *)
         const bool due = s_ota.status.configured &&
                          (nowMs() - s_ota.status.last_check_ms >= kCheckPeriodMs ||
                           (s_ota.status.last_check_ms == 0u && nowMs() - boot_ms >= kBootCheckDelayMs));
-        do_check = s_ota.check_requested || due;
+        // A TLS handshake spikes tens of KB of internal RAM; running one
+        // while music plays starves lwIP/GMF (SMB stalls, decode OOM, failed
+        // DNS). Defer checks to an idle moment instead of failing mid-track.
+        const bool playing = MUSIC_IsPlaying();
+        do_check = (s_ota.check_requested || due) && !playing;
+        if (do_check && !s_ota.check_requested) {
+            // Internal RAM must have room for the TLS handshake/lwIP churn;
+            // a boot-time scan storm can squeeze it to single-digit KB for a
+            // while. Automatic checks defer (they stay due and fire as soon
+            // as the heap recovers); manual checks run regardless.
+            const uint32_t free_int =
+                static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+            const uint32_t largest_int =
+                static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+            if (free_int < kMinInternalFreeForCheck ||
+                largest_int < kMinInternalLargestForCheck) {
+                do_check = false;
+                if (!s_low_mem_defer_logged) {
+                    s_low_mem_defer_logged = true;
+                    ESP_LOGI(TAG, "check deferred: internal free=%u largest=%u",
+                             static_cast<unsigned>(free_int),
+                             static_cast<unsigned>(largest_int));
+                }
+            }
+        }
+        if (do_check) {
+            s_low_mem_defer_logged = false;
+            s_ota.check_requested = false;
+        }
         do_update = s_ota.update_requested;
         update_after_check = s_ota.update_after_check;
         copyText(version, sizeof(version), s_ota.requested_version);
-        s_ota.check_requested = false;
         s_ota.update_requested = false;
         s_ota.update_after_check = false;
         xSemaphoreGive(s_ota.lock);
+        if (do_check) {
+            // TLS failures on this device are memory-shaped; log the heap so
+            // "PSA -141 / alloc failed" can be told apart from server issues.
+            ESP_LOGI(TAG, "check start: internal free=%u largest=%u | psram free=%u largest=%u",
+                     static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                     static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+                     static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+                     static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
+        }
         const bool check_ok = !do_check || checkForReleases();
+        if (do_check && !check_ok) {
+            ESP_LOGW(TAG, "check failed: internal free=%u largest=%u min=%u",
+                     static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                     static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+                     static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)));
+        }
         if (do_update) {
             (void)installVersion(version);
         } else if (update_after_check && check_ok) {

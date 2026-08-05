@@ -1,150 +1,93 @@
 #include "media/media_decoder.h"
 
 #include <esp_audio_dec_default.h>
+#include <esp_audio_dec_reg.h>
 #include <esp_audio_simple_dec.h>
 #include <esp_audio_simple_dec_default.h>
-#include <esp_crt_bundle.h>
+#include <esp_fourcc.h>
 #include <esp_heap_caps.h>
-#include <esp_http_client.h>
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/idf_additions.h>
 #include <freertos/task.h>
 
-#include <errno.h>
-#include <stdio.h>
 #include <string.h>
-#include <strings.h>
+
+#include "esp_gmf_audio_dec.h"
+#include "esp_gmf_audio_helper.h"
+#include "esp_gmf_io_file.h"
+#include "esp_gmf_pipeline.h"
+#include "esp_gmf_pool.h"
+#include "esp_gmf_port.h"
+#include "esp_hls_io.h"
 
 #include "lib/nrl_psram.h"
-#include "services/smb_stream.h"
+#include "media/gmf_io_radio.h"
+#include "media/gmf_io_smb.h"
 #include "services/smb_vfs.h"
 
 static const char *TAG = "MDEC";
 
 namespace {
 
-// 32 KB: the TS demux (HLS) buffers considerably more input than the plain
-// frame parsers before reporting progress; at 8 KB it stalled with a full
-// buffer and playback ended after the first fraction of a second.
-constexpr size_t kRawBufferBytes = 32 * 1024;
-// The elementary FLAC parser is happier when fed like Espressif's simple
-// decoder tests: small raw chunks, then keep passing the unconsumed window.
-// Larger 32 KB chunks are still needed by TS/HLS demux.
-constexpr size_t kFlacRawChunkBytes = 512;
-// FLAC blocks can decode to ~64 KB of PCM at hi-res; start smaller and grow
-// on ESP_AUDIO_ERR_BUFF_NOT_ENOUGH as the decoder reports its needed size.
-constexpr size_t kOutputBufferBytes = 128 * 1024;
-
-// Read-ahead ring for file sources (PSRAM). SMB reads are synchronous
-// round-trips (~1.2 KB per request, see smb_vfs.cpp), so network jitter fed
-// straight into the decode loop is audible as stutter. A filler task keeps
-// this ring topped up; the decoder then reads from memory and rides out
-// latency spikes. Reserve it at link time so display/cover/codec allocations
-// cannot fragment the large contiguous block before playback starts:
-// 2 MB ~= 50 s of 320 kbps MP3, or ~2-3 s of lossless FLAC -- enough to ride
-// out SMB throughput dips (worsened here by the trimmed Wi-Fi buffers that free
-// internal RAM for Bluetooth). read_source() decodes as soon as the first bytes
-// land, so a larger ring adds no start-up delay -- the filler just keeps more
-// ahead. The refill chunk is large so a drained ring recovers in fewer filler
-// iterations (each source read is still split to ~1.2 KB inside smb_vfs).
+// Decoded-PCM ring (PSRAM). The GMF pipeline's out port pushes PCM here from
+// the decoder task; MEDIA_DECODER_Decode drains it from the player task, so
+// source/network latency absorbed upstream (GMF IO threads) never reaches the
+// I2S writer as stutter. 2 MB is ~11 s of 44.1 kHz stereo 16-bit. Reserved at
+// link time so display/cover/codec allocations cannot fragment the large
+// contiguous block before playback starts.
 constexpr size_t kRingBytes = 2 * 1024 * 1024;
-// The dedicated SMB stream fills this request with a single 64 KB pread (see
-// kWireReadBytes in smb_stream.cpp); local USB/TF files perform one normal
-// sequential VFS read. Both paths commit into the same PSRAM ring without
-// changing their decoders.
-constexpr size_t kRingFillChunk = 64 * 1024;
-// Direct HTTP radio is paced by the remote server. Accumulate one compressed
-// input chunk before decoding so short Wi-Fi/TCP stalls do not immediately
-// drain the tiny high-rate I2S DMA queue into audible gaps/noise. At 64 kbps
-// this is about four seconds; at 320 kbps it is under one second.
+// Decode() copies one chunk out of the ring into this buffer; the pointer
+// stays valid until the next Decode call.
+constexpr size_t kOutputBufferBytes = 128 * 1024;
+// Per-Decode target for file sources (file semantics: block until the chunk
+// is full or the stream ends). Live streams return whatever is buffered.
+constexpr size_t kDecodeChunkBytes = 32 * 1024;
+// PCM reserve built before the first Decode returns on live sources. Direct
+// HTTP radio is paced by the remote server; at 64 kbps-compressed this is
+// roughly four seconds of decoded audio headroom.
 constexpr size_t kHttpPrebufferBytes = 64 * 1024;
 // Build enough SMB reserve before enabling I2S so a two-second reconnect can
-// be hidden even for lossless audio. The filler continues toward the full
+// be hidden even for lossless audio. The pipeline continues toward the full
 // 2 MB ring after playback begins.
 constexpr size_t kSmbPrebufferBytes = 256 * 1024;
 constexpr size_t kMinimumPrebufferBytes = 16 * 1024;
 constexpr int64_t kHttpPrebufferMaxWaitUs = 3000000LL;
 constexpr int64_t kSmbPrebufferMaxWaitUs = 8000000LL;
-constexpr size_t kSmbRawChunkBytes = 32 * 1024;
-
-constexpr size_t kHlsMaxSegments = 8;
-constexpr size_t kHlsPlaylistBytes = 16 * 1024;
+// Wait for the decoder's first REPORT_INFO (real PCM format) before the
+// first Decode returns, and for the source IO to come up inside Open.
+constexpr int64_t kInfoMaxWaitUs = 10000000LL;
+constexpr int64_t kOpenMaxWaitUs = 20000000LL;
 
 static bool s_default_registered = false;
 NRL_PSRAM_BSS uint8_t s_media_ring[kRingBytes];
-NRL_PSRAM_BSS uint8_t s_raw_buffer[kRawBufferBytes];
 NRL_PSRAM_BSS uint8_t s_out_buffer[kOutputBufferBytes];
-NRL_PSRAM_BSS char s_hls_playlist_buffer[kHlsPlaylistBytes];
-MediaDecoder *s_ring_owner = nullptr;
-TaskHandle_t s_ring_worker = nullptr;
-bool s_media_buffers_in_use = false;
+static bool s_media_buffers_in_use = false;
+static esp_gmf_pool_handle_t s_pool = nullptr;
 
 } // namespace
 
-// HLS (m3u8) source: a media playlist of sequential segment URLs, reloaded
-// periodically for live streams. Segments are MPEG-TS or raw AAC/MP3; the
-// simple decoder handles all three, so this layer only concatenates them
-// into one byte stream.
-struct HlsStream {
-    char playlist_url[512];
-    esp_http_client_handle_t seg_http;  // current segment connection
-    char (*seg_urls)[512];              // queued segment URLs (kHlsMaxSegments)
-    size_t seg_count;
-    size_t seg_next;
-    uint64_t next_media_seq;            // first sequence not yet queued
-    uint32_t target_duration_s;
-    int64_t last_fetch_us;
-    size_t seg_bytes;                   // bytes read from the current segment
-    bool live;                          // no #EXT-X-ENDLIST seen
-    bool insecure;                      // TLS fallback engaged for this host
-    volatile bool *stop;                // owner's teardown flag
-};
-
-NRL_PSRAM_BSS static char s_hls_segment_urls[kHlsMaxSegments][512];
-static bool s_hls_urls_in_use = false;
-
 struct MediaDecoder {
-    FILE *file;                      // local file source, or...
-    SmbStream *smb;                  // dedicated SMB media connection, or...
-    esp_http_client_handle_t http;   // ...HTTP(S) stream source (net radio)...
-    HlsStream *hls;                  // ...or HLS (m3u8) segment stream
-    esp_audio_simple_dec_handle_t handle;
-    esp_audio_simple_dec_type_t type;
-    uint8_t *raw_buffer;
-    uint8_t *out_buffer;
-    size_t out_capacity;
-    size_t raw_fill;      // valid bytes in raw_buffer
-    size_t raw_offset;    // consumed bytes in raw_buffer
-    bool eof;
+    esp_gmf_pipeline_handle_t pipe;
+    esp_gmf_task_handle_t task;
+    // PCM ring: the out-port release callback (pipeline task) produces,
+    // MEDIA_DECODER_Decode (player task) consumes.
+    uint8_t *ring;
+    volatile size_t ring_head;
+    volatile size_t ring_tail;
+    volatile bool abort;     // set by Close to unblock the release callback
+    volatile bool opened;    // pipeline reported OPENING (source IO is up)
+    volatile bool finished;  // pipeline FINISHED / last PCM payload seen
+    volatile bool error;     // pipeline ERROR
+    const volatile bool *external_stop;
+    bool live;               // HTTP radio / HLS: short reads are normal
+    bool source_is_smb;
+    bool wait_full;          // file semantics: block for a full Decode chunk
+    size_t prebuffer_bytes;  // PCM bytes required before the first Decode
+    bool started;            // prebuffer/info gate already ran
     bool info_valid;
     MediaDecoderInfo info;
-    // Sniffed leading bytes for format detection on non-seekable HTTP
-    // streams; replayed ahead of further source reads.
-    uint8_t sniff[16];
-    size_t sniff_len;
-    size_t sniff_off;
-    // Synthetic leading bytes for file sources. Used by FLAC to preserve
-    // STREAMINFO while skipping large metadata/cover blocks before audio.
-    uint8_t prefix[42];
-    size_t prefix_len;
-    size_t prefix_off;
-    // Read-ahead ring (file + HLS sources): a filler task streams the source
-    // into PSRAM so SMB/segment latency spikes don't starve the decode loop.
-    uint8_t *ring;
-    volatile size_t ring_head;   // filler writes
-    volatile size_t ring_tail;   // consumer writes
-    volatile bool ring_eof;
-    volatile bool ring_stop;
-    volatile bool ring_running;
-    TaskHandle_t ring_task;
-    bool source_is_smb;
-    volatile bool source_error;
-    const volatile bool *external_stop;
-    bool ring_wait_full;         // block for a full read (file semantics)
-    size_t ring_prebuffer_bytes; // compressed bytes required before playback starts
-    // Underrun telemetry: the ring ran dry while the decoder still needed
+    // Underrun telemetry: the PCM ring ran dry while the player still needed
     // bytes (audible gap on I2S). Counted per event, logged at 1 Hz at most,
     // summarized on close.
     unsigned underrun_events;
@@ -155,62 +98,548 @@ struct MediaDecoder {
 
 namespace {
 
-static size_t source_read_direct(MediaDecoder *d, uint8_t *dst, size_t size);
-
 static bool decoder_stop_requested(const MediaDecoder *d)
 {
-    return d->ring_stop ||
+    return d->abort ||
            (d->external_stop != nullptr && *d->external_stop);
 }
 
-// Read for the decode loop: from the read-ahead ring when one is running,
-// otherwise straight from the source (sniffed bytes replay first either way).
-static size_t read_source(MediaDecoder *d, uint8_t *dst, const size_t size)
+static void log_heap_state(const char *where)
 {
-    if (d->ring == nullptr) {
-        return source_read_direct(d, dst, size);
+    ESP_LOGI(TAG, "heap %s: psram free=%u min=%u largest=%u | internal free=%u min=%u largest=%u",
+             where,
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+             static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+}
+
+// ---- GMF pool (shared, created on first Open) -------------------------------
+
+// Source routing is manual, not pool get_score: io_file scores every "/..."
+// path (including /smb) STANDARD, the same as io_smb, so scoring is
+// ambiguous. Explicit routing is deterministic.
+static const char *select_in_io_tag(const char *path)
+{
+    constexpr size_t kSmbMountLen = sizeof(SMB_VFS_MOUNT_POINT) - 1u;
+    if (strncmp(path, SMB_VFS_MOUNT_POINT, kSmbMountLen) == 0 &&
+        (path[kSmbMountLen] == '/' || path[kSmbMountLen] == '\0')) {
+        return "io_smb";
     }
-    if (d->ring_prebuffer_bytes > 0u) {
-        // The filler owns all source reads while the decoder waits, allowing
-        // a useful reserve to form before I2S playback begins. NAS FLAC needs
-        // a deeper gate than compressed radio because SMB is request/response
-        // and short Wi-Fi stalls otherwise drain the I2S path immediately.
-        const int64_t wait_started_us = esp_timer_get_time();
-        while (!d->ring_eof && d->ring_running && !decoder_stop_requested(d)) {
-            const size_t head = d->ring_head;
-            const size_t tail = d->ring_tail;
-            const size_t used = (head + kRingBytes - tail) % kRingBytes;
-            const bool target_reached = used >= d->ring_prebuffer_bytes;
-            const int64_t max_wait_us = d->source_is_smb
-                                            ? kSmbPrebufferMaxWaitUs
-                                            : kHttpPrebufferMaxWaitUs;
-            const bool wait_expired = used >= kMinimumPrebufferBytes &&
-                                      esp_timer_get_time() - wait_started_us >=
-                                          max_wait_us;
-            if (target_reached || wait_expired) {
-                ESP_LOGI(TAG, "readahead: %s buffered %u bytes%s",
-                         d->source_is_smb ? "SMB" : "HTTP radio",
-                         static_cast<unsigned>(used),
-                         target_reached ? "" : " (startup timeout)");
-                break;
-            }
-            vTaskDelay(pdMS_TO_TICKS(10));
+    const bool is_http = strncmp(path, "http://", 7) == 0 ||
+                         strncmp(path, "https://", 8) == 0;
+    if (is_http && strstr(path, ".m3u8") != nullptr) {
+        return "io_hls";
+    }
+    if (is_http) {
+        return "io_radio";
+    }
+    return "io_file";
+}
+
+// ---- tolerant frame decoder (webradio) --------------------------------------
+//
+// A live stream joined mid-frame, or hit by WiFi loss, hands the codec a frame
+// it cannot decode; the stock ops report ESP_AUDIO_ERR_FAIL and the GMF
+// aud_dec element aborts the whole pipeline ("Failed to decode data, ret:-1",
+// track stops). Wrap the MP3/AAC frame decoders so an isolated bad frame is
+// dropped (consumed, zero PCM -- a ~25 ms click) instead of killing playback.
+// Sustained garbage (more than kMaxConsecutiveBadFrames in a row) still
+// propagates the error so the player can reconnect the stream.
+constexpr uint32_t kMaxConsecutiveBadFrames = 10;
+
+struct TolerantDecoder {
+    const esp_audio_dec_ops_t *orig;
+    void *real;
+    uint32_t bad_frames;
+};
+
+static esp_audio_err_t tolerant_open(const esp_audio_dec_ops_t *orig, void *cfg,
+                                     uint32_t cfg_sz, void **decoder)
+{
+    TolerantDecoder *t = static_cast<TolerantDecoder *>(
+        heap_caps_calloc(1, sizeof(TolerantDecoder), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (t == nullptr) {
+        return ESP_AUDIO_ERR_MEM_LACK;
+    }
+    t->orig = orig;
+    const esp_audio_err_t ret = orig->open(cfg, cfg_sz, &t->real);
+    if (ret != ESP_AUDIO_ERR_OK) {
+        heap_caps_free(t);
+        return ret;
+    }
+    *decoder = t;
+    return ESP_AUDIO_ERR_OK;
+}
+
+static esp_audio_err_t tolerant_decode(void *decoder, esp_audio_dec_in_raw_t *raw,
+                                       esp_audio_dec_out_frame_t *frame,
+                                       esp_audio_dec_info_t *info)
+{
+    TolerantDecoder *t = static_cast<TolerantDecoder *>(decoder);
+    const esp_audio_err_t ret = t->orig->decode(t->real, raw, frame, info);
+    if (ret != ESP_AUDIO_ERR_FAIL) {
+        if (ret == ESP_AUDIO_ERR_OK) {
+            t->bad_frames = 0;
         }
-        d->ring_prebuffer_bytes = 0u;
+        return ret; // OK / BUFF_NOT_ENOUGH / DATA_LACK pass through untouched
     }
-    size_t got = 0;
-    while (got < size) {
+    if (++t->bad_frames > kMaxConsecutiveBadFrames) {
+        return ret;
+    }
+    ESP_LOGW(TAG, "drop undecodable frame (%u/%u)",
+             static_cast<unsigned>(t->bad_frames),
+             static_cast<unsigned>(kMaxConsecutiveBadFrames));
+    raw->consumed = raw->len; // skip the frame, emit no PCM, keep going
+    frame->decoded_size = 0;
+    return ESP_AUDIO_ERR_OK;
+}
+
+static esp_audio_err_t tolerant_reset(void *decoder)
+{
+    TolerantDecoder *t = static_cast<TolerantDecoder *>(decoder);
+    t->bad_frames = 0;
+    return t->orig->reset != nullptr ? t->orig->reset(t->real) : ESP_AUDIO_ERR_OK;
+}
+
+static esp_audio_err_t tolerant_close(void *decoder)
+{
+    TolerantDecoder *t = static_cast<TolerantDecoder *>(decoder);
+    const esp_audio_err_t ret =
+        t->orig->close != nullptr ? t->orig->close(t->real) : ESP_AUDIO_ERR_OK;
+    heap_caps_free(t);
+    return ret;
+}
+
+static const esp_audio_dec_ops_t *s_orig_mp3_ops = nullptr;
+static const esp_audio_dec_ops_t *s_orig_aac_ops = nullptr;
+
+static esp_audio_err_t tolerant_mp3_open(void *cfg, uint32_t cfg_sz, void **decoder)
+{
+    return tolerant_open(s_orig_mp3_ops, cfg, cfg_sz, decoder);
+}
+
+static esp_audio_err_t tolerant_aac_open(void *cfg, uint32_t cfg_sz, void **decoder)
+{
+    return tolerant_open(s_orig_aac_ops, cfg, cfg_sz, decoder);
+}
+
+static const esp_audio_dec_ops_t s_tolerant_mp3_ops = {
+    tolerant_mp3_open, tolerant_decode, tolerant_reset, tolerant_close,
+};
+static const esp_audio_dec_ops_t s_tolerant_aac_ops = {
+    tolerant_aac_open, tolerant_decode, tolerant_reset, tolerant_close,
+};
+
+static bool wrap_tolerant_decoder(esp_audio_type_t type,
+                                  const esp_audio_dec_ops_t **orig_store,
+                                  const esp_audio_dec_ops_t *wrapped)
+{
+    const esp_audio_dec_ops_t *orig = esp_audio_dec_get_ops(type);
+    if (orig == nullptr) {
+        return false;
+    }
+    *orig_store = orig;
+    esp_audio_dec_unregister(type);
+    return esp_audio_dec_register(type, wrapped) == ESP_AUDIO_ERR_OK;
+}
+
+static bool register_default_decoders()
+{
+    if (s_default_registered) {
+        return true;
+    }
+    // Two registries: the simple-dec default only adds the container parsers
+    // (WAV/M4A/TS); they dispatch into the elementary-stream decoder
+    // registry, which must be populated separately -- without it every
+    // MP3/FLAC open fails with "Decoder ... not registered". Register only
+    // the codecs the playlist accepts (wav/mp3/flac/m4a/aac, see
+    // music_playlist.cpp): esp_audio_dec_register_default() would link every
+    // codec lib (Opus/Vorbis/LC3/SBC/...) and overflow the app partition.
+    const bool ok = esp_mp3_dec_register() == ESP_AUDIO_ERR_OK &&
+                    esp_aac_dec_register() == ESP_AUDIO_ERR_OK &&
+                    esp_flac_dec_register() == ESP_AUDIO_ERR_OK &&
+                    esp_pcm_dec_register() == ESP_AUDIO_ERR_OK &&
+                    esp_adpcm_dec_register() == ESP_AUDIO_ERR_OK &&
+                    esp_audio_simple_dec_register_default() == ESP_AUDIO_ERR_OK;
+    if (!ok) {
+        ESP_LOGE(TAG, "register default decoders failed");
+        return false;
+    }
+    // Replace the MP3/AAC frame decoders with the tolerant wrapper; the simple
+    // decoder looks its ops up in this registry at open time. (File playback
+    // of MP3/AAC gets the same skip-bad-frame behavior, which is fine.)
+    if (!wrap_tolerant_decoder(ESP_AUDIO_TYPE_MP3, &s_orig_mp3_ops, &s_tolerant_mp3_ops) ||
+        !wrap_tolerant_decoder(ESP_AUDIO_TYPE_AAC, &s_orig_aac_ops, &s_tolerant_aac_ops)) {
+        ESP_LOGE(TAG, "wrap tolerant decoders failed");
+        return false;
+    }
+    s_default_registered = true;
+    return true;
+}
+
+static bool gmf_pool_setup()
+{
+    if (s_pool != nullptr) {
+        return true;
+    }
+    if (esp_gmf_pool_init(&s_pool) != ESP_GMF_ERR_OK) {
+        s_pool = nullptr;
+        return false;
+    }
+    esp_gmf_io_handle_t io = nullptr;
+    esp_gmf_element_handle_t el = nullptr;
+    bool ok = false;
+
+    // Local files (/sdcard, /usb): own thread + small PSRAM buffer so storage
+    // reads decouple from the decode job (the old read-ahead filler role).
+    file_io_cfg_t file_cfg = FILE_IO_CFG_DEFAULT();
+    file_cfg.dir = ESP_GMF_IO_DIR_READER;
+    file_cfg.io_cfg.thread.stack = 4096;
+    file_cfg.io_cfg.thread.prio = 5;
+    file_cfg.io_cfg.thread.core = 1;
+    file_cfg.io_cfg.thread.stack_in_ext = true;
+    file_cfg.io_cfg.buffer_cfg.io_size = 4096;
+    file_cfg.io_cfg.buffer_cfg.buffer_size = 32 * 1024;
+    if (esp_gmf_io_file_init(&file_cfg, &io) != ESP_GMF_ERR_OK ||
+        esp_gmf_pool_register_io(s_pool, io, nullptr) != ESP_GMF_ERR_OK) {
+        goto fail;
+    }
+    // SMB share: deep buffer (PSRAM, see esp_gmf_oal_mem.c) to ride out the
+    // request/response latency of the dedicated media connection.
+    {
+        gmf_io_smb_cfg_t smb_cfg = {};
+        smb_cfg.dir = ESP_GMF_IO_DIR_READER;
+        smb_cfg.io_cfg.thread.stack = 8192;
+        smb_cfg.io_cfg.thread.prio = 5;
+        smb_cfg.io_cfg.thread.core = 1;
+        smb_cfg.io_cfg.thread.stack_in_ext = true;
+        // 128 KB per acquire = two 64 KB lane preads in flight (smb_stream);
+        // the ring holds three such payloads (~3.8 s of FLAC at 100 KB/s).
+        // Kept at 384 KB: PSRAM is fully booked during playback (see the
+        // prebuffer log's heap line), a larger ring starves GMF payloads.
+        smb_cfg.io_cfg.buffer_cfg.io_size = 128 * 1024;
+        smb_cfg.io_cfg.buffer_cfg.buffer_size = 384 * 1024;
+        if (gmf_io_smb_init(&smb_cfg, &io) != ESP_GMF_ERR_OK ||
+            esp_gmf_pool_register_io(s_pool, io, nullptr) != ESP_GMF_ERR_OK) {
+            goto fail;
+        }
+    }
+    // Direct HTTP(S) net radio, with the verify-then-insecure TLS fallback.
+    {
+        gmf_io_radio_cfg_t radio_cfg = {};
+        radio_cfg.dir = ESP_GMF_IO_DIR_READER;
+        radio_cfg.io_cfg.thread.stack = 8192;
+        radio_cfg.io_cfg.thread.prio = 5;
+        radio_cfg.io_cfg.thread.core = 1;
+        radio_cfg.io_cfg.thread.stack_in_ext = true;
+        radio_cfg.io_cfg.buffer_cfg.io_size = 4096;
+        radio_cfg.io_cfg.buffer_cfg.buffer_size = 32 * 1024;
+        if (gmf_io_radio_init(&radio_cfg, &io) != ESP_GMF_ERR_OK ||
+            esp_gmf_pool_register_io(s_pool, io, nullptr) != ESP_GMF_ERR_OK) {
+            goto fail;
+        }
+    }
+    // HLS: official esp_hls_stream IO; fetches playlist+segments through pool
+    // IOs (io_radio matches the http(s) scheme), extracts the audio
+    // elementary stream from TS containers itself. Default 600 KB buffer and
+    // 20 KB stack both land in PSRAM.
+    {
+        esp_hls_io_cfg_t hls_cfg = {};
+        esp_gmf_io_cfg_t hls_io_cfg = DEFAULT_HLS_IO_CFG();
+        hls_cfg.pool = s_pool;
+        hls_cfg.io_cfg = hls_io_cfg;
+        if (esp_gmf_io_hls_init(&hls_cfg, &io) != ESP_GMF_ERR_OK ||
+            esp_gmf_pool_register_io(s_pool, io, nullptr) != ESP_GMF_ERR_OK) {
+            goto fail;
+        }
+    }
+    {
+        esp_audio_simple_dec_cfg_t dec_cfg = DEFAULT_ESP_GMF_AUDIO_DEC_CONFIG();
+        if (esp_gmf_audio_dec_init(&dec_cfg, &el) != ESP_GMF_ERR_OK ||
+            esp_gmf_pool_register_element(s_pool, el, nullptr) != ESP_GMF_ERR_OK) {
+            goto fail;
+        }
+    }
+    ok = true;
+fail:
+    if (!ok) {
+        ESP_LOGE(TAG, "GMF pool setup failed");
+        esp_gmf_pool_deinit(s_pool);
+        s_pool = nullptr;
+    }
+    return ok;
+}
+
+// ---- pipeline output port: PCM into the ring --------------------------------
+
+static int mdec_acquire_write(void *handle, esp_gmf_payload_t *load,
+                              uint32_t wanted_size, int block_ticks)
+{
+    return static_cast<int>(wanted_size);
+}
+
+static int mdec_release_write(void *handle, esp_gmf_payload_t *load, int block_ticks)
+{
+    MediaDecoder *d = static_cast<MediaDecoder *>(handle);
+    if (load == nullptr) {
+        return 0;
+    }
+    if (load->is_done) {
+        d->finished = true; // last PCM chunk of the stream
+    }
+    const uint8_t *src = load->buf;
+    size_t left = load->valid_size;
+    while (left > 0u) {
         if (decoder_stop_requested(d)) {
+            // ESP_GMF_IO_ABORT (-2), not FAIL: GMF treats an aborted release
+            // as a quiet task stop; FAIL would log "OUT port release error"
+            // and "Job failed" on every intentional playback stop.
+            return ESP_GMF_IO_ABORT;
+        }
+        const size_t head = d->ring_head;
+        const size_t tail = d->ring_tail;
+        const size_t used = (head + kRingBytes - tail) % kRingBytes;
+        const size_t free_space = kRingBytes - 1u - used;
+        if (free_space == 0u) {
+            // Bounded slices: even though the port is registered with
+            // ESP_GMF_MAX_DELAY, a stop/abort is honoured within 50 ms.
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+        size_t chunk = kRingBytes - head; // contiguous run up to the wrap
+        if (chunk > free_space) {
+            chunk = free_space;
+        }
+        if (chunk > left) {
+            chunk = left;
+        }
+        memcpy(d->ring + head, src, chunk);
+        d->ring_head = (head + chunk) % kRingBytes;
+        src += chunk;
+        left -= chunk;
+    }
+    return 0;
+}
+
+static esp_gmf_err_t mdec_event_cb(esp_gmf_event_pkt_t *pkt, void *ctx)
+{
+    MediaDecoder *d = static_cast<MediaDecoder *>(ctx);
+    if (pkt->type == ESP_GMF_EVT_TYPE_CHANGE_STATE) {
+        if (pkt->sub == ESP_GMF_EVENT_STATE_OPENING ||
+            pkt->sub == ESP_GMF_EVENT_STATE_RUNNING) {
+            d->opened = true; // source IO opened (or pipeline running)
+        } else if (pkt->sub == ESP_GMF_EVENT_STATE_FINISHED) {
+            d->finished = true;
+        } else if (pkt->sub == ESP_GMF_EVENT_STATE_ERROR) {
+            d->error = true;
+        }
+    } else if (pkt->type == ESP_GMF_EVT_TYPE_REPORT_INFO &&
+               pkt->payload != nullptr &&
+               pkt->payload_size >= static_cast<int>(sizeof(esp_gmf_info_sound_t))) {
+        const esp_gmf_info_sound_t *snd =
+            static_cast<const esp_gmf_info_sound_t *>(pkt->payload);
+        if (snd->sample_rates > 0 && snd->channels > 0u && snd->bits > 0u) {
+            d->info.sample_rate_hz = static_cast<uint32_t>(snd->sample_rates);
+            d->info.channels = static_cast<uint8_t>(snd->channels);
+            d->info.bits_per_sample = static_cast<uint8_t>(snd->bits);
+            d->info_valid = true;
+        }
+    }
+    return ESP_GMF_ERR_OK;
+}
+
+} // namespace
+
+extern "C" MediaDecoder *MEDIA_DECODER_Open(
+    const char *path, const volatile bool *stop_requested)
+{
+    if (path == nullptr || (stop_requested != nullptr && *stop_requested)) {
+        return nullptr;
+    }
+    if (!register_default_decoders() || !gmf_pool_setup()) {
+        return nullptr;
+    }
+    if (s_media_buffers_in_use) {
+        ESP_LOGE(TAG, "only one media decoder can be active");
+        return nullptr;
+    }
+
+    MediaDecoder *d = static_cast<MediaDecoder *>(
+        heap_caps_calloc(1, sizeof(MediaDecoder), MALLOC_CAP_SPIRAM));
+    if (d == nullptr) {
+        return nullptr;
+    }
+    s_media_buffers_in_use = true;
+    d->external_stop = stop_requested;
+    d->ring = s_media_ring;
+
+    const char *in_tag = select_in_io_tag(path);
+    d->live = strcmp(in_tag, "io_radio") == 0 || strcmp(in_tag, "io_hls") == 0;
+    d->source_is_smb = strcmp(in_tag, "io_smb") == 0;
+    d->wait_full = !d->live;
+    d->prebuffer_bytes = d->source_is_smb ? kSmbPrebufferBytes
+                                          : (d->live ? kHttpPrebufferBytes : 0u);
+
+    const char *el_names[] = {"aud_dec"};
+    if (esp_gmf_pool_new_pipeline(s_pool, in_tag, el_names, 1, nullptr, &d->pipe) !=
+            ESP_GMF_ERR_OK ||
+        d->pipe == nullptr) {
+        ESP_LOGE(TAG, "pipeline create failed: %s", path);
+        MEDIA_DECODER_Close(d);
+        return nullptr;
+    }
+    // The pipeline has no output IO; PCM leaves through this application
+    // callback port on the last element.
+    esp_gmf_port_handle_t out_port = static_cast<esp_gmf_port_handle_t>(
+        NEW_ESP_GMF_PORT_OUT_BYTE(reinterpret_cast<void *>(mdec_acquire_write),
+                                  reinterpret_cast<void *>(mdec_release_write),
+                                  nullptr, d, 2048, ESP_GMF_MAX_DELAY));
+    if (out_port == nullptr ||
+        esp_gmf_pipeline_reg_el_port(d->pipe, "aud_dec", ESP_GMF_IO_DIR_WRITER,
+                                     out_port) != ESP_GMF_ERR_OK) {
+        ESP_LOGE(TAG, "out port register failed");
+        MEDIA_DECODER_Close(d);
+        return nullptr;
+    }
+    esp_gmf_task_cfg_t tcfg = DEFAULT_ESP_GMF_TASK_CONFIG();
+    tcfg.thread.stack = 8192;
+    tcfg.thread.prio = 5;
+    tcfg.thread.core = 1;
+    tcfg.thread.stack_in_ext = true;
+    tcfg.name = "mdec";
+    if (esp_gmf_task_init(&tcfg, &d->task) != ESP_GMF_ERR_OK || d->task == nullptr) {
+        ESP_LOGE(TAG, "pipeline task create failed");
+        MEDIA_DECODER_Close(d);
+        return nullptr;
+    }
+    esp_gmf_task_set_timeout(d->task, 5000);
+    esp_gmf_pipeline_bind_task(d->pipe, d->task);
+
+    // Arm the cooperative stop on the pipeline's duplicated IN io instance.
+    esp_gmf_io_handle_t in_io = nullptr;
+    if (esp_gmf_pipeline_get_in(d->pipe, &in_io) == ESP_GMF_ERR_OK && in_io != nullptr) {
+        if (d->source_is_smb) {
+            gmf_io_smb_set_stop_request(in_io, stop_requested);
+        } else if (strcmp(in_tag, "io_radio") == 0) {
+            gmf_io_radio_set_stop_request(in_io, stop_requested);
+        }
+    }
+
+    // Preconfigure the decoder from the URI; aud_dec re-sniffs the actual
+    // content at runtime and reconfigures itself when it disagrees.
+    esp_gmf_element_handle_t dec_el = nullptr;
+    esp_gmf_info_sound_t snd = {};
+    if (esp_gmf_pipeline_get_el_by_name(d->pipe, "aud_dec", &dec_el) != ESP_GMF_ERR_OK) {
+        MEDIA_DECODER_Close(d);
+        return nullptr;
+    }
+    esp_gmf_audio_helper_get_audio_type_by_uri(path, &snd.format_id);
+    if (snd.format_id == 0) {
+        snd.format_id = ESP_FOURCC_MP3; // typeless stream: webradio default
+    }
+    if (esp_gmf_audio_dec_reconfig_by_sound_info(dec_el, &snd) != ESP_GMF_ERR_OK ||
+        esp_gmf_pipeline_set_in_uri(d->pipe, path) != ESP_GMF_ERR_OK ||
+        esp_gmf_pipeline_loading_jobs(d->pipe) != ESP_GMF_ERR_OK) {
+        ESP_LOGE(TAG, "pipeline setup failed: %s", path);
+        MEDIA_DECODER_Close(d);
+        return nullptr;
+    }
+    esp_gmf_pipeline_set_event(d->pipe, mdec_event_cb, d);
+    if (esp_gmf_pipeline_run(d->pipe) != ESP_GMF_ERR_OK) {
+        ESP_LOGE(TAG, "pipeline run failed: %s", path);
+        MEDIA_DECODER_Close(d);
+        return nullptr;
+    }
+
+    // Synchronous open semantics: the pipeline opens the source IO in its own
+    // task; wait for the outcome so a missing file / unreachable stream fails
+    // here (NULL) instead of at the first Decode.
+    const int64_t wait_start_us = esp_timer_get_time();
+    while (!d->opened && !d->error && !decoder_stop_requested(d) &&
+           esp_timer_get_time() - wait_start_us < kOpenMaxWaitUs) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (!d->opened || d->error) {
+        ESP_LOGE(TAG, "source open failed: %s", path);
+        MEDIA_DECODER_Close(d);
+        return nullptr;
+    }
+    ESP_LOGI(TAG, "decoding %s via %s%s", path, in_tag, d->live ? " (live)" : "");
+    return d;
+}
+
+extern "C" int MEDIA_DECODER_Decode(MediaDecoder *d, const uint8_t **pcm_out,
+                                    size_t *bytes_out)
+{
+    if (d == nullptr || pcm_out == nullptr || bytes_out == nullptr) {
+        return -1;
+    }
+
+    if (!d->started) {
+        d->started = true;
+        // Prebuffer gate (live sources only): build a PCM reserve before I2S
+        // playback begins so network jitter does not immediately drain it.
+        if (d->prebuffer_bytes > 0u) {
+            const int64_t wait_started_us = esp_timer_get_time();
+            while (!d->finished && !d->error && !decoder_stop_requested(d)) {
+                const size_t used = (d->ring_head + kRingBytes - d->ring_tail) % kRingBytes;
+                const bool target_reached = used >= d->prebuffer_bytes;
+                const int64_t max_wait_us = d->source_is_smb
+                                                ? kSmbPrebufferMaxWaitUs
+                                                : kHttpPrebufferMaxWaitUs;
+                const bool wait_expired =
+                    used >= kMinimumPrebufferBytes &&
+                    esp_timer_get_time() - wait_started_us >= max_wait_us;
+                if (target_reached || wait_expired) {
+                    log_heap_state("prebuffer");
+                    ESP_LOGI(TAG, "prebuffer: %s buffered %u PCM bytes%s",
+                             d->source_is_smb ? "SMB" : "HTTP",
+                             static_cast<unsigned>(used),
+                             target_reached ? "" : " (startup timeout)");
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+        }
+        // The first decoded frame's REPORT_INFO carries the real PCM format;
+        // wait for it so GetInfo is valid right after the first Decode.
+        const int64_t info_wait_us = esp_timer_get_time();
+        while (!d->info_valid && !d->finished && !d->error &&
+               !decoder_stop_requested(d) &&
+               esp_timer_get_time() - info_wait_us < kInfoMaxWaitUs) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+    }
+
+    const size_t want = d->wait_full ? kDecodeChunkBytes : 1u;
+    size_t got = 0;
+    while (true) {
+        if (decoder_stop_requested(d)) {
+            if (got == 0u) {
+                return 0;
+            }
             break;
         }
         const size_t head = d->ring_head;
         const size_t tail = d->ring_tail;
         const size_t used = (head + kRingBytes - tail) % kRingBytes;
         if (used == 0u) {
-            if (d->ring_eof || !d->ring_running) {
-                break; // true end of stream
+            if (d->error) {
+                if (got == 0u) {
+                    return -1;
+                }
+                break; // drain what is left, fail on the next call
             }
-            if (!d->ring_wait_full && got > 0u) {
+            if (d->finished) {
+                if (got == 0u) {
+                    return 0;
+                }
+                break;
+            }
+            if (!d->wait_full && got > 0u) {
                 break; // live stream: hand over what we have
             }
             if (d->underrun_start_us == 0) {
@@ -229,910 +658,31 @@ static size_t read_source(MediaDecoder *d, uint8_t *dst, const size_t size)
             d->underrun_start_us = 0;
             if (now_us - d->underrun_last_log_us >= 1000000LL) {
                 d->underrun_last_log_us = now_us;
-                ESP_LOGW(TAG, "underrun: ring dry (event #%u, total %u ms)",
+                ESP_LOGW(TAG, "underrun: PCM ring dry (event #%u, total %u ms)",
                          d->underrun_events, d->underrun_total_ms);
+                log_heap_state("underrun");
             }
         }
         size_t chunk = kRingBytes - tail; // contiguous run up to the wrap
         if (chunk > used) {
             chunk = used;
         }
-        if (chunk > size - got) {
-            chunk = size - got;
+        if (chunk > kOutputBufferBytes - got) {
+            chunk = kOutputBufferBytes - got;
         }
-        memcpy(dst + got, d->ring + tail, chunk);
+        memcpy(s_out_buffer + got, d->ring + tail, chunk);
         d->ring_tail = (tail + chunk) % kRingBytes;
         got += chunk;
-    }
-    return got;
-}
-
-static esp_audio_simple_dec_type_t detect_type_from_header(const uint8_t *header,
-                                                           const size_t got,
-                                                           const char *path)
-{
-    if (got >= 12u && memcmp(header, "RIFF", 4) == 0 && memcmp(header + 8, "WAVE", 4) == 0) {
-        return ESP_AUDIO_SIMPLE_DEC_TYPE_WAV;
-    }
-    if (got >= 4u && memcmp(header, "fLaC", 4) == 0) {
-        return ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC;
-    }
-    if (got >= 8u && memcmp(header + 4, "ftyp", 4) == 0) {
-        return ESP_AUDIO_SIMPLE_DEC_TYPE_M4A;
-    }
-    if (got >= 3u && memcmp(header, "ID3", 3) == 0) {
-        return ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
-    }
-    if (got >= 2u && header[0] == 0xFFu && (header[1] & 0xF6u) == 0xF0u) {
-        return ESP_AUDIO_SIMPLE_DEC_TYPE_AAC; // ADTS sync
-    }
-    if (got >= 2u && header[0] == 0xFFu && (header[1] & 0xE0u) == 0xE0u) {
-        return ESP_AUDIO_SIMPLE_DEC_TYPE_MP3; // bare MPEG frame sync
-    }
-    if (got >= 1u && header[0] == 0x47u) {
-        return ESP_AUDIO_SIMPLE_DEC_TYPE_TS; // MPEG-TS sync byte (HLS segments)
-    }
-
-    // Fall back to the extension / URL suffix (e.g. MP3s that open with
-    // junk bytes, or typeless radio streams).
-    const char *dot = strrchr(path, '.');
-    if (dot != nullptr) {
-        if (strcasecmp(dot, ".mp3") == 0) {
-            return ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
-        }
-        if (strcasecmp(dot, ".flac") == 0) {
-            return ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC;
-        }
-        if (strcasecmp(dot, ".wav") == 0) {
-            return ESP_AUDIO_SIMPLE_DEC_TYPE_WAV;
-        }
-        if (strcasecmp(dot, ".m4a") == 0) {
-            return ESP_AUDIO_SIMPLE_DEC_TYPE_M4A;
-        }
-        if (strcasecmp(dot, ".aac") == 0) {
-            return ESP_AUDIO_SIMPLE_DEC_TYPE_AAC;
-        }
-    }
-    return ESP_AUDIO_SIMPLE_DEC_TYPE_NONE;
-}
-
-struct FlacStreamInfo {
-    uint32_t sample_rate_hz;
-    uint8_t bits_per_sample;
-    uint8_t channels;
-    uint8_t streaminfo[34];
-    long audio_offset;
-};
-
-static bool read_file_exact(FILE *f, void *dst, const size_t n)
-{
-    return fread(dst, 1, n, f) == n;
-}
-
-static bool flac_read_stream_info(FILE *f, FlacStreamInfo *info)
-{
-    if (f == nullptr || info == nullptr) {
-        return false;
-    }
-    const long saved = ftell(f);
-    uint8_t magic[4];
-    uint8_t bh[4];
-    bool ok = false;
-
-    if (saved >= 0 &&
-        fseek(f, 0, SEEK_SET) == 0 &&
-        read_file_exact(f, magic, sizeof(magic)) &&
-        memcmp(magic, "fLaC", 4) == 0) {
-        bool last = false;
-        bool got_streaminfo = false;
-        while (!last && read_file_exact(f, bh, sizeof(bh))) {
-            last = (bh[0] & 0x80u) != 0u;
-            const uint8_t type = bh[0] & 0x7Fu;
-            const uint32_t block_len = (static_cast<uint32_t>(bh[1]) << 16) |
-                                       (static_cast<uint32_t>(bh[2]) << 8) | bh[3];
-            if (block_len > 16u * 1024u * 1024u) {
-                last = false;
-                break;
-            }
-            if (type == 0u && block_len >= sizeof(info->streaminfo)) {
-                if (!read_file_exact(f, info->streaminfo, sizeof(info->streaminfo))) {
-                    break;
-                }
-                if (block_len > sizeof(info->streaminfo) &&
-                    fseek(f, static_cast<long>(block_len - sizeof(info->streaminfo)), SEEK_CUR) != 0) {
-                    break;
-                }
-                got_streaminfo = true;
-            } else if (fseek(f, static_cast<long>(block_len), SEEK_CUR) != 0) {
-                break;
-            }
-        }
-        const long audio_offset = ftell(f);
-        if (last && got_streaminfo && audio_offset > 0) {
-            const uint8_t *si = info->streaminfo;
-            info->sample_rate_hz = (static_cast<uint32_t>(si[10]) << 12) |
-                                   (static_cast<uint32_t>(si[11]) << 4) |
-                                   (si[12] >> 4);
-            info->channels = static_cast<uint8_t>(((si[12] >> 1) & 0x07u) + 1u);
-            info->bits_per_sample = static_cast<uint8_t>(
-                (((si[12] & 0x01u) << 4) | (si[13] >> 4)) + 1u);
-            info->audio_offset = audio_offset;
-            ok = info->sample_rate_hz > 0u && info->channels > 0u && info->bits_per_sample > 0u;
-        }
-    }
-
-    if (saved >= 0) {
-        (void)fseek(f, saved, SEEK_SET);
-    }
-    return ok;
-}
-
-static void flac_install_compact_prefix(MediaDecoder *d, const FlacStreamInfo *info)
-{
-    if (d == nullptr || info == nullptr || info->audio_offset <= 0) {
-        return;
-    }
-    memcpy(d->prefix, "fLaC", 4);
-    d->prefix[4] = 0x80u; // last metadata block, STREAMINFO
-    d->prefix[5] = 0;
-    d->prefix[6] = 0;
-    d->prefix[7] = sizeof(info->streaminfo);
-    memcpy(d->prefix + 8, info->streaminfo, sizeof(info->streaminfo));
-    d->prefix_len = 8u + sizeof(info->streaminfo);
-    d->prefix_off = 0;
-    (void)fseek(d->file, info->audio_offset, SEEK_SET);
-}
-
-static bool grow_out_buffer(MediaDecoder *d, const size_t needed)
-{
-    return d != nullptr && needed <= d->out_capacity;
-}
-
-// Open an HTTP(S) stream, verifying TLS against the cert bundle first; on
-// handshake failure retry once without verification. Net-radio CDNs commonly
-// serve incomplete cert chains (missing intermediate) that mbedtls cannot
-// repair -- these are public audio streams, so availability wins over
-// authenticity for the retry. Returns an OPENED client or nullptr.
-// `insecure_hint` (optional) remembers a stream that already needed the
-// fallback, so follow-up connections (HLS segments every ~10 s) skip the
-// doomed verified attempt instead of re-failing a handshake each time.
-static esp_http_client_handle_t http_open_stream(const char *url, const int timeout_ms,
-                                                 const int buffer_size,
-                                                 bool *insecure_hint = nullptr)
-{
-    const int first = (insecure_hint != nullptr && *insecure_hint) ? 1 : 0;
-    for (int insecure = first; insecure < 2; ++insecure) {
-        esp_http_client_config_t cfg = {};
-        cfg.url = url;
-        cfg.timeout_ms = timeout_ms;
-        cfg.buffer_size = buffer_size;
-        if (insecure == 0) {
-            cfg.crt_bundle_attach = esp_crt_bundle_attach;
-        }
-        esp_http_client_handle_t http = esp_http_client_init(&cfg);
-        if (http == nullptr) {
-            return nullptr;
-        }
-        if (esp_http_client_open(http, 0) == ESP_OK) {
-            if (insecure != 0) {
-                if (insecure_hint == nullptr || !*insecure_hint) {
-                    ESP_LOGW(TAG, "TLS verification skipped for %s", url);
-                }
-                if (insecure_hint != nullptr) {
-                    *insecure_hint = true;
-                }
-            }
-            return http;
-        }
-        esp_http_client_cleanup(http);
-        if (strncmp(url, "https://", 8) != 0) {
-            return nullptr; // plain http can't be a TLS failure; don't retry
-        }
-    }
-    return nullptr;
-}
-
-// ---- HLS (m3u8) source ------------------------------------------------------
-
-// Resolve `ref` against `base` (RFC-lite: absolute, host-relative, relative).
-static void hls_resolve_url(const char *base, const char *ref, char *out, const size_t cap)
-{
-    if (strncmp(ref, "http://", 7) == 0 || strncmp(ref, "https://", 8) == 0) {
-        snprintf(out, cap, "%s", ref);
-        return;
-    }
-    if (ref[0] == '/') {
-        // scheme://host[:port] + ref
-        const char *scheme_end = strstr(base, "://");
-        const char *host_end = (scheme_end != nullptr) ? strchr(scheme_end + 3, '/') : nullptr;
-        const int host_len = (host_end != nullptr) ? static_cast<int>(host_end - base)
-                                                   : static_cast<int>(strlen(base));
-        snprintf(out, cap, "%.*s%s", host_len, base, ref);
-        return;
-    }
-    // Relative to the playlist's directory (strip any query string first).
-    char dir[512];
-    snprintf(dir, sizeof(dir), "%s", base);
-    char *query = strchr(dir, '?');
-    if (query != nullptr) {
-        *query = '\0';
-    }
-    char *slash = strrchr(dir, '/');
-    if (slash != nullptr && slash - dir > 7) { // don't chop the "https://"
-        slash[1] = '\0';
-    }
-    snprintf(out, cap, "%s%s", dir, ref);
-}
-
-// GET a small text resource (the playlist). Returns bytes read, 0 on error.
-static size_t hls_fetch_text(const char *url, char *out, const size_t cap, bool *insecure_hint)
-{
-    esp_http_client_handle_t http = http_open_stream(url, 8000, 2048, insecure_hint);
-    if (http == nullptr) {
-        ESP_LOGE(TAG, "hls: playlist open failed: %s", url);
-        out[0] = '\0';
-        return 0;
-    }
-    size_t got = 0;
-    (void)esp_http_client_fetch_headers(http);
-    const int status = esp_http_client_get_status_code(http);
-    if (status == 200) {
-        while (got + 1u < cap) {
-            const int n = esp_http_client_read(http, out + got,
-                                               static_cast<int>(cap - 1u - got));
-            if (n <= 0) {
-                break;
-            }
-            got += static_cast<size_t>(n);
-        }
-    } else {
-        ESP_LOGE(TAG, "hls: playlist HTTP %d: %s", status, url);
-    }
-    (void)esp_http_client_close(http);
-    (void)esp_http_client_cleanup(http);
-    out[got] = '\0';
-    return got;
-}
-
-// Fetch + parse the playlist; follows one master-playlist indirection (first
-// variant). Queues segments with sequence >= next_media_seq.
-static bool hls_load_playlist(HlsStream *h)
-{
-    char *text = s_hls_playlist_buffer;
-    bool ok = false;
-    for (int depth = 0; depth < 3; ++depth) {
-        if (hls_fetch_text(h->playlist_url, text, kHlsPlaylistBytes, &h->insecure) == 0u) {
+        if (got >= want || got >= kOutputBufferBytes) {
             break;
         }
-        const bool master = strstr(text, "#EXT-X-STREAM-INF") != nullptr;
-        uint64_t first_seq = 0;
-        size_t listed = 0;
-        bool endlist = false;
-        bool got_variant = false;
-        h->seg_count = 0;
-        h->seg_next = 0;
-
-        char *save = nullptr;
-        bool after_stream_inf = false;
-        for (char *line = strtok_r(text, "\n", &save); line != nullptr;
-             line = strtok_r(nullptr, "\n", &save)) {
-            const size_t len = strlen(line);
-            if (len > 0u && line[len - 1u] == '\r') {
-                line[len - 1u] = '\0';
-            }
-            if (line[0] == '\0') {
-                continue;
-            }
-            if (master) {
-                if (strncmp(line, "#EXT-X-STREAM-INF", 17) == 0) {
-                    after_stream_inf = true;
-                } else if (after_stream_inf && line[0] != '#') {
-                    // First variant: adopt it as the media playlist and refetch.
-                    char resolved[512];
-                    hls_resolve_url(h->playlist_url, line, resolved, sizeof(resolved));
-                    snprintf(h->playlist_url, sizeof(h->playlist_url), "%s", resolved);
-                    got_variant = true;
-                    break;
-                }
-                continue;
-            }
-            if (strncmp(line, "#EXT-X-MEDIA-SEQUENCE:", 22) == 0) {
-                first_seq = strtoull(line + 22, nullptr, 10);
-            } else if (strncmp(line, "#EXT-X-TARGETDURATION:", 22) == 0) {
-                const unsigned long v = strtoul(line + 22, nullptr, 10);
-                if (v > 0ul && v <= 60ul) {
-                    h->target_duration_s = static_cast<uint32_t>(v);
-                }
-            } else if (strcmp(line, "#EXT-X-ENDLIST") == 0) {
-                endlist = true;
-            } else if (line[0] != '#') {
-                const uint64_t seq = first_seq + listed;
-                ++listed;
-                if (seq >= h->next_media_seq && h->seg_count < kHlsMaxSegments) {
-                    hls_resolve_url(h->playlist_url, line,
-                                    h->seg_urls[h->seg_count], sizeof(h->seg_urls[0]));
-                    ++h->seg_count;
-                }
-            }
-        }
-
-        if (master) {
-            if (!got_variant) {
-                ESP_LOGE(TAG, "hls: master playlist without variants");
-                break;
-            }
-            continue; // refetch the variant playlist
-        }
-        h->next_media_seq = first_seq + listed;
-        h->live = !endlist;
-        h->last_fetch_us = esp_timer_get_time();
-        ok = true;
-        break;
     }
-    return ok;
-}
-
-// Sequential byte stream across segments; refreshes the playlist on live
-// streams. Returns 0 only at true end of stream (VOD done / stopped / error).
-static size_t hls_read(HlsStream *h, uint8_t *dst, const size_t size)
-{
-    while (h->stop == nullptr || !*h->stop) {
-        if (h->seg_http == nullptr) {
-            if (h->seg_next >= h->seg_count) {
-                if (!h->live) {
-                    ESP_LOGI(TAG, "hls: vod played out");
-                    return 0; // VOD played out
-                }
-                // Live: poll the playlist for new segments, pacing by the
-                // advertised segment duration.
-                const int64_t since_us = esp_timer_get_time() - h->last_fetch_us;
-                const int64_t min_wait_us =
-                    static_cast<int64_t>(h->target_duration_s) * 500000LL; // half target
-                if (since_us < min_wait_us) {
-                    vTaskDelay(pdMS_TO_TICKS(200));
-                    continue;
-                }
-                if (!hls_load_playlist(h)) {
-                    vTaskDelay(pdMS_TO_TICKS(1000));
-                    continue;
-                }
-                if (h->seg_count == 0u) {
-                    vTaskDelay(pdMS_TO_TICKS(500));
-                }
-                continue;
-            }
-            const char *url = h->seg_urls[h->seg_next++];
-            h->seg_http = http_open_stream(url, 8000, 4096, &h->insecure);
-            if (h->seg_http == nullptr) {
-                ESP_LOGW(TAG, "hls: segment open failed, skipping");
-                continue;
-            }
-            (void)esp_http_client_fetch_headers(h->seg_http);
-            const int status = esp_http_client_get_status_code(h->seg_http);
-            if (status != 200) {
-                ESP_LOGW(TAG, "hls: segment HTTP %d, skipping", status);
-                (void)esp_http_client_close(h->seg_http);
-                esp_http_client_cleanup(h->seg_http);
-                h->seg_http = nullptr;
-                continue;
-            }
-            h->seg_bytes = 0;
-        }
-        const int n = esp_http_client_read(h->seg_http, reinterpret_cast<char *>(dst),
-                                           static_cast<int>(size));
-        if (n > 0) {
-            h->seg_bytes += static_cast<size_t>(n);
-            return static_cast<size_t>(n);
-        }
-        // Segment finished (or errored): move on to the next one.
-        ESP_LOGI(TAG, "hls: segment %u/%u done (%u bytes)",
-                 static_cast<unsigned>(h->seg_next),
-                 static_cast<unsigned>(h->seg_count),
-                 static_cast<unsigned>(h->seg_bytes));
-        (void)esp_http_client_close(h->seg_http);
-        esp_http_client_cleanup(h->seg_http);
-        h->seg_http = nullptr;
+    if (got == 0u) {
+        return 0;
     }
-    ESP_LOGI(TAG, "hls: stopped by owner");
-    return 0;
-}
-
-static void hls_close(HlsStream *h)
-{
-    if (h == nullptr) {
-        return;
-    }
-    if (h->seg_http != nullptr) {
-        (void)esp_http_client_close(h->seg_http);
-        esp_http_client_cleanup(h->seg_http);
-    }
-    if (h->seg_urls == s_hls_segment_urls) s_hls_urls_in_use = false;
-    heap_caps_free(h);
-}
-
-// Open the m3u8 source and prime the first segment so Open() can sniff the
-// container type. Returns nullptr on any failure.
-static HlsStream *hls_open(const char *url, volatile bool *stop)
-{
-    if (s_hls_urls_in_use) return nullptr;
-    HlsStream *h = static_cast<HlsStream *>(heap_caps_calloc(1, sizeof(HlsStream), MALLOC_CAP_SPIRAM));
-    if (h == nullptr) {
-        return nullptr;
-    }
-    s_hls_urls_in_use = true;
-    h->seg_urls = s_hls_segment_urls;
-    snprintf(h->playlist_url, sizeof(h->playlist_url), "%s", url);
-    h->target_duration_s = 6;
-    h->stop = stop;
-    if (!hls_load_playlist(h) || h->seg_count == 0u) {
-        ESP_LOGE(TAG, "hls: no playable segments: %s", url);
-        hls_close(h);
-        return nullptr;
-    }
-    ESP_LOGI(TAG, "hls: %s stream, %u segments queued, target %lus",
-             h->live ? "live" : "vod",
-             static_cast<unsigned>(h->seg_count),
-             static_cast<unsigned long>(h->target_duration_s));
-    return h;
-}
-
-// ---- read-ahead ring --------------------------------------------------------
-
-// Raw read from whichever source backs the decoder (no ring), serving the
-// sniffed bytes first. Runs in the filler task for ring-backed sources.
-static size_t source_read_direct(MediaDecoder *d, uint8_t *dst, const size_t size)
-{
-    if (decoder_stop_requested(d)) {
-        return 0u;
-    }
-    size_t total = 0;
-    while (total < size && d->prefix_off < d->prefix_len) {
-        dst[total++] = d->prefix[d->prefix_off++];
-    }
-    if (total == size) {
-        return total;
-    }
-    while (total < size && d->sniff_off < d->sniff_len) {
-        dst[total++] = d->sniff[d->sniff_off++];
-    }
-    if (total == size) {
-        return total;
-    }
-    if (d->smb != nullptr) {
-        const int got = SMB_STREAM_Read(d->smb, dst + total, size - total);
-        if (got < 0) {
-            d->source_error = true;
-            return total;
-        }
-        return total + static_cast<size_t>(got);
-    }
-    if (d->file != nullptr) {
-        const int64_t t0 = esp_timer_get_time();
-        const size_t got = fread(dst + total, 1, size - total, d->file);
-        const int64_t dt_ms = (esp_timer_get_time() - t0) / 1000;
-        if (dt_ms > 2000) {
-            ESP_LOGW(TAG, "slow source read: %u bytes in %lld ms",
-                     static_cast<unsigned>(got), static_cast<long long>(dt_ms));
-        }
-        if (got == 0u && ferror(d->file)) {
-            ESP_LOGW(TAG, "source read failed: errno=%d", errno);
-            d->source_error = true;
-        }
-        return total + got;
-    }
-    if (d->hls != nullptr) {
-        return total + hls_read(d->hls, dst + total, size - total);
-    }
-    if (d->http != nullptr) {
-        const int got = esp_http_client_read(d->http, reinterpret_cast<char *>(dst) + total,
-                                             static_cast<int>(size - total));
-        return total + ((got > 0) ? static_cast<size_t>(got) : 0u);
-    }
-    return total;
-}
-
-static void ring_filler_task(void *arg)
-{
-    (void)arg;
-    while (true) {
-        (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        MediaDecoder *d = s_ring_owner;
-        if (d == nullptr) continue;
-
-        while (!decoder_stop_requested(d)) {
-            const size_t head = d->ring_head;
-            const size_t tail = d->ring_tail;
-            const size_t used = (head + kRingBytes - tail) % kRingBytes;
-            const size_t free_space = kRingBytes - 1u - used;
-            if (free_space < kRingFillChunk) {
-                vTaskDelay(pdMS_TO_TICKS(10));
-                continue;
-            }
-            size_t want = kRingBytes - head;
-            if (want > free_space) want = free_space;
-            if (want > kRingFillChunk) want = kRingFillChunk;
-            const size_t got = source_read_direct(d, d->ring + head, want);
-            if (got == 0u) {
-                if (!decoder_stop_requested(d)) {
-                    ESP_LOGI(TAG, "readahead: source end of stream");
-                }
-                d->ring_eof = true;
-                break;
-            }
-            d->ring_head = (head + got) % kRingBytes;
-            vTaskDelay(1);
-        }
-        d->ring_running = false;
-    }
-}
-
-// Start the read-ahead ring; on failure the decoder falls back to direct
-// reads (correct, just stutter-prone again).
-static void ring_start(MediaDecoder *d)
-{
-    if (s_ring_owner != nullptr) {
-        ESP_LOGW(TAG, "read-ahead ring already in use; using direct reads");
-        return;
-    }
-    s_ring_owner = d;
-    d->ring = s_media_ring;
-    d->ring_head = 0;
-    d->ring_tail = 0;
-    d->ring_eof = false;
-    d->ring_stop = false;
-    d->ring_running = true;
-    d->ring_wait_full = (d->file != nullptr || d->smb != nullptr ||
-                         d->http != nullptr);
-    d->ring_prebuffer_bytes = (d->http != nullptr)
-                                  ? kHttpPrebufferBytes
-                                  : (d->source_is_smb ? kSmbPrebufferBytes : 0u);
-    // PSRAM stack: this task only does source reads (SMB over the network / SD via
-    // SDMMC / HTTP) -- none of which touch the internal SPI flash, and flash
-    // auto-suspend keeps the cache alive anyway -- so its stack is safe in PSRAM.
-    // Keeping it out of internal RAM lets it create even while Bluetooth holds its
-    // 40 KB internal reserve; the old 8 KB internal stack failed to allocate with
-    // BT on, dropping SMB playback back to unbuffered direct reads (stutter). Only
-    // a ~700 B TCB stays internal. Core 0 owns lwIP/Wi-Fi and was saturated by
-    // their work plus SMB protocol processing; Core 1 still had >80% idle while
-    // decoding FLAC. Run the filler on Core 1 so socket callbacks stay on Core 0
-    // but libsmb2 polling/parsing and PSRAM writes use the spare core.
-    if (s_ring_worker == nullptr) {
-        if (xTaskCreatePinnedToCoreWithCaps(ring_filler_task, "mdec_fill", 8192,
-                                            nullptr, 5, &s_ring_worker, 1,
-                                            MALLOC_CAP_SPIRAM) != pdPASS) {
-            ESP_LOGW(TAG, "read-ahead task create failed; using direct reads");
-            d->ring_running = false;
-            d->ring = nullptr;
-            s_ring_owner = nullptr;
-            return;
-        }
-    }
-    d->ring_task = s_ring_worker;
-    xTaskNotifyGive(s_ring_worker);
-}
-
-static void ring_stop_and_free(MediaDecoder *d)
-{
-    if (d->ring == nullptr) {
-        return;
-    }
-    d->ring_stop = true;
-    // The filler can sit inside an SMB/HTTP read for several seconds; give
-    // it time to notice the flag. If it never exits, leak rather than crash.
-    for (int i = 0; i < 1200 && d->ring_running; ++i) {
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-    if (d->ring_running) {
-        ESP_LOGE(TAG, "read-ahead task stuck; leaking decoder resources");
-        return;
-    }
-    // Keep this PSRAM-backed worker and its TCB alive between tracks. Deleting
-    // it from the other core while it entered vTaskSuspend() could corrupt the
-    // SMP ready list during rapid stop/track changes.
-    d->ring_task = nullptr;
-    d->ring = nullptr;
-    if (s_ring_owner == d) s_ring_owner = nullptr;
-}
-
-} // namespace
-
-extern "C" MediaDecoder *MEDIA_DECODER_Open(
-    const char *path, const volatile bool *stop_requested)
-{
-    if (path == nullptr || (stop_requested != nullptr && *stop_requested)) {
-        return nullptr;
-    }
-
-    if (!s_default_registered) {
-        // Two registries: the simple-dec default only adds the container
-        // parsers (WAV/M4A/TS/OGG); they dispatch into the elementary-stream
-        // decoder registry, which must be populated separately -- without it
-        // every MP3/FLAC open fails with "Decoder ... not registered".
-        // Register only the codecs the playlist accepts (wav/mp3/flac/m4a/aac,
-        // see music_playlist.cpp): esp_audio_dec_register_default() would link
-        // every codec lib (Opus/Vorbis/LC3/SBC/...) and overflow the app
-        // partition.
-        const bool ok = esp_mp3_dec_register() == ESP_AUDIO_ERR_OK &&
-                        esp_aac_dec_register() == ESP_AUDIO_ERR_OK &&
-                        esp_flac_dec_register() == ESP_AUDIO_ERR_OK &&
-                        esp_pcm_dec_register() == ESP_AUDIO_ERR_OK &&
-                        esp_adpcm_dec_register() == ESP_AUDIO_ERR_OK &&
-                        esp_audio_simple_dec_register_default() == ESP_AUDIO_ERR_OK;
-        if (!ok) {
-            ESP_LOGE(TAG, "register default decoders failed");
-            return nullptr;
-        }
-        s_default_registered = true;
-    }
-
-    const bool is_http = strncmp(path, "http://", 7) == 0 || strncmp(path, "https://", 8) == 0;
-    const bool is_hls = is_http && strstr(path, ".m3u8") != nullptr;
-    constexpr size_t kSmbMountLen = sizeof(SMB_VFS_MOUNT_POINT) - 1u;
-    const bool is_smb = strncmp(path, SMB_VFS_MOUNT_POINT, kSmbMountLen) == 0 &&
-                        (path[kSmbMountLen] == '/' || path[kSmbMountLen] == '\0');
-
-    if (s_media_buffers_in_use) {
-        ESP_LOGE(TAG, "only one media decoder can be active");
-        return nullptr;
-    }
-
-    MediaDecoder *d = static_cast<MediaDecoder *>(heap_caps_calloc(1, sizeof(MediaDecoder), MALLOC_CAP_SPIRAM));
-    if (d == nullptr) {
-        return nullptr;
-    }
-    s_media_buffers_in_use = true;
-    d->external_stop = stop_requested;
-
-    if (is_hls) {
-        // m3u8 playlist: resolve to a segment stream, then sniff the first
-        // segment's leading bytes for container detection (TS / ADTS / MP3).
-        d->hls = hls_open(path, &d->ring_stop);
-        if (d->hls == nullptr) {
-            MEDIA_DECODER_Close(d);
-            return nullptr;
-        }
-        size_t sniffed = 0;
-        while (sniffed < sizeof(d->sniff)) {
-            const size_t got = hls_read(d->hls, d->sniff + sniffed, sizeof(d->sniff) - sniffed);
-            if (got == 0u) {
-                break;
-            }
-            sniffed += got;
-        }
-        d->sniff_len = sniffed;
-    } else if (is_http) {
-        // Net-radio stream: open the connection, then sniff the first bytes
-        // for format detection (the stream is not seekable, so the sniffed
-        // bytes are replayed ahead of the decoder's reads).
-        d->http = http_open_stream(path, 10000, 4096);
-        if (d->http == nullptr) {
-            ESP_LOGE(TAG, "stream open failed: %s", path);
-            MEDIA_DECODER_Close(d);
-            return nullptr;
-        }
-        (void)esp_http_client_fetch_headers(d->http);
-        const int status = esp_http_client_get_status_code(d->http);
-        if (status != 200) {
-            ESP_LOGE(TAG, "stream HTTP %d: %s", status, path);
-            MEDIA_DECODER_Close(d);
-            return nullptr;
-        }
-        int sniffed = 0;
-        while (sniffed < static_cast<int>(sizeof(d->sniff))) {
-            const int got = esp_http_client_read(d->http,
-                                                 reinterpret_cast<char *>(d->sniff) + sniffed,
-                                                 static_cast<int>(sizeof(d->sniff)) - sniffed);
-            if (got <= 0) {
-                break;
-            }
-            sniffed += got;
-        }
-        d->sniff_len = static_cast<size_t>(sniffed);
-    } else if (is_smb) {
-        d->source_is_smb = true;
-        d->smb = SMB_STREAM_Open(path, stop_requested);
-        if (d->smb == nullptr) {
-            ESP_LOGE(TAG, "SMB stream open failed: %s", path);
-            MEDIA_DECODER_Close(d);
-            return nullptr;
-        }
-        const int sniffed = SMB_STREAM_Read(d->smb, d->sniff, sizeof(d->sniff));
-        if (sniffed <= 0 || !SMB_STREAM_Seek(d->smb, 0, SEEK_SET)) {
-            ESP_LOGE(TAG, "SMB stream sniff failed: %s", path);
-            MEDIA_DECODER_Close(d);
-            return nullptr;
-        }
-        d->sniff_len = static_cast<size_t>(sniffed);
-        d->sniff_off = d->sniff_len; // stream rewound: nothing to replay
-    } else {
-        d->file = fopen(path, "rb");
-        if (d->file == nullptr) {
-            ESP_LOGE(TAG, "open failed: %s", path);
-            MEDIA_DECODER_Close(d);
-            return nullptr;
-        }
-        d->sniff_len = fread(d->sniff, 1, sizeof(d->sniff), d->file);
-        (void)fseek(d->file, 0, SEEK_SET);
-        d->sniff_off = d->sniff_len; // file rewound: nothing to replay
-    }
-
-    esp_audio_simple_dec_type_t type = detect_type_from_header(d->sniff, d->sniff_len, path);
-    if (type == ESP_AUDIO_SIMPLE_DEC_TYPE_NONE && is_hls) {
-        // HLS segments that didn't sniff as TS/ADTS/MP3: raw AAC is the
-        // usual remaining case.
-        type = ESP_AUDIO_SIMPLE_DEC_TYPE_AAC;
-    }
-    if (type == ESP_AUDIO_SIMPLE_DEC_TYPE_NONE && is_http) {
-        // Typeless radio URL: MP3 is the de-facto webradio default.
-        type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
-    }
-    if (type == ESP_AUDIO_SIMPLE_DEC_TYPE_NONE) {
-        ESP_LOGE(TAG, "unsupported format: %s", path);
-        MEDIA_DECODER_Close(d);
-        return nullptr;
-    }
-    d->type = type;
-
-    if (type == ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC && d->file != nullptr) {
-        FlacStreamInfo flac = {};
-        if (flac_read_stream_info(d->file, &flac)) {
-            flac_install_compact_prefix(d, &flac);
-            ESP_LOGI(TAG, "FLAC streaminfo: %luHz %ubit %uch, audio offset=%ld",
-                     static_cast<unsigned long>(flac.sample_rate_hz),
-                     static_cast<unsigned>(flac.bits_per_sample),
-                     static_cast<unsigned>(flac.channels),
-                     flac.audio_offset);
-        }
-    }
-
-    d->raw_buffer = s_raw_buffer;
-    d->out_buffer = s_out_buffer;
-    d->out_capacity = kOutputBufferBytes;
-
-    esp_audio_simple_dec_cfg_t cfg = {};
-    cfg.dec_type = type;
-    if (d->raw_buffer == nullptr || d->out_buffer == nullptr ||
-        esp_audio_simple_dec_open(&cfg, &d->handle) != ESP_AUDIO_ERR_OK) {
-        ESP_LOGE(TAG, "decoder open failed: %s (%s)", path, esp_audio_simple_dec_get_name(type));
-        MEDIA_DECODER_Close(d);
-        return nullptr;
-    }
-
-    // File, HLS and direct HTTP sources read through the PSRAM ring so storage
-    // or network latency does not reach the I2S writer as audio stutter.
-    if (d->file != nullptr || d->smb != nullptr || d->hls != nullptr ||
-        d->http != nullptr) {
-        ring_start(d);
-    }
-
-    ESP_LOGI(TAG, "decoding %s as %s%s%s", path, esp_audio_simple_dec_get_name(type),
-             is_hls ? " (hls)" : (is_http ? " (stream)" : ""),
-             d->ring != nullptr ? " +readahead" : "");
-    return d;
-}
-
-extern "C" int MEDIA_DECODER_Decode(MediaDecoder *d, const uint8_t **pcm_out, size_t *bytes_out)
-{
-    if (d == nullptr || d->handle == nullptr || pcm_out == nullptr || bytes_out == nullptr) {
-        return -1;
-    }
-
-    // Progress diagnostics: a healthy call returns within a few reads. If we
-    // are still in here after seconds, report where the time is going (spin
-    // in the parser vs. blocked in the source read) instead of hanging mute.
-    const int64_t enter_us = esp_timer_get_time();
-    int64_t last_report_us = enter_us;
-    unsigned iterations = 0;
-    unsigned stalled_calls = 0;
-
-    while (true) {
-        if (decoder_stop_requested(d)) {
-            return 0;
-        }
-        ++iterations;
-        const int64_t now_us = esp_timer_get_time();
-        if (now_us - last_report_us > 5000000LL) {
-            last_report_us = now_us;
-            ESP_LOGW(TAG, "decode stalled %llds: %u loops, raw fill=%u off=%u eof=%d",
-                     static_cast<long long>((now_us - enter_us) / 1000000LL),
-                     iterations,
-                     static_cast<unsigned>(d->raw_fill),
-                     static_cast<unsigned>(d->raw_offset),
-                     d->eof ? 1 : 0);
-        }
-
-        // Refill the raw buffer when the parser consumed everything.
-        if (d->raw_offset >= d->raw_fill) {
-            if (d->eof) {
-                return 0;
-            }
-            const size_t raw_want = (d->type == ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC)
-                                        ? kFlacRawChunkBytes
-                                        : (d->source_is_smb ? kSmbRawChunkBytes
-                                                            : kRawBufferBytes);
-            d->raw_fill = read_source(d, d->raw_buffer, raw_want);
-            d->raw_offset = 0;
-            if (d->raw_fill == 0u) {
-                if (d->source_error) {
-                    return -1;
-                }
-                d->eof = true;
-                return 0;
-            }
-            // Live HTTP streams legitimately return short reads; only local
-            // files treat one as end-of-stream (FLAC needs the eos flag to
-            // flush its tail).
-            if ((d->file != nullptr || d->smb != nullptr) &&
-                d->raw_fill < raw_want) {
-                d->eof = true;
-            }
-        }
-
-        esp_audio_simple_dec_raw_t raw = {};
-        raw.buffer = d->raw_buffer + d->raw_offset;
-        raw.len = static_cast<uint32_t>(d->raw_fill - d->raw_offset);
-        raw.eos = d->eof;
-
-        esp_audio_simple_dec_out_t frame = {};
-        frame.buffer = d->out_buffer;
-        frame.len = static_cast<uint32_t>(d->out_capacity);
-
-        const esp_audio_err_t err = esp_audio_simple_dec_process(d->handle, &raw, &frame);
-        if (err == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH) {
-            const size_t before = d->out_capacity;
-            if (!grow_out_buffer(d, frame.needed_size)) {
-                ESP_LOGE(TAG, "out buffer grow to %lu failed",
-                         static_cast<unsigned long>(frame.needed_size));
-                return -1;
-            }
-            if (d->out_capacity == before) {
-                // Decoder demands a buffer we already have: bail rather than
-                // spin forever on the same error.
-                ESP_LOGE(TAG, "decoder wants %lu bytes but %lu available",
-                         static_cast<unsigned long>(frame.needed_size),
-                         static_cast<unsigned long>(d->out_capacity));
-                return -1;
-            }
-            continue;
-        }
-        if (err != ESP_AUDIO_ERR_OK) {
-            ESP_LOGE(TAG, "decode error %d", static_cast<int>(err));
-            return -1;
-        }
-
-        d->raw_offset += raw.consumed;
-
-        if (frame.decoded_size > 0u) {
-            if (!d->info_valid) {
-                esp_audio_simple_dec_info_t info = {};
-                if (esp_audio_simple_dec_get_info(d->handle, &info) == ESP_AUDIO_ERR_OK) {
-                    d->info.sample_rate_hz = info.sample_rate;
-                    d->info.bits_per_sample = info.bits_per_sample;
-                    d->info.channels = info.channel;
-                    d->info_valid = true;
-                }
-            }
-            *pcm_out = d->out_buffer;
-            *bytes_out = frame.decoded_size;
-            return 1;
-        }
-
-        // No output and nothing consumed: call process again with the SAME
-        // untouched window. The simple decoders cache input internally and
-        // may hold references into the unconsumed span, so it must never be
-        // moved or overwritten (see the reference loop in the esp_audio_codec
-        // test app) -- the old compact-and-refill here corrupted the TS
-        // demuxer's state. Guard against a decoder that truly stops.
-        if (raw.consumed == 0u) {
-            if (++stalled_calls > 1000u) {
-                ESP_LOGE(TAG, "parser made no progress (%u bytes pending)",
-                         static_cast<unsigned>(d->raw_fill - d->raw_offset));
-                return -1;
-            }
-        } else {
-            stalled_calls = 0;
-        }
-    }
+    *pcm_out = s_out_buffer;
+    *bytes_out = got;
+    return 1;
 }
 
 extern "C" bool MEDIA_DECODER_GetInfo(MediaDecoder *d, MediaDecoderInfo *out_info)
@@ -1153,30 +703,19 @@ extern "C" void MEDIA_DECODER_Close(MediaDecoder *d)
         ESP_LOGI(TAG, "underrun summary: %u events, %u ms dry total",
                  d->underrun_events, d->underrun_total_ms);
     }
-    // Stop the read-ahead filler before touching the sources it reads from.
-    if (d->ring != nullptr) {
-        ring_stop_and_free(d);
-        if (d->ring != nullptr) {
-            // Filler wedged inside a source read: leak everything it might
-            // still touch rather than free under its feet.
-            return;
-        }
+    log_heap_state("close");
+    // Wake a pipeline job blocked in the PCM release callback before stopping,
+    // then stop: the stop flow closes the source IO (its prev_close breaks a
+    // blocked network read) and waits for every job to exit.
+    d->abort = true;
+    if (d->pipe != nullptr) {
+        (void)esp_gmf_pipeline_stop(d->pipe);
+        (void)esp_gmf_pipeline_destroy(d->pipe);
+        d->pipe = nullptr;
     }
-    if (d->handle != nullptr) {
-        esp_audio_simple_dec_close(d->handle);
-    }
-    if (d->file != nullptr) {
-        fclose(d->file);
-    }
-    if (d->smb != nullptr) {
-        SMB_STREAM_Close(d->smb);
-    }
-    if (d->http != nullptr) {
-        (void)esp_http_client_close(d->http);
-        (void)esp_http_client_cleanup(d->http);
-    }
-    if (d->hls != nullptr) {
-        hls_close(d->hls);
+    if (d->task != nullptr) {
+        (void)esp_gmf_task_deinit(d->task);
+        d->task = nullptr;
     }
     heap_caps_free(d);
     s_media_buffers_in_use = false;

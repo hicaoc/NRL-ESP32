@@ -92,6 +92,7 @@ constexpr size_t kStationFieldChars = 10u;
 constexpr size_t kWifiOptionCount = 12u;  // max scanned SSIDs listed in the dropdown
 constexpr size_t kMusicListMaxRows = 48u; // keep LVGL list layout bounded on large libraries
 NRL_PSRAM_BSS uint8_t s_video_local_jpeg[VIDEO_MAX_JPEG_BYTES];
+NRL_PSRAM_BSS uint8_t s_video_remote_jpeg[VIDEO_MAX_JPEG_BYTES];
 
 enum class Page : uint8_t {
     Provisioning,
@@ -115,6 +116,8 @@ enum class Page : uint8_t {
     Ai,
     About,
     Aprs,
+    AprsMsg,
+    AprsGateway,
     Cw,
     CwScore,
     Map,
@@ -172,6 +175,18 @@ enum class Action : intptr_t {
     OtaNewer,
     InstallOta,
     Aprs,
+    AprsBeacon,
+    AprsNrlTx,
+    AprsNrlRx,
+    AprsMsgOpen,
+    AprsMsgSend,
+    AprsGatewayOpen,
+    AprsFwdRfIs,
+    AprsFwdIsRf,
+    AprsFwdNrlIs,
+    AprsFwdIsNrl,
+    AprsFwdRfNrl,
+    AprsFwdNrlRf,
     Cw,
     CwDelete,
     CwSend,
@@ -239,10 +254,18 @@ volatile bool s_wifi_scan_running = false;
 volatile bool s_wifi_scan_complete = false;
 volatile bool s_wifi_scan_ok = false;
 TaskHandle_t s_wifi_scan_task = nullptr;
-volatile bool s_music_scan_running = false;
-volatile bool s_music_scan_complete = false;
-volatile size_t s_music_scan_count = 0;
-TaskHandle_t s_music_scan_task = nullptr;
+// Async enter/up/rescan of the display's browse session started by a list
+// tap; pollMusicScan watches PLAYLIST_ClientIsScanning(DISPLAY) and
+// repopulates the list when it finishes.
+bool s_music_dir_scan_pending = false;
+// PLAYLIST_ClientScanRevision(DISPLAY) the visible list was built from. Any
+// later scan of the display session bumps the revision and makes the
+// on-screen row indices stale.
+uint32_t s_music_list_rev = 0u;
+// Current page of the music list; resets to 0 whenever the listing revision
+// changes (directory change, rescan, external scan).
+size_t s_music_page = 0u;
+uint32_t s_music_page_rev = 0u;
 
 esp_lcd_panel_handle_t s_panel = nullptr;
 lv_display_t *s_disp = nullptr;
@@ -418,6 +441,11 @@ lv_obj_t *s_sw_aprs = nullptr;
 lv_obj_t *s_lbl_aprs_status = nullptr;
 lv_obj_t *s_lbl_aprs_list = nullptr;
 char s_shown_aprs_status[128] = {};
+// APRS manual-message page: draft fields survive page switches.
+lv_obj_t *s_ta_aprs_dest = nullptr;
+lv_obj_t *s_ta_aprs_text = nullptr;
+char s_aprs_msg_dest[12] = {};
+char s_aprs_msg_text[72] = {};
 char s_shown_aprs_list[704] = {};
 uint32_t s_aprs_seen_revision = 0u;
 uint32_t s_aprs_last_refresh_ms = 0u;
@@ -477,6 +505,11 @@ lv_obj_t *s_sstv_src_label = nullptr;
 lv_obj_t *s_sstv_rx_toggle_label = nullptr;
 lv_obj_t *s_img_sstv = nullptr;
 lv_image_dsc_t s_sstv_dsc = {};
+// TX-source preview in the same right-side window: camera captures and
+// TF-card images decode to this bitmap; a new RX frame takes it back.
+CoverBitmap s_sstv_tx_bmp = {};
+lv_image_dsc_t s_sstv_tx_dsc = {};
+bool s_sstv_tx_preview = false;
 SSTV_Mode s_sstv_tx_mode = SSTV_MODE_ROBOT36;
 SstvRxSource s_sstv_rx_source = SSTV_SOURCE_MIC;
 char s_sstv_files[kSstvFileMax][kSstvNameChars] = {};
@@ -490,13 +523,14 @@ uint32_t s_sstv_msg_ms = 0u;
 // /sdcard/sstv/sstv_rx_*.jpg, static rebuild-on-action like the CW score page.
 constexpr size_t kSstvLogMax = 32u;
 uint8_t s_sstv_view = 0u; // 0 = main SSTV page, 1 = RX log list, 2 = log viewer
-char s_sstv_log_files[kSstvLogMax][kSstvNameChars] = {};
+NRL_PSRAM_BSS char s_sstv_log_files[kSstvLogMax][kSstvNameChars] = {};
 size_t s_sstv_log_count = 0u;
 size_t s_sstv_log_index = 0u;
 CoverBitmap s_sstv_log_bmp = {};
 lv_image_dsc_t s_sstv_log_dsc = {};
 lv_obj_t *s_img_sstv_log = nullptr;
 lv_obj_t *s_btn_video_tx_label = nullptr;
+volatile bool s_video_tx_toggle_busy = false; // camera open/close in a helper task
 CoverBitmap s_video_bmp = {};
 lv_image_dsc_t s_video_dsc = {};
 constexpr uint16_t kVideoFrameDim = 456; // fits the 800x480 page layout
@@ -509,12 +543,15 @@ constexpr uint16_t kVideoLocalDim = 144; // scaled decode; fits the PIP panel
 
 // Video decode worker: JPEG -> RGB565 for both the remote frame and the
 // local self-view runs in this task instead of inside Display_Poll, so the
-// LVGL/touch latency stays flat while a call is up. Core 0 (core 1 is
-// reserved for the audio pipeline + BT), priority 3: below the main loop (5)
-// and the camera TX task (4) -- decoding uses leftover cycles and simply
-// drops to a lower frame rate under load (Acquire/Copy always hand out only
-// the newest frame). Handoff to the UI is a pair of pending bitmaps guarded
-// by s_video_view_lock; refreshVideo adopts them with a non-blocking take.
+// LVGL/touch latency stays flat while a call is up. Core 1, priority 3:
+// core 0 already carries the WiFi stack, the audio bridge, the camera TX
+// burst task and LVGL during a call -- a decode starved for cycles there
+// stretched a single jpeg_dec_process() past the task-watchdog window and
+// IDLE0 panicked. Core 1 runs the (higher-priority) music player and BT at
+// most, so decoding uses its leftover cycles and simply drops to a lower
+// frame rate under load (Acquire/Copy always hand out only the newest
+// frame). Handoff to the UI is a pair of pending bitmaps guarded by
+// s_video_view_lock; refreshVideo adopts them with a non-blocking take.
 TaskHandle_t s_video_view_task = nullptr;
 volatile bool s_video_view_run = false;
 SemaphoreHandle_t s_video_view_lock = nullptr;
@@ -1160,6 +1197,7 @@ void refresh();
 void refreshOtaPage();
 void refreshAprsPage();
 void buildAprs();
+void buildAprsGateway();
 void rebuildCurrentPage();
 void buildProvisioning();
 void refreshProvisioning();
@@ -1525,6 +1563,8 @@ void clearScreen()
     s_lbl_aprs_status = nullptr;
     s_lbl_aprs_list = nullptr;
     s_shown_aprs_status[0] = '\0';
+    s_ta_aprs_dest = nullptr;
+    s_ta_aprs_text = nullptr;
     s_shown_aprs_list[0] = '\0';
 }
 
@@ -2699,20 +2739,40 @@ const char *musicBasename(const char *path)
 }
 
 void populateMusicList();
+void showMusicListStatus(const char *text, uint32_t color);
+
+// True when the display session's tables were rebuilt after the visible list
+// was populated: row indices no longer match the screen, so repaint instead
+// of acting on a stale index.
+bool musicListStale()
+{
+    if (PLAYLIST_ClientScanRevision(PLAYLIST_CLIENT_DISPLAY) == s_music_list_rev) {
+        return false;
+    }
+    populateMusicList();
+    s_last_refresh_ms = 0;
+    return true;
+}
 
 void musicListEvent(lv_event_t *event)
 {
+    if (musicListStale()) {
+        return;
+    }
     const size_t index = static_cast<size_t>(
         reinterpret_cast<uintptr_t>(lv_event_get_user_data(event)));
-    (void)PLAYLIST_PlayIndex(index);
+    (void)PLAYLIST_ClientPlayIndex(PLAYLIST_CLIENT_DISPLAY, index);
     s_last_refresh_ms = 0;
 }
 
 void musicFavoriteEvent(lv_event_t *event)
 {
+    if (musicListStale()) {
+        return;
+    }
     const size_t index = static_cast<size_t>(
         reinterpret_cast<uintptr_t>(lv_event_get_user_data(event)));
-    const char *path = PLAYLIST_GetPath(index);
+    const char *path = PLAYLIST_ClientGetPath(PLAYLIST_CLIENT_DISPLAY, index);
     if (PLAYLIST_ToggleFavorite(path)) {
         populateMusicList();
     }
@@ -2721,19 +2781,37 @@ void musicFavoriteEvent(lv_event_t *event)
 
 void musicDirEvent(lv_event_t *event)
 {
+    if (musicListStale()) {
+        return;
+    }
     const size_t index = static_cast<size_t>(
         reinterpret_cast<uintptr_t>(lv_event_get_user_data(event)));
-    if (PLAYLIST_EnterDir(index)) {
-        populateMusicList();
+    // Async only: a synchronous scan on the UI task inside this LVGL event,
+    // and an SMB opendir on a dead connection froze lv_timer_handler for the
+    // whole 5 s directory-open timeout.
+    if (PLAYLIST_ClientEnterDirAsync(PLAYLIST_CLIENT_DISPLAY, index)) {
+        s_music_dir_scan_pending = true;
+        showMusicListStatus("Scanning...", kColorWarn);
     }
     s_last_refresh_ms = 0;
 }
 
 void musicUpEvent(lv_event_t *)
 {
-    if (PLAYLIST_Up()) {
-        populateMusicList();
+    if (PLAYLIST_ClientUpAsync(PLAYLIST_CLIENT_DISPLAY)) {
+        s_music_dir_scan_pending = true;
+        showMusicListStatus("Scanning...", kColorWarn);
     }
+    s_last_refresh_ms = 0;
+}
+
+void musicPageEvent(lv_event_t *event)
+{
+    const int delta = static_cast<int>(
+        reinterpret_cast<intptr_t>(lv_event_get_user_data(event)));
+    const int next = static_cast<int>(s_music_page) + delta;
+    s_music_page = (next > 0) ? static_cast<size_t>(next) : 0u;
+    populateMusicList();
     s_last_refresh_ms = 0;
 }
 
@@ -2742,9 +2820,17 @@ void populateMusicList()
     if (s_list_music == nullptr) {
         return;
     }
+    s_music_list_rev = PLAYLIST_ClientScanRevision(PLAYLIST_CLIENT_DISPLAY);
+    if (s_music_page_rev != s_music_list_rev) {
+        // New listing (directory change, rescan, external scan): back to page 1.
+        s_music_page_rev = s_music_list_rev;
+        s_music_page = 0u;
+    }
     lv_obj_clean(s_list_music);
+
+    const bool at_root = PLAYLIST_ClientAtRoot(PLAYLIST_CLIENT_DISPLAY);
     size_t rows_used = 0;
-    if (!PLAYLIST_AtRoot()) {
+    if (!at_root) {
         lv_obj_t *up = lv_list_add_button(s_list_music, LV_SYMBOL_LEFT, "..");
         lv_obj_set_style_bg_color(up, lv_color_hex(kColorPanel2), 0);
         lv_obj_set_style_text_color(up, lv_color_hex(kColorSub), 0);
@@ -2752,24 +2838,16 @@ void populateMusicList()
         ++rows_used;
     }
 
-    const size_t dir_count = PLAYLIST_DirCount();
-    for (size_t i = 0; i < dir_count && rows_used < kMusicListMaxRows; ++i) {
-        const char *name = PLAYLIST_GetDirName(i);
-        lv_obj_t *btn = lv_list_add_button(s_list_music, LV_SYMBOL_DIRECTORY,
-                                           (name != nullptr && name[0] != '\0') ? name : "(dir)");
-        lv_obj_set_style_bg_color(btn, lv_color_hex(kColorPanel2), 0);
-        lv_obj_set_style_text_color(btn, lv_color_hex(kColorText), 0);
-        lv_obj_add_event_cb(btn, musicDirEvent, LV_EVENT_CLICKED,
-                            reinterpret_cast<void *>(static_cast<uintptr_t>(i)));
-        ++rows_used;
-    }
-
-    const size_t count = PLAYLIST_Count();
+    const size_t dir_count = PLAYLIST_ClientDirCount(PLAYLIST_CLIENT_DISPLAY);
+    const size_t count = PLAYLIST_ClientCount(PLAYLIST_CLIENT_DISPLAY);
     if (count == 0u && dir_count == 0u) {
-        lv_obj_t *empty = lv_list_add_text(s_list_music,
-                                           tr(PLAYLIST_AtRoot()
-                                                  ? "No storage mounted."
-                                                  : "No tracks or subdirectories."));
+        // Render the hint in place (the ".." row above stays usable); a
+        // full-list status wipe here stranded users inside empty directories.
+        const char *msg = !PLAYLIST_ClientLastScanOk(PLAYLIST_CLIENT_DISPLAY)
+                              ? "Directory unavailable (connection lost)."
+                              : (at_root ? "No storage mounted."
+                                         : "No tracks or subdirectories.");
+        lv_obj_t *empty = lv_list_add_text(s_list_music, tr(msg));
         lv_obj_set_style_text_color(empty, lv_color_hex(kColorSub), 0);
         return;
     }
@@ -2779,61 +2857,104 @@ void populateMusicList()
     const bool bt_on = NRL_BtHfp_IsEnabled();
     const char *smb_mp = STORAGE_SmbMountPoint();
     const size_t smb_len = (smb_mp != nullptr) ? strlen(smb_mp) : 0u;
-    size_t track_shown = 0;
-    size_t playable = 0;
-    const int current = PLAYLIST_CurrentIndex();
-    size_t start = 0u;
-    const size_t track_row_budget =
-        (rows_used >= kMusicListMaxRows) ? 0u : (kMusicListMaxRows - rows_used);
-    if (current > 0 && count > track_row_budget && track_row_budget > 0u) {
-        start = static_cast<size_t>(current);
-        if (start > track_row_budget / 2u) {
-            start -= track_row_budget / 2u;
-        } else {
-            start = 0u;
+
+    // BT-hidden tracks are excluded from paging entirely.
+    size_t visible_tracks = 0u;
+    for (size_t i = 0; i < count; ++i) {
+        const char *path = PLAYLIST_ClientGetPath(PLAYLIST_CLIENT_DISPLAY, i);
+        if (bt_on && smb_len > 0u && path != nullptr &&
+            strncmp(path, smb_mp, smb_len) == 0) {
+            continue;
         }
-        if (start + track_row_budget > count) {
-            start = count - track_row_budget;
+        ++visible_tracks;
+    }
+    const size_t total_items = dir_count + visible_tracks;
+
+    // Paginate: kMusicListMaxRows rows at most, minus the ".." row and (when
+    // paged) the two page-nav rows. Directories with hundreds of entries
+    // were previously cut off at row 48 with no way to reach the rest.
+    size_t page_cap = kMusicListMaxRows - (at_root ? 0u : 1u);
+    const bool paged = total_items > page_cap;
+    if (paged) {
+        page_cap -= 2u;
+    }
+    const size_t pages = (total_items + page_cap - 1u) / page_cap;
+    if (s_music_page >= pages) {
+        s_music_page = pages - 1u;
+    }
+    const size_t item_begin = s_music_page * page_cap;
+    const size_t item_end =
+        (item_begin + page_cap < total_items) ? item_begin + page_cap : total_items;
+
+    size_t items_rendered = 0u;
+    size_t ordinal = 0u;
+    for (size_t i = 0; i < dir_count; ++i, ++ordinal) {
+        if (ordinal < item_begin || ordinal >= item_end) {
+            continue;
         }
+        const char *name = PLAYLIST_ClientGetDirName(PLAYLIST_CLIENT_DISPLAY, i);
+        lv_obj_t *btn = lv_list_add_button(s_list_music, LV_SYMBOL_DIRECTORY,
+                                           (name != nullptr && name[0] != '\0') ? name : "(dir)");
+        lv_obj_set_style_bg_color(btn, lv_color_hex(kColorPanel2), 0);
+        lv_obj_set_style_text_color(btn, lv_color_hex(kColorText), 0);
+        lv_obj_add_event_cb(btn, musicDirEvent, LV_EVENT_CLICKED,
+                            reinterpret_cast<void *>(static_cast<uintptr_t>(i)));
+        ++items_rendered;
+        ++rows_used;
     }
     for (size_t i = 0; i < count; ++i) {
-        const char *path = PLAYLIST_GetPath(i);
+        const char *path = PLAYLIST_ClientGetPath(PLAYLIST_CLIENT_DISPLAY, i);
         if (bt_on && smb_len > 0u && path != nullptr &&
             strncmp(path, smb_mp, smb_len) == 0) {
             continue;  // SMB track hidden while BT is on
         }
-        ++playable;
-        if (i < start || rows_used >= kMusicListMaxRows) {
-            continue;
+        if (ordinal >= item_begin && ordinal < item_end) {
+            char row[128];
+            snprintf(row, sizeof(row), "%s%s",
+                     PLAYLIST_IsFavorite(path) ? "* " : "",
+                     musicBasename(path));
+            lv_obj_t *btn = lv_list_add_button(s_list_music, LV_SYMBOL_AUDIO, row);
+            lv_obj_set_style_bg_color(btn, lv_color_hex(kColorPanel2), 0);
+            lv_obj_set_style_text_color(btn, lv_color_hex(kColorText), 0);
+            lv_obj_add_event_cb(btn, musicListEvent, LV_EVENT_CLICKED,
+                                reinterpret_cast<void *>(static_cast<uintptr_t>(i)));
+            lv_obj_add_event_cb(btn, musicFavoriteEvent, LV_EVENT_LONG_PRESSED,
+                                reinterpret_cast<void *>(static_cast<uintptr_t>(i)));
+            ++items_rendered;
+            ++rows_used;
         }
-        char row[128];
-        snprintf(row, sizeof(row), "%s%s",
-                 PLAYLIST_IsFavorite(path) ? "* " : "",
-                 musicBasename(path));
-        lv_obj_t *btn = lv_list_add_button(s_list_music, LV_SYMBOL_AUDIO, row);
-        lv_obj_set_style_bg_color(btn, lv_color_hex(kColorPanel2), 0);
-        lv_obj_set_style_text_color(btn, lv_color_hex(kColorText), 0);
-        lv_obj_add_event_cb(btn, musicListEvent, LV_EVENT_CLICKED,
-                            reinterpret_cast<void *>(static_cast<uintptr_t>(i)));
-        lv_obj_add_event_cb(btn, musicFavoriteEvent, LV_EVENT_LONG_PRESSED,
-                            reinterpret_cast<void *>(static_cast<uintptr_t>(i)));
-        ++track_shown;
-        ++rows_used;
+        ++ordinal;
     }
-    if (rows_used == 0u) {
+    if (items_rendered == 0u) {
         lv_obj_t *empty = lv_list_add_text(
             s_list_music,
             tr(bt_on ? "Network music is hidden while Bluetooth is on. Turn Bluetooth off to play SMB."
                      : "No tracks or subdirectories."));
         lv_obj_set_style_text_color(empty, lv_color_hex(kColorSub), 0);
-    } else if (playable > track_shown) {
-        char text[64];
-        snprintf(text, sizeof(text), "Showing %u-%u of %u",
-                 static_cast<unsigned>(start + 1u),
-                 static_cast<unsigned>(start + track_shown),
-                 static_cast<unsigned>(playable));
-        lv_obj_t *more = lv_list_add_text(s_list_music, text);
-        lv_obj_set_style_text_color(more, lv_color_hex(kColorSub), 0);
+    }
+    if (paged) {
+        if (s_music_page > 0u) {
+            char text[40];
+            snprintf(text, sizeof(text), "Prev page (%u/%u)",
+                     static_cast<unsigned>(s_music_page),
+                     static_cast<unsigned>(pages));
+            lv_obj_t *prev = lv_list_add_button(s_list_music, LV_SYMBOL_UP, text);
+            lv_obj_set_style_bg_color(prev, lv_color_hex(kColorPanel2), 0);
+            lv_obj_set_style_text_color(prev, lv_color_hex(kColorSub), 0);
+            lv_obj_add_event_cb(prev, musicPageEvent, LV_EVENT_CLICKED,
+                                reinterpret_cast<void *>(static_cast<intptr_t>(-1)));
+        }
+        if (s_music_page + 1u < pages) {
+            char text[40];
+            snprintf(text, sizeof(text), "Next page (%u/%u)",
+                     static_cast<unsigned>(s_music_page + 2u),
+                     static_cast<unsigned>(pages));
+            lv_obj_t *next = lv_list_add_button(s_list_music, LV_SYMBOL_DOWN, text);
+            lv_obj_set_style_bg_color(next, lv_color_hex(kColorPanel2), 0);
+            lv_obj_set_style_text_color(next, lv_color_hex(kColorSub), 0);
+            lv_obj_add_event_cb(next, musicPageEvent, LV_EVENT_CLICKED,
+                                reinterpret_cast<void *>(static_cast<intptr_t>(1)));
+        }
     }
 }
 
@@ -2847,55 +2968,39 @@ void showMusicListStatus(const char *text, const uint32_t color)
     lv_obj_set_style_text_color(line, lv_color_hex(color), 0);
 }
 
-void musicScanTask(void *)
-{
-    const size_t count = PLAYLIST_Scan();
-    s_music_scan_count = count;
-    s_music_scan_complete = true;
-    s_music_scan_running = false;
-    s_music_scan_task = nullptr;
-    vTaskDelete(nullptr);
-}
-
 void startMusicRescan()
 {
-    if (s_music_scan_running) {
-        showMusicListStatus("Scanning...", kColorWarn);
-        return;
+    // Async on the display's own session: a synchronous scan on a stale NAS
+    // froze the LVGL task for the whole SMB directory-open timeout.
+    if (PLAYLIST_ClientScanAsync(PLAYLIST_CLIENT_DISPLAY)) {
+        s_music_dir_scan_pending = true;
     }
-
-    s_music_scan_complete = false;
-    s_music_scan_count = 0;
     showMusicListStatus("Scanning...", kColorWarn);
     lv_timer_handler();
-
-    s_music_scan_running = true;
-    const BaseType_t created = xTaskCreatePinnedToCore(musicScanTask, "music_scan_ui", 12288,
-                                                       nullptr, 4, &s_music_scan_task, 0);
-    if (created != pdPASS) {
-        s_music_scan_task = nullptr;
-        s_music_scan_running = false;
-        s_music_scan_complete = false;
-        showMusicListStatus("Scan failed: task create failed.", kColorBad);
-    }
 }
 
 void pollMusicScan()
 {
-    if (!s_music_scan_complete) {
-        return;
-    }
-    s_music_scan_complete = false;
-
-    if (s_page == Page::Music) {
-        populateMusicList();
-        if (s_music_scan_count == 0u && PLAYLIST_DirCount() == 0u) {
-            showMusicListStatus(PLAYLIST_AtRoot() ? "No storage mounted."
-                                                  : "No tracks or subdirectories.",
-                                kColorSub);
+    // Completion of an async enter/up/rescan of the display session (its
+    // result only becomes visible once the session's scan finishes).
+    if (s_music_dir_scan_pending && !PLAYLIST_ClientIsScanning(PLAYLIST_CLIENT_DISPLAY)) {
+        s_music_dir_scan_pending = false;
+        if (s_page == Page::Music) {
+            // populateMusicList renders the empty-directory hint itself now;
+            // overwriting it with a full-list status line would wipe the
+            // ".." row and trap the user in the empty directory.
+            populateMusicList();
         }
+        s_last_refresh_ms = 0;
     }
-    s_last_refresh_ms = 0;
+    // Display-session scans that never set s_music_dir_scan_pending are
+    // followed via the session's scan revision.
+    if (s_page == Page::Music && !s_music_dir_scan_pending &&
+        !PLAYLIST_ClientIsScanning(PLAYLIST_CLIENT_DISPLAY) && s_list_music != nullptr &&
+        PLAYLIST_ClientScanRevision(PLAYLIST_CLIENT_DISPLAY) != s_music_list_rev) {
+        populateMusicList();
+        s_last_refresh_ms = 0;
+    }
 }
 
 // True for common album-art filenames (case-insensitive): cover/folder/album/
@@ -3123,6 +3228,12 @@ void requestMusicCoverDecode(const char *path, const MediaTrackInfo *track)
             cover_size = track->cover_size;
         }
     }
+    if (cover_size > 0u) {
+        // The copy above is what the decode worker uses; free the embedded
+        // original (up to 512 KB of PSRAM) instead of holding it for the
+        // rest of the track -- playback-time PSRAM is fully booked.
+        MUSIC_ReleaseTrackCover();
+    }
 
     xSemaphoreTake(s_music_cover_lock, portMAX_DELAY);
     ++s_music_cover_req_seq;
@@ -3316,6 +3427,14 @@ void buildMusic()
     lv_obj_set_style_text_font(s_list_music, &s_font_ui_16, 0);
     populateMusicList();
 
+    // First visit ever: nothing scans the display session at boot, so the
+    // page would sit blank until the user finds Rescan. Kick an async
+    // sources-root scan (SMB/SD/USB) on the first entry instead.
+    if (PLAYLIST_ClientScanRevision(PLAYLIST_CLIENT_DISPLAY) == 0u &&
+        !PLAYLIST_ClientIsScanning(PLAYLIST_CLIENT_DISPLAY)) {
+        startMusicRescan();
+    }
+
     button(scr, 24, 372, 120, 76, "Back", Action::Apps);
     button(scr, 158, 372, 96, 76, LV_SYMBOL_PREV, Action::MusicPrev);
     lv_obj_t *toggle = button(scr, 268, 372, 96, 76,
@@ -3340,9 +3459,11 @@ void musicToggle()
         MUSIC_Stop();
         return;
     }
-    const int current = PLAYLIST_CurrentIndex();
-    if (current >= 0) {
-        (void)PLAYLIST_PlayIndex(static_cast<size_t>(current));
+    // Replay the current track by path: the playback queue is decoupled from
+    // any browse session, so no session index addresses it.
+    const char *path = MUSIC_CurrentPath();
+    if (path != nullptr && path[0] != '\0') {
+        (void)MUSIC_PlayFile(path);
     } else {
         (void)PLAYLIST_Next();
     }
@@ -3361,18 +3482,32 @@ void musicModeToggle()
 
 void videoViewTask(void *)
 {
+    uint8_t *remote_jpeg = s_video_remote_jpeg;
     uint8_t *local_jpeg = s_video_local_jpeg;
     uint32_t remote_seq = 0;
     uint32_t local_seq = 0;
 
     while (s_video_view_run) {
+        const int64_t iter_start_us = esp_timer_get_time();
         bool worked = false;
 
-        const uint8_t *jpeg = nullptr;
         size_t jpeg_size = 0;
-        if (VIDEO_AcquireFrame(&jpeg, &jpeg_size, &remote_seq)) {
+        if (VIDEO_AcquireFrame(remote_jpeg, VIDEO_MAX_JPEG_BYTES, &jpeg_size, &remote_seq)) {
             CoverBitmap bmp = {};
-            if (COVER_DecodeJpeg(jpeg, jpeg_size, kVideoFrameDim, &bmp)) {
+            CoverBitmap hw = {};
+            // Hardware JPEG decode into the decoder's persistent full-res
+            // buffer, then scale out immediately (borrowed semantics): the UI
+            // adopts an owned panel-sized bitmap and the 1.8 MB buffer is
+            // reused for the next frame. Software downscale stays the
+            // fallback when the hardware is unavailable or rejects the frame.
+            if (COVER_DecodeJpegHw(remote_jpeg, jpeg_size, &hw) && hw.rgb565 != nullptr) {
+                (void)COVER_ScaleRgb565(hw.rgb565, hw.width, hw.height, hw.stride,
+                                        kVideoFrameDim, &bmp);
+            }
+            if (bmp.rgb565 == nullptr) {
+                (void)COVER_DecodeJpeg(remote_jpeg, jpeg_size, kVideoFrameDim, &bmp);
+            }
+            if (bmp.rgb565 != nullptr) {
                 xSemaphoreTake(s_video_view_lock, portMAX_DELAY);
                 COVER_Free(&s_video_pending_remote); // UI missed one; drop it
                 s_video_pending_remote = bmp;
@@ -3385,7 +3520,18 @@ void videoViewTask(void *)
         if (local_jpeg != nullptr &&
             VIDEO_CopyLocalFrame(local_jpeg, VIDEO_MAX_JPEG_BYTES, &local_size, &local_seq)) {
             CoverBitmap bmp = {};
-            if (COVER_DecodeJpeg(local_jpeg, local_size, kVideoLocalDim, &bmp)) {
+            CoverBitmap hw = {};
+            // Same camera stream as the TX side: hardware decode keeps the
+            // self-view off the CPU (a software 1/8 decode runs ~180 ms and
+            // pinned CPU1 at ~95% duty, starving IDLE1 into the task WDT).
+            if (COVER_DecodeJpegHw(local_jpeg, local_size, &hw) && hw.rgb565 != nullptr) {
+                (void)COVER_ScaleRgb565(hw.rgb565, hw.width, hw.height, hw.stride,
+                                        kVideoLocalDim, &bmp);
+            }
+            if (bmp.rgb565 == nullptr) {
+                (void)COVER_DecodeJpeg(local_jpeg, local_size, kVideoLocalDim, &bmp);
+            }
+            if (bmp.rgb565 != nullptr) {
                 xSemaphoreTake(s_video_view_lock, portMAX_DELAY);
                 COVER_Free(&s_video_pending_local);
                 s_video_pending_local = bmp;
@@ -3395,8 +3541,19 @@ void videoViewTask(void *)
         }
 
         // Frames arrive at ~5 fps per direction; poll fast right after work
-        // (the other direction is often ready too), lazily otherwise.
-        vTaskDelay(pdMS_TO_TICKS(worked ? 10 : 40));
+        // (the other direction is often ready too), lazily otherwise. A slow
+        // software-decode fallback must not pin the core: once an iteration
+        // costs >100 ms, delay at least as long as it ran so the decode duty
+        // cycle stays <= 50% and the IDLE task keeps feeding the watchdog
+        // (newest-frame-only handoff already drops whatever the lower frame
+        // rate misses). A 720p software decode takes seconds, so the cap must
+        // cover that -- a 400 ms cap still starved IDLE1 into the task WDT.
+        const int64_t iter_ms = (esp_timer_get_time() - iter_start_us) / 1000;
+        uint32_t delay_ms = worked ? 10u : 40u;
+        if (worked && iter_ms > 100) {
+            delay_ms = static_cast<uint32_t>(iter_ms > 4000 ? 4000 : iter_ms);
+        }
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
 
     s_video_view_task = nullptr;
@@ -3415,6 +3572,9 @@ void stopVideoView()
         COVER_Free(&s_video_pending_local);
         xSemaphoreGive(s_video_view_lock);
     }
+    // Return the ~1.8 MB persistent hardware-decode buffer to the PSRAM heap;
+    // the next video session lazily re-allocates it.
+    COVER_HwDecoderRelease();
 }
 
 void startVideoView()
@@ -3430,7 +3590,7 @@ void startVideoView()
     }
     s_video_view_run = true;
     if (xTaskCreatePinnedToCore(videoViewTask, "video_view", 6144, nullptr, 3,
-                                &s_video_view_task, 0) != pdPASS) {
+                                &s_video_view_task, 1) != pdPASS) {
         s_video_view_run = false;
         s_video_view_task = nullptr;
         ESP_LOGE(TAG, "video view task create failed");
@@ -3438,7 +3598,9 @@ void startVideoView()
 }
 
 // Adopt a decoded bitmap from the worker into the shown bitmap + LVGL image.
-// UI-task only (lv_image_set_src is not thread-safe).
+// UI-task only (lv_image_set_src is not thread-safe). Hardware-decoded frames
+// are full resolution (e.g. 1280x720) and get scaled down here to fit the
+// panel; software-decoded frames already match the layout (zoom stays 100%).
 void adoptVideoBitmap(lv_obj_t *img, CoverBitmap *shown, lv_image_dsc_t *dsc, CoverBitmap *pending)
 {
     lv_image_set_src(img, nullptr);
@@ -3450,10 +3612,25 @@ void adoptVideoBitmap(lv_obj_t *img, CoverBitmap *shown, lv_image_dsc_t *dsc, Co
     dsc->header.cf = LV_COLOR_FORMAT_RGB565;
     dsc->header.w = shown->width;
     dsc->header.h = shown->height;
-    dsc->header.stride = static_cast<uint32_t>(shown->width) * 2u;
+    // Hardware JPEG output is padded to 16-pixel rows (stride > width*2).
+    dsc->header.stride = (shown->stride != 0)
+                             ? static_cast<uint32_t>(shown->stride)
+                             : static_cast<uint32_t>(shown->width) * 2u;
     dsc->data = shown->rgb565;
     dsc->data_size = shown->bytes;
     lv_image_set_src(img, dsc);
+
+    // Fit the (possibly full-resolution) bitmap into the parent panel,
+    // keeping aspect. LVGL zoom is 8.8 fixed point: 256 == 100%.
+    const lv_obj_t *parent = lv_obj_get_parent(img);
+    if (parent != nullptr && shown->width > 0 && shown->height > 0) {
+        const int32_t pw = lv_obj_get_content_width(parent);
+        const int32_t ph = lv_obj_get_content_height(parent);
+        const uint32_t zoom_x = (static_cast<uint32_t>(pw) * 256u) / shown->width;
+        const uint32_t zoom_y = (static_cast<uint32_t>(ph) * 256u) / shown->height;
+        const uint32_t zoom = (zoom_x < zoom_y) ? zoom_x : zoom_y;
+        lv_image_set_scale(img, static_cast<uint32_t>((zoom > 256u) ? 256u : zoom));
+    }
 }
 
 void refreshVideo()
@@ -3533,12 +3710,29 @@ void buildVideo()
     refreshVideo();
 }
 
-void videoTxToggle()
+void videoTxToggleTask(void *)
 {
+    // bsp_camera_open() detects the sensor over I2C and allocates three
+    // ~900 KB V4L2 buffers -- over a second of work that must not run on
+    // the LVGL/UI task (it froze lv_timer_handler for >1 s).
     if (!VIDEO_SetTxEnabled(!VIDEO_TxEnabled())) {
         ESP_LOGW(TAG, "camera start failed");
     }
+    s_video_tx_toggle_busy = false;
     s_last_refresh_ms = 0;
+    vTaskDelete(nullptr);
+}
+
+void videoTxToggle()
+{
+    if (s_video_tx_toggle_busy) {
+        return; // camera open/close still in flight
+    }
+    s_video_tx_toggle_busy = true;
+    if (xTaskCreate(videoTxToggleTask, "video_tx_sw", 6144, nullptr, 4, nullptr) != pdPASS) {
+        s_video_tx_toggle_busy = false;
+        ESP_LOGW(TAG, "video toggle task create failed");
+    }
 }
 
 // ---- AI assistant page (xiaozhi) --------------------------------------------
@@ -3826,7 +4020,7 @@ void layoutMapMarkers()
     }
     // Static: the station struct carries a 220-byte comment, so a snapshot
     // array would blow the UI task's stack.
-    static AprsStationInfo stations[kMapMarkerMax];
+    NRL_PSRAM_BSS static AprsStationInfo stations[kMapMarkerMax];
     const size_t count = APRS_SERVICE_GetStations(stations, kMapMarkerMax);
     const double left = s_map_cx - kWidth / 2.0;
     const double top = s_map_cy - kMapViewH / 2.0;
@@ -4068,6 +4262,75 @@ void scanSstvFiles()
     closedir(dir);
 }
 
+// Decode a JPEG into the right-side preview window (320x256, centered by the
+// image widget's default align). Hardware decode first -- the camera frames
+// are full-resolution 720p and the software path takes seconds; the scaled
+// bitmap is small (~160 KB) and owned here until replaced.
+void showSstvPreview(const uint8_t *jpeg, const size_t jpeg_size)
+{
+    if (jpeg == nullptr || jpeg_size == 0u || s_img_sstv == nullptr) {
+        return;
+    }
+    CoverBitmap hw = {};
+    CoverBitmap bmp = {};
+    bool ok = COVER_DecodeJpegHw(jpeg, jpeg_size, &hw) && hw.rgb565 != nullptr &&
+              COVER_FitRgb565(hw.rgb565, hw.width, hw.height, hw.stride, 320u, 256u, &bmp);
+    if (!ok) {
+        ok = COVER_DecodeJpeg(jpeg, jpeg_size, 256u, &bmp);
+    }
+    if (!ok) {
+        return; // keep whatever is on screen
+    }
+    COVER_Free(&s_sstv_tx_bmp);
+    s_sstv_tx_bmp = bmp;
+    memset(&s_sstv_tx_dsc, 0, sizeof(s_sstv_tx_dsc));
+    s_sstv_tx_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    s_sstv_tx_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+    s_sstv_tx_dsc.header.w = s_sstv_tx_bmp.width;
+    s_sstv_tx_dsc.header.h = s_sstv_tx_bmp.height;
+    s_sstv_tx_dsc.header.stride = static_cast<uint32_t>(s_sstv_tx_bmp.width) * 2u;
+    s_sstv_tx_dsc.data = s_sstv_tx_bmp.rgb565;
+    s_sstv_tx_dsc.data_size = s_sstv_tx_bmp.bytes;
+    lv_image_set_src(s_img_sstv, &s_sstv_tx_dsc);
+    s_sstv_tx_preview = true;
+}
+
+// Preview the currently selected /sdcard/sstv file in the TX IMAGE list.
+void showSstvFilePreview()
+{
+    if (s_sstv_file_count == 0u || !STORAGE_SdMounted()) {
+        return;
+    }
+    char directory[96];
+    char path[160];
+    if (!SSTV_SERVICE_GetImageDirectory(directory, sizeof(directory))) {
+        return;
+    }
+    snprintf(path, sizeof(path), "%s/%s", directory, s_sstv_files[s_sstv_file_index]);
+    FILE *file = fopen(path, "rb");
+    if (file == nullptr || fseek(file, 0, SEEK_END) != 0) {
+        if (file != nullptr) {
+            fclose(file);
+        }
+        return;
+    }
+    const long size = ftell(file);
+    if (size <= 0 || size > 768 * 1024) { // preview cap keeps PSRAM sane
+        fclose(file);
+        return;
+    }
+    uint8_t *jpeg = static_cast<uint8_t *>(heap_caps_malloc(
+        static_cast<size_t>(size), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (jpeg != nullptr && fseek(file, 0, SEEK_SET) == 0 &&
+        fread(jpeg, 1, static_cast<size_t>(size), file) == static_cast<size_t>(size)) {
+        showSstvPreview(jpeg, static_cast<size_t>(size));
+    }
+    if (jpeg != nullptr) {
+        heap_caps_free(jpeg);
+    }
+    fclose(file);
+}
+
 void stepSstvFile(int delta)
 {
     if (s_sstv_file_count == 0u) {
@@ -4075,6 +4338,7 @@ void stepSstvFile(int delta)
     }
     s_sstv_file_index = (s_sstv_file_index + s_sstv_file_count + static_cast<size_t>(delta)) %
                         s_sstv_file_count;
+    showSstvFilePreview();
     refreshSstvPage();
 }
 
@@ -4159,6 +4423,9 @@ void camSstvFromPage()
                     if (i >= 5) { // first frames: exposure/white-balance settling
                         ESP_LOGI(TAG, "SSTV camera frame: index=%d bytes=%u", i,
                                  static_cast<unsigned>(frame.size));
+                        // Show the captured frame in the right-side preview
+                        // window before returning the V4L2 buffer.
+                        showSstvPreview(static_cast<const uint8_t *>(frame.data), frame.size);
                         sent = SSTV_SERVICE_SendJpegBuffer(
                             static_cast<const uint8_t *>(frame.data), frame.size,
                             s_sstv_tx_mode);
@@ -4395,6 +4662,12 @@ void refreshSstvPage()
     if (snap.rx_revision != s_sstv_img_rev) {
         s_sstv_img_rev = snap.rx_revision;
         if (s_img_sstv != nullptr) {
+            if (s_sstv_tx_preview && s_sstv_dsc.data != nullptr) {
+                // A fresh RX frame arrived: hand the window back to the live
+                // decoder buffer (the preview bitmap stays for later reuse).
+                lv_image_set_src(s_img_sstv, &s_sstv_dsc);
+                s_sstv_tx_preview = false;
+            }
             lv_obj_invalidate(s_img_sstv); // decoder wrote new lines in place
         }
     }
@@ -4407,6 +4680,8 @@ void buildSstv()
 {
     COVER_Free(&s_sstv_log_bmp); // the log viewer owns one decoded frame
     s_img_sstv_log = nullptr;
+    COVER_Free(&s_sstv_tx_bmp); // the preview window's bitmap is rebuilt below
+    s_sstv_tx_preview = false;
     if (s_sstv_view == 1u) {
         buildSstvLog();
         return;
@@ -4480,6 +4755,7 @@ void buildSstv()
     button(scr, 610, 396, 170, 68, "Back", Action::Apps);
     scanSstvFiles();
     refreshSstvPage();
+    showSstvFilePreview(); // prime the right-side window with the TX image
 }
 
 void buildAprs()
@@ -4512,17 +4788,133 @@ void buildAprs()
     lv_label_set_text(s_lbl_aprs_list, "--");
 
     s_lbl_form_status = label(scr, &lv_font_montserrat_16, kColorSub);
-    lv_obj_set_pos(s_lbl_form_status, 280, 396);
-    lv_obj_set_width(s_lbl_form_status, 494);
+    lv_obj_set_pos(s_lbl_form_status, 24, 452);
+    lv_obj_set_width(s_lbl_form_status, 750);
     lv_label_set_long_mode(s_lbl_form_status, LV_LABEL_LONG_DOT);
     lv_label_set_text(s_lbl_form_status,
-                      tr("Server / position / RF switches: web portal APRS page or AT+APRS."));
+                      tr("Server / position: web portal APRS page or AT+APRS."));
 
-    button(scr, 24, 372, 230, 76, "Back", Action::Apps);
+    button(scr, 24, 372, 118, 76, "Back", Action::Apps);
+    button(scr, 150, 372, 126, 76, "Beacon", Action::AprsBeacon);
+    button(scr, 284, 372, 92, 76, "Msg", Action::AprsMsgOpen);
+    button(scr, 384, 372, 84, 76, "GW", Action::AprsGatewayOpen);
+
+    // NRL network audio toggles: the button label mirrors the live state.
+    AprsConfig cfg;
+    APRS_SERVICE_GetConfig(&cfg);
+    char toggle_text[24];
+    lv_obj_t *btn_nrl_tx = button(scr, 476, 372, 140, 76, "", Action::AprsNrlTx);
+    snprintf(toggle_text, sizeof(toggle_text), "NRL TX:%s",
+             cfg.nrl_tx_enabled ? "on" : "off");
+    lv_label_set_text(lv_obj_get_child(btn_nrl_tx, 0), toggle_text);
+    lv_obj_t *btn_nrl_rx = button(scr, 624, 372, 150, 76, "", Action::AprsNrlRx);
+    snprintf(toggle_text, sizeof(toggle_text), "NRL RX:%s",
+             cfg.nrl_rx_enabled ? "on" : "off");
+    lv_label_set_text(lv_obj_get_child(btn_nrl_rx, 0), toggle_text);
 
     s_aprs_seen_revision = APRS_SERVICE_GetStationRevision() - 1u; // force fill
     s_aprs_last_refresh_ms = 0u;
     refreshAprsPage();
+}
+
+void buildAprsMsg()
+{
+    clearScreen();
+    s_page = Page::AprsMsg;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+
+    lv_obj_t *box = panel(scr, 24, 82, 750, 270);
+    fieldLabel(box, 0, 0, "Send APRS Message");
+
+    fieldLabel(box, 0, 34, "Addressee callsign (A-Z 0-9 -)");
+    s_ta_aprs_dest = textArea(box, 0, 58, 320, "BI4UMD-9", s_aprs_msg_dest, 9,
+                              false, "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                                     "abcdefghijklmnopqrstuvwxyz0123456789-",
+                              false);
+
+    fieldLabel(box, 344, 34, "Message text (max 67 bytes)");
+    s_ta_aprs_text = textArea(box, 344, 58, 396, "Hello", s_aprs_msg_text, 67,
+                              false, nullptr, false);
+
+    s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_pos(s_lbl_form_status, 0, 130);
+    lv_obj_set_width(s_lbl_form_status, 710);
+    lv_label_set_long_mode(s_lbl_form_status, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_lbl_form_status,
+                      tr("Goes out over APRS-IS when linked, and as AFSK audio on every enabled path (RF speaker / NRL network)."));
+
+    button(scr, 24, 372, 230, 76, "Back", Action::Aprs);
+    button(scr, 544, 372, 230, 76, "Send", Action::AprsMsgSend);
+    createKeyboard(scr);
+}
+
+// APRS gateway page: one toggle button per forwarding direction. The label
+// mirrors the live state; tapping rebuilds the page and reports the change.
+void buildAprsGateway()
+{
+    clearScreen();
+    s_page = Page::AprsGateway;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+
+    lv_obj_t *box = panel(scr, 24, 82, 750, 270);
+    fieldLabel(box, 0, 0, "APRS Gateway Forwarding");
+
+    AprsConfig cfg;
+    APRS_SERVICE_GetConfig(&cfg);
+
+    struct FwdBtn {
+        int x;
+        int y;
+        AprsFwdDir dir;
+        const char *name;
+        Action act;
+    };
+    static const FwdBtn fwd_btns[6] = {
+        {0, 34, APRS_FWD_RF_TO_IS, "RF->IS", Action::AprsFwdRfIs},
+        {255, 34, APRS_FWD_IS_TO_RF, "IS->RF", Action::AprsFwdIsRf},
+        {510, 34, APRS_FWD_NRL_TO_IS, "NRL->IS", Action::AprsFwdNrlIs},
+        {0, 114, APRS_FWD_IS_TO_NRL, "IS->NRL", Action::AprsFwdIsNrl},
+        {255, 114, APRS_FWD_RF_TO_NRL, "RF->NRL", Action::AprsFwdRfNrl},
+        {510, 114, APRS_FWD_NRL_TO_RF, "NRL->RF", Action::AprsFwdNrlRf},
+    };
+    char text[24];
+    for (size_t i = 0; i < 6u; ++i) {
+        lv_obj_t *btn = button(box, fwd_btns[i].x, fwd_btns[i].y, 230, 70, "",
+                               fwd_btns[i].act);
+        snprintf(text, sizeof(text), "%s:%s", fwd_btns[i].name,
+                 cfg.fwd[fwd_btns[i].dir] ? "on" : "off");
+        lv_label_set_text(lv_obj_get_child(btn, 0), text);
+    }
+
+    lv_obj_t *hint = label(box, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_pos(hint, 0, 200);
+    lv_obj_set_width(hint, 710);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(hint,
+                      tr("AFSK relay directions also need the matching TX route on (RF Transmit / NRL Transmit)."));
+
+    s_lbl_form_status = label(scr, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_pos(s_lbl_form_status, 24, 452);
+    lv_obj_set_width(s_lbl_form_status, 750);
+    lv_label_set_long_mode(s_lbl_form_status, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_lbl_form_status, "--");
+
+    button(scr, 24, 372, 230, 76, "Back", Action::Aprs);
+}
+
+void aprsFwdToggle(AprsFwdDir dir, const char *name)
+{
+    AprsConfig cfg;
+    APRS_SERVICE_GetConfig(&cfg);
+    if (APRS_SERVICE_SetFwdEnabled(dir, !cfg.fwd[dir])) {
+        buildAprsGateway();
+        char msg[64];
+        snprintf(msg, sizeof(msg), "%s gateway %s.", name,
+                 cfg.fwd[dir] ? "off" : "on");
+        formStatus(msg, kColorSub);
+    }
 }
 
 // ---- Games ------------------------------------------------------------------
@@ -5337,7 +5729,70 @@ void action(lv_event_t *event)
         case Action::VideoTx: videoTxToggle(); break;
         case Action::Game: buildGame(); break;
         case Action::Ai: buildAi(); break;
-        case Action::Aprs: buildAprs(); break;
+        case Action::Aprs:
+            if (s_page == Page::AprsMsg) {
+                // Leaving the message editor: keep the draft fields.
+                if (s_ta_aprs_dest != nullptr) {
+                    snprintf(s_aprs_msg_dest, sizeof(s_aprs_msg_dest), "%s",
+                             lv_textarea_get_text(s_ta_aprs_dest));
+                }
+                if (s_ta_aprs_text != nullptr) {
+                    snprintf(s_aprs_msg_text, sizeof(s_aprs_msg_text), "%s",
+                             lv_textarea_get_text(s_ta_aprs_text));
+                }
+            }
+            buildAprs();
+            break;
+        case Action::AprsBeacon: {
+            const bool ok = APRS_SERVICE_SendBeaconNow();
+            formStatus(ok ? "Beacon queued." : "Enable APRS first.",
+                       ok ? kColorGood : kColorBad);
+            break;
+        }
+        case Action::AprsNrlTx: {
+            AprsConfig aprs_cfg;
+            APRS_SERVICE_GetConfig(&aprs_cfg);
+            if (APRS_SERVICE_SetNrlTxEnabled(!aprs_cfg.nrl_tx_enabled)) {
+                buildAprs();
+                formStatus(aprs_cfg.nrl_tx_enabled ? "NRL network TX off."
+                                                   : "NRL network TX on: beacons/messages stream over the NRL voice uplink.",
+                           kColorSub);
+            }
+            break;
+        }
+        case Action::AprsNrlRx: {
+            AprsConfig aprs_cfg;
+            APRS_SERVICE_GetConfig(&aprs_cfg);
+            if (APRS_SERVICE_SetNrlRxEnabled(!aprs_cfg.nrl_rx_enabled)) {
+                buildAprs();
+                formStatus(aprs_cfg.nrl_rx_enabled ? "NRL network RX off."
+                                                   : "NRL network RX on: decoding APRS from the NRL voice downlink.",
+                           kColorSub);
+            }
+            break;
+        }
+        case Action::AprsMsgOpen: buildAprsMsg(); break;
+        case Action::AprsMsgSend: {
+            const char *dest = (s_ta_aprs_dest != nullptr)
+                                   ? lv_textarea_get_text(s_ta_aprs_dest) : "";
+            const char *text = (s_ta_aprs_text != nullptr)
+                                   ? lv_textarea_get_text(s_ta_aprs_text) : "";
+            snprintf(s_aprs_msg_dest, sizeof(s_aprs_msg_dest), "%s", dest);
+            snprintf(s_aprs_msg_text, sizeof(s_aprs_msg_text), "%s", text);
+            const bool ok = APRS_SERVICE_SendMessage(dest, text);
+            buildAprs();
+            formStatus(ok ? "Message queued."
+                          : "Send failed: APRS off or invalid callsign/text.",
+                       ok ? kColorGood : kColorBad);
+            break;
+        }
+        case Action::AprsGatewayOpen: buildAprsGateway(); break;
+        case Action::AprsFwdRfIs: aprsFwdToggle(APRS_FWD_RF_TO_IS, "RF -> APRS-IS"); break;
+        case Action::AprsFwdIsRf: aprsFwdToggle(APRS_FWD_IS_TO_RF, "APRS-IS -> RF"); break;
+        case Action::AprsFwdNrlIs: aprsFwdToggle(APRS_FWD_NRL_TO_IS, "NRL -> APRS-IS"); break;
+        case Action::AprsFwdIsNrl: aprsFwdToggle(APRS_FWD_IS_TO_NRL, "APRS-IS -> NRL"); break;
+        case Action::AprsFwdRfNrl: aprsFwdToggle(APRS_FWD_RF_TO_NRL, "RF -> NRL"); break;
+        case Action::AprsFwdNrlRf: aprsFwdToggle(APRS_FWD_NRL_TO_RF, "NRL -> RF"); break;
         case Action::Map: buildMap(); break;
         case Action::MapZoomIn: mapZoomStep(1); break;
         case Action::MapZoomOut: mapZoomStep(-1); break;
@@ -6349,6 +6804,8 @@ void rebuildCurrentPage()
         case Page::Ai: buildAi(); break;
         case Page::About: buildAbout(); break;
         case Page::Aprs: buildAprs(); break;
+        case Page::AprsMsg: buildAprsMsg(); break;
+        case Page::AprsGateway: buildAprsGateway(); break;
         case Page::Cw: buildCw(); break;
         case Page::CwScore: buildCwScore(); break;
         case Page::Map: buildMap(); break;

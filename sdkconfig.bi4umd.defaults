@@ -55,7 +55,9 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=24576
 
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=512
+# See sdkconfig.s31_korvo.defaults: small allocs (e.g. 512 B GMF payloads)
+# must not land in the scarce internal heap.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=128
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
 CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 # Tile loader worker keeps its 8 KB stack in PSRAM (blocks on HTTP for seconds).
@@ -166,7 +168,9 @@ CONFIG_FATFS_API_ENCODING_UTF_8=y
 
 CONFIG_LV_COLOR_DEPTH_16=y
 CONFIG_LV_OS_NONE=y
-CONFIG_LV_USE_CLIB_MALLOC=y
+# lv_malloc routes through src/app/lv_mem_psram.cpp (PSRAM-first):
+# CLIB malloc strands thousands of <=128B LVGL objects in internal RAM.
+CONFIG_LV_USE_CUSTOM_MALLOC=y
 CONFIG_LV_USE_CLIB_STRING=y
 CONFIG_LV_USE_CLIB_SPRINTF=y
 # lodepng (vendored in LVGL) decodes directly-downloaded PNG map tiles.
@@ -181,3 +185,9 @@ CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
 CONFIG_LV_BUILD_EXAMPLES=n
 CONFIG_LV_BUILD_DEMOS=n
 CONFIG_LWIP_MAX_SOCKETS=16
+# 8 KB receive window caps the internal-RAM pbufs each socket can hold
+# (see sdkconfig.s31_korvo.defaults).
+CONFIG_LWIP_TCP_WND_DEFAULT=8192
+# Per-task heap census (AT+MEM): tags every allocation with its owning
+# task so 'who ate the internal DRAM' is answerable without a debug build.
+CONFIG_HEAP_TASK_TRACKING=y

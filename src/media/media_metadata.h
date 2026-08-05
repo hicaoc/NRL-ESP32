@@ -41,6 +41,11 @@ bool MEDIA_META_Read(const char *path, MediaTrackInfo *out_info, bool want_cover
 // Free the cover allocation (safe on a zeroed struct).
 void MEDIA_META_Free(MediaTrackInfo *info);
 
+// Free ONLY the embedded cover (keeps title/artist/album): the UI copies the
+// JPEG bytes out for async decode, after which holding the original (up to
+// 512 KB of PSRAM) for the rest of the track is pure waste.
+void MEDIA_META_ReleaseCover(MediaTrackInfo *info);
+
 #ifdef __cplusplus
 }
 #endif

@@ -2,6 +2,7 @@
 
 #include "audio/audio_focus.h"
 #include "audio/voice_resampler.h"
+#include "esp_asrc.h"
 #include "services/config_notify.h"
 #include "driver/board_pins.h"
 #include "driver/es8311.h"
@@ -21,6 +22,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "MUSIC";
@@ -74,6 +76,16 @@ static bool speaker_hifi_release(void)
 }
 
 static TaskHandle_t s_player_task = nullptr;
+static volatile bool s_track_running = false;
+// Persistent player task on a static internal stack. SD/FatFS access can run
+// with the flash cache paused, so the stack must be internal (PSRAM is
+// unreachable then); and it must be static/one-shot: the runtime heap
+// shatters to ~1.5 KB largest blocks in steady state (see the BT reserve in
+// nrl_bt_hfp.cpp), so the old per-track xTaskCreate of an 8 KB stack failed
+// with "player task create failed" once the device had been up a while.
+constexpr size_t kPlayerStackBytes = 8192;
+static StackType_t s_player_stack[kPlayerStackBytes / sizeof(StackType_t)];
+static StaticTask_t s_player_tcb;
 static volatile bool s_stop_requested = false;
 static volatile bool s_playing = false;
 static volatile bool s_focus_voice_active = false;
@@ -97,67 +109,128 @@ static size_t s_net_capacity = kNetScratchSamples;
 // Local output device (speaker hi-fi path vs BT headset A2DP).
 static volatile int s_output = MUSIC_OUTPUT_SPEAKER;
 
-// 44.1 kHz stereo scratch + linear resampler state for the A2DP branch.
+// 44.1 kHz stereo scratch for the A2DP branch.
 NRL_PSRAM_BSS static int16_t s_bt_storage[kBtScratchSamples];
 static int16_t *s_bt_buffer = s_bt_storage;
 static size_t s_bt_capacity = kBtScratchSamples; // in interleaved samples
 
+// Arbitrary-rate mono/stereo PCM16 -> 44.1 kHz stereo for A2DP, built on
+// esp_asrc: channel conversion (weights) and band-limited rate conversion in
+// one pass, hardware-accelerated on ESP32-S31 with an automatic
+// optimized-software fallback on ESP32-S3.
 struct BtResampler {
-    float pos;
-    float step;
     uint8_t channels;
-    int16_t carry_l;
-    int16_t carry_r;
-    int has_carry;
+    esp_asrc_handle_t asrc;
+    // Staging buffers (esp_asrc_align_alloc): the hardware path requires
+    // cache-line-aligned buffers, and callers' pointers cannot guarantee that.
+    uint8_t *in_buf;
+    size_t in_cap_bytes;
+    uint8_t *out_buf;
+    size_t out_cap_bytes;
 };
 
-static void bt_resampler_init(BtResampler *rs, const uint32_t in_rate, const uint8_t channels)
+// Hardware-path frame timeout; the ASRC peripheral converts far faster than
+// real time, so 500 ms can only fire on a genuine hardware wedge.
+constexpr int32_t kBtAsrcTimeoutMs = 500;
+
+static bool bt_grow_aligned(uint8_t **buf, size_t *cap, const size_t need,
+                            const uint32_t addr_align, const uint32_t size_align)
 {
-    memset(rs, 0, sizeof(*rs));
-    rs->step = static_cast<float>(in_rate) / 44100.0f;
+    if (need <= *cap) {
+        return true;
+    }
+    uint32_t allocated = 0;
+    void *p = esp_asrc_align_alloc(static_cast<uint32_t>(need), addr_align,
+                                   size_align, &allocated);
+    if (p == nullptr) {
+        return false;
+    }
+    free(*buf);
+    *buf = static_cast<uint8_t *>(p);
+    *cap = allocated;
+    return true;
+}
+
+static void bt_resampler_deinit(BtResampler *rs)
+{
+    if (rs->asrc != nullptr) {
+        esp_asrc_close(rs->asrc);
+        rs->asrc = nullptr;
+    }
+    free(rs->in_buf);
+    rs->in_buf = nullptr;
+    rs->in_cap_bytes = 0;
+    free(rs->out_buf);
+    rs->out_buf = nullptr;
+    rs->out_cap_bytes = 0;
+}
+
+// Idempotent re-init per output acquisition (focus suspend/resume re-runs
+// this). Returns false on handle allocation failure; caller falls back to
+// the speaker path.
+static bool bt_resampler_init(BtResampler *rs, const uint32_t in_rate, const uint8_t channels)
+{
+    if (channels != 1u && channels != 2u) {
+        return false;
+    }
+    bt_resampler_deinit(rs);
     rs->channels = channels;
+
+    // NULL weight: stereo stays put, mono duplicates to both channels.
+    esp_asrc_cfg_t cfg = {};
+    cfg.src_info.sample_rate = in_rate;
+    cfg.src_info.channel = channels;
+    cfg.src_info.bits_per_sample = 16u;
+    cfg.dest_info.sample_rate = 44100u;
+    cfg.dest_info.channel = 2u;
+    cfg.dest_info.bits_per_sample = 16u;
+    cfg.perf_type = ESP_ASRC_PERF_TYPE_AUTO;
+    cfg.complexity = 2u; // music-grade, unlike the voice uplink path
+    cfg.timeout_ms = kBtAsrcTimeoutMs;
+    if (esp_asrc_open(&cfg, &rs->asrc) != ESP_ASRC_ERR_OK) {
+        bt_resampler_deinit(rs);
+        return false;
+    }
+    return true;
 }
 
 // in: interleaved PCM16 (mono or stereo) frames; out: 44.1 kHz stereo
-// interleaved. Same floorf/carry scheme as voice_resampler so chunk
-// boundaries stay continuous.
+// interleaved, at most out_cap_frames frames.
 static size_t bt_resampler_process(BtResampler *rs, const int16_t *in, const size_t in_frames,
                                    int16_t *out, const size_t out_cap_frames)
 {
-    if (in_frames == 0u) {
+    if (in_frames == 0u || out_cap_frames == 0u || rs->asrc == nullptr) {
         return 0;
     }
-    const uint8_t ch = rs->channels;
-    size_t produced = 0;
-    float pos = rs->pos;
-    while (produced < out_cap_frames) {
-        const float fbase = floorf(pos);
-        const long base = static_cast<long>(fbase);
-        if (base + 1 >= static_cast<long>(in_frames)) {
-            break;
-        }
-        const float frac = pos - fbase;
-        int16_t l0, r0;
-        if (base < 0) {
-            l0 = rs->has_carry ? rs->carry_l : in[0];
-            r0 = rs->has_carry ? rs->carry_r : ((ch == 2u) ? in[1] : in[0]);
-        } else {
-            l0 = in[base * ch];
-            r0 = (ch == 2u) ? in[base * ch + 1] : l0;
-        }
-        const size_t nf = (base < 0) ? 0u : static_cast<size_t>(base + 1);
-        const int16_t l1 = in[nf * ch];
-        const int16_t r1 = (ch == 2u) ? in[nf * ch + 1] : l1;
-        out[produced * 2u] = static_cast<int16_t>(l0 + (l1 - l0) * frac);
-        out[produced * 2u + 1u] = static_cast<int16_t>(r0 + (r1 - r0) * frac);
-        ++produced;
-        pos += rs->step;
+    esp_asrc_buffer_alignment_t align = {};
+    if (esp_asrc_get_buffer_alignment(&align) != ESP_ASRC_ERR_OK) {
+        return 0;
     }
-    rs->pos = pos - static_cast<float>(in_frames);
-    rs->carry_l = in[(in_frames - 1u) * ch];
-    rs->carry_r = (ch == 2u) ? in[(in_frames - 1u) * ch + 1u] : rs->carry_l;
-    rs->has_carry = 1;
-    return produced;
+    const size_t in_bytes = in_frames * rs->channels * sizeof(int16_t);
+    uint32_t out_frames_max = 0;
+    if (esp_asrc_get_out_sample_num(rs->asrc, static_cast<uint32_t>(in_frames),
+                                    &out_frames_max) != ESP_ASRC_ERR_OK) {
+        return 0;
+    }
+    const size_t out_bytes = static_cast<size_t>(out_frames_max) * 2u * sizeof(int16_t);
+    if (!bt_grow_aligned(&rs->in_buf, &rs->in_cap_bytes, in_bytes,
+                         align.inbuf_addr_align, align.inbuf_size_align) ||
+        !bt_grow_aligned(&rs->out_buf, &rs->out_cap_bytes, out_bytes,
+                         align.outbuf_addr_align, align.outbuf_size_align)) {
+        return 0;
+    }
+    memcpy(rs->in_buf, in, in_bytes);
+    uint32_t produced = out_frames_max;
+    if (esp_asrc_process(rs->asrc, rs->in_buf, static_cast<uint32_t>(in_frames),
+                         rs->out_buf, &produced) != ESP_ASRC_ERR_OK) {
+        return 0;
+    }
+    size_t frames = produced;
+    if (frames > out_cap_frames) {
+        frames = out_cap_frames; // clamp defensively
+    }
+    memcpy(out, rs->out_buf, frames * 2u * sizeof(int16_t));
+    return frames;
 }
 
 // Playback target + net-radio station persist in NVS so the web portal and
@@ -254,7 +327,7 @@ static bool media_focus_blocks_playback()
     return false;
 }
 
-static void player_task(void *)
+static void play_current_track()
 {
     // Tags first (cheap header/tail reads), so the UI has title/cover as
     // soon as -- or before -- the first PCM reaches the speaker. SMB is the
@@ -277,6 +350,9 @@ static void player_task(void *)
     bool bt_active = false;
     bool format_ready = false;
     bool reached_end = false;
+    // Consecutive decode-failure reconnects (live streams only); reset on the
+    // first successfully decoded chunk after a reconnect.
+    int stream_reconnects = 0;
     VoiceResampler resampler = {};
     BtResampler bt_resampler = {};
     // Pacing for the net-only case: without the I2S DMA back-pressure the
@@ -302,10 +378,15 @@ static void player_task(void *)
             }
             bt_active = NRL_BtA2dp_IsStreaming();
             if (bt_active) {
-                bt_resampler_init(&bt_resampler, info.sample_rate_hz, info.channels);
-                return true;
+                if (bt_resampler_init(&bt_resampler, info.sample_rate_hz, info.channels)) {
+                    return true;
+                }
+                ESP_LOGW(TAG, "A2DP resampler init failed, falling back to speaker");
+                NRL_BtA2dp_RequestStop();
+                bt_active = false;
+            } else {
+                ESP_LOGW(TAG, "A2DP not ready, falling back to speaker");
             }
-            ESP_LOGW(TAG, "A2DP not ready, falling back to speaker");
         }
         const uint8_t speaker_bits = speaker_24bit ? 32u : 16u;
         if (!speaker_hifi_acquire(info.sample_rate_hz, speaker_bits, 2u)) {
@@ -390,12 +471,48 @@ static void player_task(void *)
         const int rc = MEDIA_DECODER_Decode(decoder, &pcm, &bytes);
         if (rc <= 0) {
             if (rc < 0) {
+                // A live stream has no pristine source to re-read: network
+                // jitter can land the MP3 parser on a false sync, and one
+                // garbage frame fails the whole aud_dec job (pipeline abort).
+                // Reconnect at the live point instead of ending the track,
+                // with bounded retries so a dead stream still gives up.
+                constexpr int kMaxStreamReconnects = 3;
+                if (live_stream && !s_stop_requested &&
+                    stream_reconnects < kMaxStreamReconnects) {
+                    ++stream_reconnects;
+                    ESP_LOGW(TAG, "decode error, reconnecting stream (%d/%d): %s",
+                             stream_reconnects, kMaxStreamReconnects, s_current_path);
+                    MEDIA_DECODER_Close(decoder);
+                    decoder = nullptr;
+                    format_ready = false;
+                    s_stream_info_valid = false;
+                    release_outputs();
+                    for (int waited = 0; waited < 1000 * stream_reconnects &&
+                                        !s_stop_requested; waited += 100) {
+                        vTaskDelay(pdMS_TO_TICKS(100));
+                    }
+                    if (!s_stop_requested) {
+                        decoder = MEDIA_DECODER_Open(s_current_path, &s_stop_requested);
+                    }
+                    if (decoder == nullptr) {
+                        ESP_LOGE(TAG, "stream reconnect failed: %s", s_current_path);
+                        break;
+                    }
+                    if (to_net) {
+                        NRLAudioBridge_SetMediaUplinkActive(true);
+                        media_uplink_active = true;
+                        net_start_us = esp_timer_get_time();
+                        net_sent_samples = 0u;
+                    }
+                    continue;
+                }
                 ESP_LOGE(TAG, "decode failed: %s", s_current_path);
             } else {
                 reached_end = format_ready;
             }
             break;
         }
+        stream_reconnects = 0;
 
         MediaDecoderInfo info = {};
         if (!format_ready) {
@@ -535,6 +652,8 @@ static void player_task(void *)
 
     ESP_LOGI(TAG, "%s: %s", s_current_path, s_stop_requested ? "stopped" : "finished");
 
+    VOICE_RESAMPLER_Deinit(&resampler);
+    bt_resampler_deinit(&bt_resampler);
     release_outputs();
     if (decoder != nullptr) {
         MEDIA_DECODER_Close(decoder);
@@ -543,17 +662,26 @@ static void player_task(void *)
     s_stream_info_valid = false;
     s_focus_suspended = false;
     s_playing = false;
-    s_player_task = nullptr;
+    s_track_running = false;
 
-    // Auto-advance hook: the codec is released and s_player_task cleared, so
-    // the callback may call MUSIC_PlayFile (it spawns a fresh task) while
-    // this one is about to delete itself.
+    // Auto-advance hook: the track is fully released and s_track_running is
+    // clear, so the callback may call MUSIC_PlayFile -- it notifies this
+    // task, and the outer loop starts the next track as soon as we return.
     const MusicTrackEndCb_t end_cb = s_track_end_cb;
     if (reached_end && !s_stop_requested && end_cb != nullptr) {
         end_cb();
     }
+}
 
-    vTaskDelete(nullptr);
+// One persistent player task: MUSIC_PlayFile hands over a track with a
+// notification; play_current_track() runs it to the end and loops. No
+// per-track task create/delete churn on the fragmented runtime heap.
+static void player_task(void *)
+{
+    while (true) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        play_current_track();
+    }
 }
 
 static void on_voice_start(void)
@@ -582,6 +710,16 @@ extern "C" void MUSIC_Init(void)
     AudioFocus_RegisterVoiceStart(on_voice_start);
     AudioFocus_RegisterVoiceEnd(on_voice_end);
     media_config_load();
+    // Create the persistent player task now, while the boot heap is still
+    // whole -- a static stack anyway, so this can only fail on a bug.
+    // Priority below the voice passthrough task (10): file reads, decode and
+    // I2S writes are throughput work, not latency-critical.
+    s_player_task = xTaskCreateStaticPinnedToCore(player_task, "music_player",
+                                                  kPlayerStackBytes, nullptr, 5,
+                                                  s_player_stack, &s_player_tcb, 1);
+    if (s_player_task == nullptr) {
+        ESP_LOGE(TAG, "player task create failed at init");
+    }
 }
 
 extern "C" bool MUSIC_PlayFile(const char *path)
@@ -600,11 +738,11 @@ extern "C" bool MUSIC_PlayFile(const char *path)
     }
 
     MUSIC_Stop();
-    // Wait for the previous player task to wind down (it releases the codec).
-    for (int i = 0; i < 200 && s_player_task != nullptr; ++i) {
+    // Wait for the previous track to wind down (it releases the codec).
+    for (int i = 0; i < 200 && s_track_running; ++i) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-    if (s_player_task != nullptr) {
+    if (s_track_running) {
         ESP_LOGE(TAG, "previous track did not stop");
         return false;
     }
@@ -616,21 +754,19 @@ extern "C" bool MUSIC_PlayFile(const char *path)
     s_stop_requested = false;
     s_playing = true;
 
-    // Priority below the voice passthrough task (10): file reads, decode and
-    // I2S writes are throughput work, not latency-critical. Internal-RAM
-    // stack: stdio/FatFS/SDMMC may run with flash cache paused.
-    if (xTaskCreatePinnedToCore(player_task, "music_player", 8192, nullptr, 5, &s_player_task, 1) != pdPASS) {
+    if (s_player_task == nullptr) {
         s_playing = false;
-        s_player_task = nullptr;
-        ESP_LOGE(TAG, "player task create failed");
+        ESP_LOGE(TAG, "player task unavailable (init failed)");
         return false;
     }
+    s_track_running = true;
+    xTaskNotifyGive(s_player_task);
     return true;
 }
 
 extern "C" void MUSIC_Stop(void)
 {
-    if (s_player_task != nullptr) {
+    if (s_track_running) {
         s_stop_requested = true;
     }
 }
@@ -648,6 +784,11 @@ extern "C" const char *MUSIC_CurrentPath(void)
 extern "C" const MediaTrackInfo *MUSIC_GetTrackInfo(void)
 {
     return &s_track_info;
+}
+
+extern "C" void MUSIC_ReleaseTrackCover(void)
+{
+    MEDIA_META_ReleaseCover(&s_track_info);
 }
 
 extern "C" void MUSIC_SetTrackEndCallback(MusicTrackEndCb_t callback)

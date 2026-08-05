@@ -29,33 +29,57 @@ constexpr size_t kMaxScannedEntries = kMaxTracks + kMaxDirs;
 constexpr size_t kMaxPathLen = 256;
 constexpr size_t kMaxNameLen = 96;
 constexpr const char *kMusicSubdir = "music";
+constexpr size_t kClientCount = 3; // PLAYLIST_CLIENT_LEGACY/DISPLAY/WEB
 
 struct PlaylistDir {
     char path[kMaxPathLen];
     char name[kMaxNameLen];
 };
 
-NRL_PSRAM_BSS static char s_path_storage[kMaxTracks][kMaxPathLen];
-NRL_PSRAM_BSS static PlaylistDir s_dir_storage[kMaxDirs];
+// One independent browse session per client: own position, listing, scan
+// revision and async scan state, backed by its own PSRAM tables.
+struct PlaylistSession {
+    char current_dir[kMaxPathLen]; // empty string means virtual source root
+    char (*paths)[kMaxPathLen];
+    PlaylistDir *dirs;
+    std::atomic_size_t count{0};
+    std::atomic_size_t dir_count{0};
+    // Bumped at the end of every scan of this session. UIs that turn list
+    // rows into index-based events compare against it to detect that the
+    // directory tables were rebuilt behind their back.
+    std::atomic_uint revision{0};
+    volatile bool scanning = false;
+    volatile bool queued = false; // queued_dir holds a pending dir switch
+    volatile bool entries_visible = true;
+    volatile bool last_ok = true;
+    std::atomic_bool cancel{false};
+    char queued_dir[kMaxPathLen];
+};
+
+NRL_PSRAM_BSS static char s_path_storage[kClientCount][kMaxTracks][kMaxPathLen];
+NRL_PSRAM_BSS static PlaylistDir s_dir_storage[kClientCount][kMaxDirs];
+// Playback queue: snapshot of the track listing a PlayIndex call was made
+// from, so next/prev/auto-advance survive any client rescanning afterwards.
+NRL_PSRAM_BSS static char s_queue_paths[kMaxTracks][kMaxPathLen];
 NRL_PSRAM_BSS static char s_fav_storage[PLAYLIST_FAV_MAX][kMaxPathLen];
-static char (*s_paths)[kMaxPathLen] = s_path_storage;
-static PlaylistDir *s_dirs = s_dir_storage;
-static std::atomic_size_t s_count{0};
-static std::atomic_size_t s_dir_count{0};
-static volatile int s_current = -1;
+static PlaylistSession s_sessions[kClientCount];
+static size_t s_queue_count = 0;
+static volatile int s_current = -1; // index into s_queue_paths, -1 when idle
 static volatile bool s_auto_advance = true;
-static char s_current_dir[kMaxPathLen] = {};   // empty string means virtual source root
 static char (*s_favs)[kMaxPathLen] = s_fav_storage;
 static size_t s_fav_count = 0;
 static PlaylistRepeatMode s_repeat_mode = PLAYLIST_REPEAT_LIST;
-static volatile bool s_scanning = false;
-static volatile bool s_async_scan_active = false;
-static volatile bool s_scan_entries_visible = true;
-static volatile bool s_last_scan_ok = true;
-static std::atomic_bool s_cancel_scan{false};
 static portMUX_TYPE s_scan_state_lock = portMUX_INITIALIZER_UNLOCKED;
-static bool s_scan_queued = false;
-static char s_queued_dir[kMaxPathLen] = {};
+
+// Persistent scan worker on a static internal stack, same pattern as
+// music_player's player task: the runtime heap shatters to ~1.5 KB largest
+// blocks in steady state (see the BT reserve in nrl_bt_hfp.cpp), so the old
+// transient xTaskCreate of a 6 KB stack failed once the device had been up a
+// while.
+constexpr size_t kScanStackBytes = 6144;
+static StackType_t s_scan_stack[kScanStackBytes / sizeof(StackType_t)];
+static StaticTask_t s_scan_tcb;
+static TaskHandle_t s_scan_task = nullptr;
 
 constexpr const char *kNvsNamespace = "playlist";
 constexpr const char *kFavoritesDir = "@favorites";
@@ -81,44 +105,38 @@ static const char *basename_of(const char *path)
     return (slash != nullptr) ? slash + 1 : path;
 }
 
-static bool ensure_tables()
+static PlaylistSession *session_of(const PlaylistClient client)
 {
-    return true;
+    const size_t c = static_cast<size_t>(client);
+    return (c < kClientCount) ? &s_sessions[c] : nullptr;
 }
 
-static void reset_entries()
+static bool add_dir(PlaylistSession *s, const char *path, const char *name)
 {
-    s_count = 0;
-    s_dir_count = 0;
-    s_current = -1;
-}
-
-static bool add_dir(const char *path, const char *name)
-{
-    if (path == nullptr || path[0] == '\0' || s_dir_count >= kMaxDirs) {
+    if (path == nullptr || path[0] == '\0' || s->dir_count >= kMaxDirs) {
         return false;
     }
-    const int p = snprintf(s_dirs[s_dir_count].path, kMaxPathLen, "%s", path);
-    const int n = snprintf(s_dirs[s_dir_count].name, kMaxNameLen, "%s",
+    const int p = snprintf(s->dirs[s->dir_count].path, kMaxPathLen, "%s", path);
+    const int n = snprintf(s->dirs[s->dir_count].name, kMaxNameLen, "%s",
                            (name != nullptr && name[0] != '\0') ? name : basename_of(path));
     if (p <= 0 || n <= 0 || static_cast<size_t>(p) >= kMaxPathLen ||
         static_cast<size_t>(n) >= kMaxNameLen) {
         return false;
     }
-    ++s_dir_count;
+    ++s->dir_count;
     return true;
 }
 
-static bool add_track(const char *dir_path, const char *name)
+static bool add_track(PlaylistSession *s, const char *dir_path, const char *name)
 {
-    if (dir_path == nullptr || name == nullptr || s_count >= kMaxTracks) {
+    if (dir_path == nullptr || name == nullptr || s->count >= kMaxTracks) {
         return false;
     }
-    const int written = snprintf(s_paths[s_count], kMaxPathLen, "%s/%s", dir_path, name);
+    const int written = snprintf(s->paths[s->count], kMaxPathLen, "%s/%s", dir_path, name);
     if (written <= 0 || static_cast<size_t>(written) >= kMaxPathLen) {
         return false;
     }
-    ++s_count;
+    ++s->count;
     return true;
 }
 
@@ -167,184 +185,91 @@ static bool is_source_root(const char *path)
     return false;
 }
 
-static void scan_virtual_root()
+static void scan_virtual_root(PlaylistSession *s)
 {
     char path[kMaxPathLen];
     if (STORAGE_SdMounted()) {
-        add_dir(kFavoritesDir, "Favorites");
+        add_dir(s, kFavoritesDir, "Favorites");
     }
     if (source_root_path(STORAGE_SmbMountPoint(), nullptr, path, sizeof(path))) {
-        add_dir(path, "SMB");
+        add_dir(s, path, "SMB");
     }
     if (source_root_path(STORAGE_SdMountPoint(), kMusicSubdir, path, sizeof(path))) {
-        add_dir(path, "SD");
+        add_dir(s, path, "SD");
     }
     if (source_root_path(STORAGE_UsbMountPoint(), kMusicSubdir, path, sizeof(path))) {
-        add_dir(path, "USB");
+        add_dir(s, path, "USB");
     }
 }
 
-static void scan_favorites()
+static void scan_favorites(PlaylistSession *s, const bool sort)
 {
     if (s_favs == nullptr) {
         return;
     }
-    for (size_t i = 0; i < s_fav_count && s_count < kMaxTracks; ++i) {
-        memcpy(s_paths[s_count], s_favs[i], kMaxPathLen);
-        s_paths[s_count][kMaxPathLen - 1u] = '\0';
-        ++s_count;
+    for (size_t i = 0; i < s_fav_count && s->count < kMaxTracks; ++i) {
+        memcpy(s->paths[s->count], s_favs[i], kMaxPathLen);
+        s->paths[s->count][kMaxPathLen - 1u] = '\0';
+        ++s->count;
     }
-    if (!s_async_scan_active && s_count > 1u) {
-        qsort(s_paths, s_count, kMaxPathLen, compare_paths);
+    if (sort && s->count > 1u) {
+        qsort(s->paths, s->count, kMaxPathLen, compare_paths);
     }
 }
 
-static bool scan_current_dir()
+static bool scan_current_dir(PlaylistSession *s, const bool sort)
 {
-    DIR *dir = opendir(s_current_dir);
+    DIR *dir = opendir(s->current_dir);
     if (dir == nullptr) {
-        ESP_LOGW(TAG, "open dir failed: %s", s_current_dir);
+        ESP_LOGW(TAG, "open dir failed: %s", s->current_dir);
         return false;
     }
 
     struct dirent *entry;
     size_t inspected = 0;
-    while (inspected < kMaxScannedEntries && !s_cancel_scan.load() &&
+    while (inspected < kMaxScannedEntries && !s->cancel.load() &&
            (entry = readdir(dir)) != nullptr) {
         ++inspected;
         if (entry->d_name[0] == '.') {
             continue; // hidden entries + "."/".."
         }
         if (entry->d_type == DT_DIR) {
-            if (s_dir_count < kMaxDirs) {
+            if (s->dir_count < kMaxDirs) {
                 char sub_path[kMaxPathLen];
                 const int written = snprintf(sub_path, sizeof(sub_path), "%s/%s",
-                                             s_current_dir, entry->d_name);
+                                             s->current_dir, entry->d_name);
                 if (written > 0 && static_cast<size_t>(written) < sizeof(sub_path)) {
-                    add_dir(sub_path, entry->d_name);
+                    add_dir(s, sub_path, entry->d_name);
                 }
             }
             continue;
         }
-        if (s_count < kMaxTracks && has_supported_extension(entry->d_name)) {
-            add_track(s_current_dir, entry->d_name);
+        if (s->count < kMaxTracks && has_supported_extension(entry->d_name)) {
+            add_track(s, s->current_dir, entry->d_name);
         }
     }
     closedir(dir);
 
-    if (!s_async_scan_active && s_dir_count > 1u) {
-        qsort(s_dirs, s_dir_count, sizeof(PlaylistDir), compare_dirs);
+    if (sort && s->dir_count > 1u) {
+        qsort(s->dirs, s->dir_count, sizeof(PlaylistDir), compare_dirs);
     }
-    if (!s_async_scan_active && s_count > 1u) {
-        qsort(s_paths, s_count, kMaxPathLen, compare_paths);
+    if (sort && s->count > 1u) {
+        qsort(s->paths, s->count, kMaxPathLen, compare_paths);
     }
     return true;
 }
 
-static bool set_current_dir(const char *path)
+static bool set_current_dir(PlaylistSession *s, const char *path)
 {
     if (path == nullptr) {
-        s_current_dir[0] = '\0';
+        s->current_dir[0] = '\0';
         return true;
     }
-    const int written = snprintf(s_current_dir, sizeof(s_current_dir), "%s", path);
-    if (written <= 0 || static_cast<size_t>(written) >= sizeof(s_current_dir)) {
+    const int written = snprintf(s->current_dir, sizeof(s->current_dir), "%s", path);
+    if (written <= 0 || static_cast<size_t>(written) >= sizeof(s->current_dir)) {
         return false;
     }
     return true;
-}
-
-static void async_scan_task(void *)
-{
-    while (true) {
-        (void)PLAYLIST_Scan();
-
-        char next[kMaxPathLen] = {};
-        bool scan_again = false;
-        portENTER_CRITICAL(&s_scan_state_lock);
-        if (s_scan_queued) {
-            memcpy(next, s_queued_dir, sizeof(next));
-            s_scan_queued = false;
-            s_scan_entries_visible = false;
-            s_last_scan_ok = true;
-            scan_again = true;
-        } else {
-            s_async_scan_active = false;
-            s_scan_entries_visible = true;
-            s_scanning = false;
-        }
-        portEXIT_CRITICAL(&s_scan_state_lock);
-
-        if (!scan_again) {
-            break;
-        }
-        (void)set_current_dir(next);
-        s_cancel_scan.store(false);
-        ESP_LOGI(TAG, "switching directory scan to %s", next[0] ? next : "<sources>");
-    }
-    vTaskDelete(nullptr);
-}
-
-static bool schedule_scan(const char *path)
-{
-    if (path == nullptr) {
-        return false;
-    }
-    char target[kMaxPathLen] = {};
-    char previous[kMaxPathLen] = {};
-    const int written = snprintf(target, sizeof(target), "%s", path);
-    if (written < 0 || static_cast<size_t>(written) >= sizeof(target)) {
-        return false;
-    }
-    portENTER_CRITICAL(&s_scan_state_lock);
-    if (s_scanning) {
-        memcpy(s_queued_dir, target, sizeof(s_queued_dir));
-        s_scan_queued = true;
-        s_last_scan_ok = true;
-        portEXIT_CRITICAL(&s_scan_state_lock);
-
-        // readdir() may currently be waiting for an SMB QUERY_DIRECTORY reply.
-        // Wake that wait promptly; the scan task will reconnect and open the
-        // most recently queued directory after discarding the partial result.
-        s_cancel_scan.store(true);
-        SMB_VFS_CancelDirectoryScan();
-        ESP_LOGI(TAG, "directory switch queued: %s", target[0] ? target : "<sources>");
-        return true;
-    }
-    memcpy(previous, s_current_dir, sizeof(previous));
-    memcpy(s_current_dir, target, sizeof(s_current_dir));
-    s_scanning = true;
-    s_async_scan_active = true;
-    s_scan_entries_visible = false;
-    s_last_scan_ok = true;
-    s_scan_queued = false;
-    s_cancel_scan.store(false);
-    portEXIT_CRITICAL(&s_scan_state_lock);
-
-    if (xTaskCreate(async_scan_task, "playlist_scan", 6144, nullptr, 3, nullptr) != pdPASS) {
-        portENTER_CRITICAL(&s_scan_state_lock);
-        s_scanning = false;
-        s_async_scan_active = false;
-        s_scan_entries_visible = true;
-        s_last_scan_ok = false;
-        memcpy(s_current_dir, previous, sizeof(s_current_dir));
-        portEXIT_CRITICAL(&s_scan_state_lock);
-        ESP_LOGE(TAG, "background scan task create failed");
-        return false;
-    }
-    return true;
-}
-
-static void save_settings()
-{
-    nvs_handle_t nvs;
-    if (nvs_open(kNvsNamespace, NVS_READWRITE, &nvs) != ESP_OK) {
-        ESP_LOGW(TAG, "settings persist failed");
-        return;
-    }
-    (void)nvs_set_u8(nvs, "repeat", static_cast<uint8_t>(s_repeat_mode));
-    (void)nvs_commit(nvs);
-    nvs_close(nvs);
 }
 
 static void save_favorites_to_sd()
@@ -365,9 +290,6 @@ static void save_favorites_to_sd()
 
 static void load_favorites_from_sd()
 {
-    if (!ensure_tables()) {
-        return;
-    }
     s_fav_count = 0;
     if (!STORAGE_SdMounted()) {
         return;
@@ -394,11 +316,153 @@ static void load_favorites_from_sd()
     fclose(file);
 }
 
-static void load_settings()
+// Scan body shared by the synchronous legacy API and the scan worker: fills
+// the session's tables and bumps its revision. `sort` orders the listing
+// (legacy sync scans only; async scans keep scan order).
+static size_t scan_session(PlaylistSession *s, const bool sort)
 {
-    if (!ensure_tables()) {
+    load_favorites_from_sd();
+
+    s->count = 0;
+    s->dir_count = 0;
+    bool scan_ok = true;
+    if (strcmp(s->current_dir, kFavoritesDir) == 0) {
+        scan_favorites(s, sort);
+    } else if (s->current_dir[0] == '\0') {
+        scan_virtual_root(s);
+    } else if (!scan_current_dir(s, sort)) {
+        // A network directory can fail transiently while SMB reconnects. Keep
+        // the requested directory selected so the web/display UI can retry it
+        // in place instead of unexpectedly jumping back to the source root.
+        s->count = 0;
+        s->dir_count = 0;
+        scan_ok = false;
+    }
+
+    ESP_LOGI(TAG, "%u dirs, %u tracks indexed in %s",
+             static_cast<unsigned>(s->dir_count.load()),
+             static_cast<unsigned>(s->count.load()),
+             s->current_dir[0] ? s->current_dir : "<sources>");
+    s->last_ok = scan_ok;
+    s->revision.fetch_add(1u);
+    return s->count;
+}
+
+// One worker drains all sessions with a pending scan request, serially (SMB
+// is a single connection anyway).
+static void scan_worker_task(void *)
+{
+    while (true) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        for (size_t c = 0; c < kClientCount; ++c) {
+            PlaylistSession *s = &s_sessions[c];
+            if (!s->scanning) {
+                continue;
+            }
+            const bool sort = (c == static_cast<size_t>(PLAYLIST_CLIENT_LEGACY));
+            while (true) {
+                // Entries appear as the scan fills the tables (mirrors the old
+                // async scan's entries-visible handling).
+                s->entries_visible = true;
+                (void)scan_session(s, sort);
+
+                char next[kMaxPathLen] = {};
+                bool scan_again = false;
+                portENTER_CRITICAL(&s_scan_state_lock);
+                if (s->queued) {
+                    memcpy(next, s->queued_dir, sizeof(next));
+                    s->queued = false;
+                    s->entries_visible = false;
+                    s->last_ok = true;
+                    scan_again = true;
+                } else {
+                    s->entries_visible = true;
+                    s->scanning = false;
+                }
+                portEXIT_CRITICAL(&s_scan_state_lock);
+
+                if (!scan_again) {
+                    break;
+                }
+                (void)set_current_dir(s, next);
+                s->cancel.store(false);
+                ESP_LOGI(TAG, "client %u switching directory scan to %s",
+                         static_cast<unsigned>(c), next[0] ? next : "<sources>");
+            }
+        }
+    }
+}
+
+static bool schedule_scan(const size_t client, const char *path)
+{
+    if (client >= kClientCount || path == nullptr) {
+        return false;
+    }
+    // Any browse/play intent is the trigger for the lazy SMB mount
+    // (STORAGE_SmbAutoStart is a no-op when no share is configured or the
+    // supervisor already runs).
+    STORAGE_SmbAutoStart();
+    PlaylistSession *s = &s_sessions[client];
+    char target[kMaxPathLen] = {};
+    char previous[kMaxPathLen] = {};
+    const int written = snprintf(target, sizeof(target), "%s", path);
+    if (written < 0 || static_cast<size_t>(written) >= sizeof(target)) {
+        return false;
+    }
+    portENTER_CRITICAL(&s_scan_state_lock);
+    if (s->scanning) {
+        memcpy(s->queued_dir, target, sizeof(s->queued_dir));
+        s->queued = true;
+        s->last_ok = true;
+        portEXIT_CRITICAL(&s_scan_state_lock);
+
+        // readdir() may currently be waiting for an SMB QUERY_DIRECTORY reply.
+        // Wake that wait promptly; the worker opens the most recently queued
+        // directory after discarding the partial result. Cancellation is local
+        // control flow: the SMB session survives it (see smb_vfs.cpp).
+        s->cancel.store(true);
+        SMB_VFS_CancelDirectoryScan();
+        ESP_LOGI(TAG, "client %u directory switch queued: %s",
+                 static_cast<unsigned>(client), target[0] ? target : "<sources>");
+        return true;
+    }
+    memcpy(previous, s->current_dir, sizeof(previous));
+    memcpy(s->current_dir, target, sizeof(s->current_dir));
+    s->scanning = true;
+    s->entries_visible = false;
+    s->last_ok = true;
+    s->queued = false;
+    s->cancel.store(false);
+    portEXIT_CRITICAL(&s_scan_state_lock);
+
+    if (s_scan_task == nullptr) {
+        portENTER_CRITICAL(&s_scan_state_lock);
+        s->scanning = false;
+        s->entries_visible = true;
+        s->last_ok = false;
+        memcpy(s->current_dir, previous, sizeof(s->current_dir));
+        portEXIT_CRITICAL(&s_scan_state_lock);
+        ESP_LOGE(TAG, "scan worker unavailable (init failed)");
+        return false;
+    }
+    xTaskNotifyGive(s_scan_task);
+    return true;
+}
+
+static void save_settings()
+{
+    nvs_handle_t nvs;
+    if (nvs_open(kNvsNamespace, NVS_READWRITE, &nvs) != ESP_OK) {
+        ESP_LOGW(TAG, "settings persist failed");
         return;
     }
+    (void)nvs_set_u8(nvs, "repeat", static_cast<uint8_t>(s_repeat_mode));
+    (void)nvs_commit(nvs);
+    nvs_close(nvs);
+}
+
+static void load_settings()
+{
     nvs_handle_t nvs;
     if (nvs_open(kNvsNamespace, NVS_READONLY, &nvs) != ESP_OK) {
         return;
@@ -412,13 +476,25 @@ static void load_settings()
     ESP_LOGI(TAG, "%u favorite tracks loaded from SD", static_cast<unsigned>(s_fav_count));
 }
 
+static bool queue_play_index(const size_t index)
+{
+    if (index >= s_queue_count) {
+        return false;
+    }
+    if (!MUSIC_PlayFile(s_queue_paths[index])) {
+        return false;
+    }
+    s_current = static_cast<int>(index);
+    return true;
+}
+
 static void on_track_end(void)
 {
     if (!s_auto_advance) {
         return;
     }
     if (s_repeat_mode == PLAYLIST_REPEAT_ONE && s_current >= 0) {
-        (void)PLAYLIST_PlayIndex(static_cast<size_t>(s_current));
+        (void)queue_play_index(static_cast<size_t>(s_current));
     } else {
         (void)PLAYLIST_Next();
     }
@@ -428,65 +504,39 @@ static void on_track_end(void)
 
 extern "C" void PLAYLIST_Init(void)
 {
+    for (size_t i = 0; i < kClientCount; ++i) {
+        s_sessions[i].paths = s_path_storage[i];
+        s_sessions[i].dirs = s_dir_storage[i];
+    }
     load_settings();
     MUSIC_SetTrackEndCallback(on_track_end);
+    s_scan_task = xTaskCreateStaticPinnedToCore(scan_worker_task, "playlist_scan",
+                                                kScanStackBytes, nullptr, 3,
+                                                s_scan_stack, &s_scan_tcb, 0);
+    if (s_scan_task == nullptr) {
+        ESP_LOGE(TAG, "scan worker create failed at init");
+    }
 }
 
 extern "C" size_t PLAYLIST_Scan(void)
 {
-    if (!ensure_tables()) {
-        s_last_scan_ok = false;
-        return 0;
-    }
-    load_favorites_from_sd();
-
-    char current_path[kMaxPathLen] = {};
-    if (s_current >= 0 && static_cast<size_t>(s_current) < s_count) {
-        snprintf(current_path, sizeof(current_path), "%s", s_paths[s_current]);
-    }
-
-    reset_entries();
-    if (s_async_scan_active) {
-        s_scan_entries_visible = true;
-    }
-    bool scan_ok = true;
-    if (strcmp(s_current_dir, kFavoritesDir) == 0) {
-        scan_favorites();
-    } else if (s_current_dir[0] == '\0') {
-        scan_virtual_root();
-    } else if (!scan_current_dir()) {
-        // A network directory can fail transiently while SMB reconnects. Keep
-        // the requested directory selected so the web/display UI can retry it
-        // in place instead of unexpectedly jumping back to the source root.
-        reset_entries();
-        scan_ok = false;
-    }
-
-    if (current_path[0] != '\0') {
-        for (size_t i = 0; i < s_count; ++i) {
-            if (strcmp(s_paths[i], current_path) == 0) {
-                s_current = static_cast<int>(i);
-                break;
-            }
-        }
-    }
-
-    ESP_LOGI(TAG, "%u dirs, %u tracks indexed in %s",
-             static_cast<unsigned>(s_dir_count),
-             static_cast<unsigned>(s_count),
-             s_current_dir[0] ? s_current_dir : "<sources>");
-    s_last_scan_ok = scan_ok;
-    return s_count;
+    // Legacy session scans run synchronously on the caller's task; the SMB
+    // VFS tolerates a second open directory alongside the scan worker.
+    return scan_session(&s_sessions[PLAYLIST_CLIENT_LEGACY], true);
 }
 
-extern "C" bool PLAYLIST_ScanAsync(void)
+extern "C" bool PLAYLIST_ClientScanAsync(const PlaylistClient client)
 {
-    return schedule_scan(s_current_dir);
+    PlaylistSession *s = session_of(client);
+    if (s == nullptr) {
+        return false;
+    }
+    return schedule_scan(static_cast<size_t>(client), s->current_dir);
 }
 
-extern "C" bool PLAYLIST_EnterDirAsync(const size_t index)
+extern "C" bool PLAYLIST_ClientEnterDirAsync(const PlaylistClient client, const size_t index)
 {
-    const char *path = PLAYLIST_GetDirPath(index);
+    const char *path = PLAYLIST_ClientGetDirPath(client, index);
     if (path == nullptr ||
         (strcmp(path, kFavoritesDir) == 0 && !STORAGE_SdMounted())) {
         return false;
@@ -494,16 +544,17 @@ extern "C" bool PLAYLIST_EnterDirAsync(const size_t index)
     char target[kMaxPathLen];
     const int written = snprintf(target, sizeof(target), "%s", path);
     return written >= 0 && static_cast<size_t>(written) < sizeof(target) &&
-           schedule_scan(target);
+           schedule_scan(static_cast<size_t>(client), target);
 }
 
-extern "C" bool PLAYLIST_UpAsync(void)
+extern "C" bool PLAYLIST_ClientUpAsync(const PlaylistClient client)
 {
-    if (s_current_dir[0] == '\0') {
+    PlaylistSession *s = session_of(client);
+    if (s == nullptr || s->current_dir[0] == '\0') {
         return false;
     }
     char target[kMaxPathLen];
-    snprintf(target, sizeof(target), "%s", s_current_dir);
+    snprintf(target, sizeof(target), "%s", s->current_dir);
     if (strcmp(target, kFavoritesDir) == 0 || is_source_root(target)) {
         target[0] = '\0';
     } else {
@@ -514,65 +565,150 @@ extern "C" bool PLAYLIST_UpAsync(void)
             *slash = '\0';
         }
     }
-    return schedule_scan(target);
+    return schedule_scan(static_cast<size_t>(client), target);
 }
 
-extern "C" bool PLAYLIST_IsScanning(void)
+extern "C" bool PLAYLIST_ClientIsScanning(const PlaylistClient client)
 {
-    return s_scanning;
+    PlaylistSession *s = session_of(client);
+    return s != nullptr && s->scanning;
 }
 
-extern "C" bool PLAYLIST_LastScanOk(void)
+extern "C" bool PLAYLIST_ClientLastScanOk(const PlaylistClient client)
 {
-    return s_last_scan_ok;
+    PlaylistSession *s = session_of(client);
+    return s != nullptr && s->last_ok;
+}
+
+extern "C" unsigned PLAYLIST_ClientScanRevision(const PlaylistClient client)
+{
+    PlaylistSession *s = session_of(client);
+    return (s != nullptr) ? s->revision.load() : 0u;
+}
+
+extern "C" const char *PLAYLIST_ClientCurrentDir(const PlaylistClient client)
+{
+    PlaylistSession *s = session_of(client);
+    return (s != nullptr) ? s->current_dir : "";
+}
+
+extern "C" bool PLAYLIST_ClientAtRoot(const PlaylistClient client)
+{
+    PlaylistSession *s = session_of(client);
+    return s == nullptr || s->current_dir[0] == '\0';
+}
+
+extern "C" bool PLAYLIST_ClientInFavorites(const PlaylistClient client)
+{
+    PlaylistSession *s = session_of(client);
+    return s != nullptr && strcmp(s->current_dir, kFavoritesDir) == 0;
+}
+
+extern "C" size_t PLAYLIST_ClientDirCount(const PlaylistClient client)
+{
+    PlaylistSession *s = session_of(client);
+    return (s != nullptr && s->entries_visible) ? s->dir_count.load() : 0u;
+}
+
+extern "C" const char *PLAYLIST_ClientGetDirName(const PlaylistClient client, const size_t index)
+{
+    PlaylistSession *s = session_of(client);
+    if (s == nullptr || !s->entries_visible || s->dirs == nullptr || index >= s->dir_count) {
+        return nullptr;
+    }
+    return s->dirs[index].name;
+}
+
+extern "C" const char *PLAYLIST_ClientGetDirPath(const PlaylistClient client, const size_t index)
+{
+    PlaylistSession *s = session_of(client);
+    if (s == nullptr || !s->entries_visible || s->dirs == nullptr || index >= s->dir_count) {
+        return nullptr;
+    }
+    return s->dirs[index].path;
+}
+
+extern "C" size_t PLAYLIST_ClientCount(const PlaylistClient client)
+{
+    PlaylistSession *s = session_of(client);
+    return (s != nullptr && s->entries_visible) ? s->count.load() : 0u;
+}
+
+extern "C" const char *PLAYLIST_ClientGetPath(const PlaylistClient client, const size_t index)
+{
+    PlaylistSession *s = session_of(client);
+    if (s == nullptr || !s->entries_visible || s->paths == nullptr || index >= s->count) {
+        return nullptr;
+    }
+    return s->paths[index];
+}
+
+extern "C" bool PLAYLIST_ClientPlayIndex(const PlaylistClient client, const size_t index)
+{
+    PlaylistSession *s = session_of(client);
+    if (s == nullptr || s->scanning || !s->entries_visible ||
+        s->paths == nullptr || index >= s->count) {
+        return false;
+    }
+    // Snapshot the client's whole track listing into the playback queue so
+    // next/prev/auto-advance stay stable however any client browses later.
+    size_t n = s->count.load();
+    if (n > kMaxTracks) {
+        n = kMaxTracks;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        memcpy(s_queue_paths[i], s->paths[i], kMaxPathLen);
+    }
+    s_queue_count = n;
+    s_current = -1;
+    if (!MUSIC_PlayFile(s_queue_paths[index])) {
+        return false;
+    }
+    s_current = static_cast<int>(index);
+    return true;
 }
 
 extern "C" const char *PLAYLIST_CurrentDir(void)
 {
-    return s_current_dir;
+    return s_sessions[PLAYLIST_CLIENT_LEGACY].current_dir;
 }
 
 extern "C" bool PLAYLIST_AtRoot(void)
 {
-    return s_current_dir[0] == '\0';
+    return s_sessions[PLAYLIST_CLIENT_LEGACY].current_dir[0] == '\0';
 }
 
 extern "C" bool PLAYLIST_InFavorites(void)
 {
-    return strcmp(s_current_dir, kFavoritesDir) == 0;
+    return strcmp(s_sessions[PLAYLIST_CLIENT_LEGACY].current_dir, kFavoritesDir) == 0;
 }
 
 extern "C" size_t PLAYLIST_DirCount(void)
 {
-    return s_scan_entries_visible ? s_dir_count.load() : 0u;
+    return PLAYLIST_ClientDirCount(PLAYLIST_CLIENT_LEGACY);
 }
 
 extern "C" const char *PLAYLIST_GetDirName(const size_t index)
 {
-    if (!s_scan_entries_visible || s_dirs == nullptr || index >= s_dir_count) {
-        return nullptr;
-    }
-    return s_dirs[index].name;
+    return PLAYLIST_ClientGetDirName(PLAYLIST_CLIENT_LEGACY, index);
 }
 
 extern "C" const char *PLAYLIST_GetDirPath(const size_t index)
 {
-    if (!s_scan_entries_visible || s_dirs == nullptr || index >= s_dir_count) {
-        return nullptr;
-    }
-    return s_dirs[index].path;
+    return PLAYLIST_ClientGetDirPath(PLAYLIST_CLIENT_LEGACY, index);
 }
 
 extern "C" bool PLAYLIST_EnterDir(const size_t index)
 {
-    if (s_scanning) {
+    PlaylistSession *s = &s_sessions[PLAYLIST_CLIENT_LEGACY];
+    if (s->scanning) {
         return false;
     }
     const char *path = PLAYLIST_GetDirPath(index);
     if (path != nullptr && strcmp(path, kFavoritesDir) == 0 && !STORAGE_SdMounted()) {
         return false;
     }
-    if (path == nullptr || !set_current_dir(path)) {
+    if (path == nullptr || !set_current_dir(s, path)) {
         return false;
     }
     (void)PLAYLIST_Scan();
@@ -581,22 +717,23 @@ extern "C" bool PLAYLIST_EnterDir(const size_t index)
 
 extern "C" bool PLAYLIST_Up(void)
 {
-    if (s_scanning || s_current_dir[0] == '\0') {
+    PlaylistSession *s = &s_sessions[PLAYLIST_CLIENT_LEGACY];
+    if (s->scanning || s->current_dir[0] == '\0') {
         return false;
     }
-    if (strcmp(s_current_dir, kFavoritesDir) == 0) {
-        s_current_dir[0] = '\0';
+    if (strcmp(s->current_dir, kFavoritesDir) == 0) {
+        s->current_dir[0] = '\0';
         (void)PLAYLIST_Scan();
         return true;
     }
-    if (is_source_root(s_current_dir)) {
-        s_current_dir[0] = '\0';
+    if (is_source_root(s->current_dir)) {
+        s->current_dir[0] = '\0';
         (void)PLAYLIST_Scan();
         return true;
     }
-    char *slash = strrchr(s_current_dir, '/');
-    if (slash == nullptr || slash == s_current_dir) {
-        s_current_dir[0] = '\0';
+    char *slash = strrchr(s->current_dir, '/');
+    if (slash == nullptr || slash == s->current_dir) {
+        s->current_dir[0] = '\0';
     } else {
         *slash = '\0';
     }
@@ -606,54 +743,40 @@ extern "C" bool PLAYLIST_Up(void)
 
 extern "C" size_t PLAYLIST_Count(void)
 {
-    return s_scan_entries_visible ? s_count.load() : 0u;
+    return PLAYLIST_ClientCount(PLAYLIST_CLIENT_LEGACY);
 }
 
 extern "C" const char *PLAYLIST_GetPath(const size_t index)
 {
-    if (!s_scan_entries_visible || s_paths == nullptr || index >= s_count) {
-        return nullptr;
-    }
-    return s_paths[index];
+    return PLAYLIST_ClientGetPath(PLAYLIST_CLIENT_LEGACY, index);
 }
 
 extern "C" int PLAYLIST_CurrentIndex(void)
 {
-    return s_scanning ? -1 : s_current;
+    return s_current;
 }
 
 extern "C" bool PLAYLIST_PlayIndex(const size_t index)
 {
-    if (s_scanning) {
-        return false;
-    }
-    const char *path = PLAYLIST_GetPath(index);
-    if (path == nullptr) {
-        return false;
-    }
-    if (!MUSIC_PlayFile(path)) {
-        return false;
-    }
-    s_current = static_cast<int>(index);
-    return true;
+    return PLAYLIST_ClientPlayIndex(PLAYLIST_CLIENT_LEGACY, index);
 }
 
 extern "C" bool PLAYLIST_Next(void)
 {
-    if (s_scanning || s_count == 0u) {
+    if (s_queue_count == 0u) {
         return false;
     }
-    const size_t next = (s_current < 0) ? 0u : (static_cast<size_t>(s_current) + 1u) % s_count;
-    return PLAYLIST_PlayIndex(next);
+    const size_t next = (s_current < 0) ? 0u : (static_cast<size_t>(s_current) + 1u) % s_queue_count;
+    return queue_play_index(next);
 }
 
 extern "C" bool PLAYLIST_Prev(void)
 {
-    if (s_scanning || s_count == 0u) {
+    if (s_queue_count == 0u) {
         return false;
     }
-    const size_t prev = (s_current <= 0) ? (s_count - 1u) : (static_cast<size_t>(s_current) - 1u);
-    return PLAYLIST_PlayIndex(prev);
+    const size_t prev = (s_current <= 0) ? (s_queue_count - 1u) : (static_cast<size_t>(s_current) - 1u);
+    return queue_play_index(prev);
 }
 
 extern "C" PlaylistRepeatMode PLAYLIST_GetRepeatMode(void)
@@ -695,7 +818,7 @@ extern "C" bool PLAYLIST_IsFavorite(const char *path)
 
 extern "C" bool PLAYLIST_ToggleFavorite(const char *path)
 {
-    if (!STORAGE_SdMounted() || path == nullptr || path[0] == '\0' || !ensure_tables()) {
+    if (!STORAGE_SdMounted() || path == nullptr || path[0] == '\0') {
         return false;
     }
     for (size_t i = 0; i < s_fav_count; ++i) {
@@ -703,7 +826,8 @@ extern "C" bool PLAYLIST_ToggleFavorite(const char *path)
             memmove(&s_favs[i], &s_favs[i + 1], (s_fav_count - i - 1u) * kMaxPathLen);
             --s_fav_count;
             save_favorites_to_sd();
-            if (strcmp(s_current_dir, kFavoritesDir) == 0) {
+            // Rescan-on-favorites stays on the legacy session, as before.
+            if (strcmp(s_sessions[PLAYLIST_CLIENT_LEGACY].current_dir, kFavoritesDir) == 0) {
                 (void)PLAYLIST_Scan();
             }
             return true;

@@ -56,7 +56,7 @@ static volatile bool s_ai_task_run = false;
 
 // Reassembly buffer for fragmented WS payloads (TTS Opus frames are small,
 // but the client may still split across events).
-static uint8_t s_rx_buf[kRxAssembleMax];
+NRL_PSRAM_BSS static uint8_t s_rx_buf[kRxAssembleMax];
 
 static void save_config(void)
 {
@@ -146,7 +146,7 @@ static void handle_tts_opus(const uint8_t *frame, const size_t bytes)
             return;
         }
     }
-    static int16_t pcm[kOpusFrameSamples * 2u];
+    NRL_PSRAM_BSS static int16_t pcm[kOpusFrameSamples * 2u];
     const int n = OPUS_VOICE_DecProcess(s_dec, frame, bytes, pcm,
                                         sizeof(pcm) / sizeof(pcm[0]));
     if (n > 0) {
@@ -218,7 +218,7 @@ static void ai_sink_write(uint8_t /*source_id*/, const int16_t *samples,
 // AI task: pull 60 ms mic frames from the ring, Opus-encode, send binary.
 static void ai_task(void *)
 {
-    static int16_t frame[kOpusFrameSamples];
+    NRL_PSRAM_BSS static int16_t frame[kOpusFrameSamples];
     static uint8_t encoded[OPUS_VOICE_MAX_FRAME_BYTES];
     size_t fill = 0;
 

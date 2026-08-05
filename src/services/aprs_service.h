@@ -30,11 +30,30 @@ extern "C" {
 
 #define APRS_COMMENT_MAX_BYTES 219u
 
+// Gateway forwarding directions between the three APRS channels:
+// RF (radio mic/speaker AFSK), NRL (network voice AFSK) and APRS-IS (TCP).
+// A decoded packet is relayed from its origin channel to every enabled
+// destination; AFSK destinations additionally follow the rf_tx/nrl_tx
+// transmitter switches (one modulator, its audio fans out over the enabled
+// routes).
+typedef enum {
+    APRS_FWD_RF_TO_IS = 0,  // iGate uplink: radio RX -> APRS-IS (qAR)
+    APRS_FWD_IS_TO_RF,      // iGate downlink: APRS-IS -> radio AFSK TX
+    APRS_FWD_NRL_TO_IS,     // NRL network RX -> APRS-IS (qAR)
+    APRS_FWD_IS_TO_NRL,     // APRS-IS -> AFSK over the NRL voice uplink
+    APRS_FWD_RF_TO_NRL,     // radio RX -> AFSK over the NRL voice uplink
+    APRS_FWD_NRL_TO_RF,     // NRL network RX -> radio AFSK TX
+    APRS_FWD_COUNT
+} AprsFwdDir;
+
 typedef struct {
     bool enabled;         // master switch
     bool net_enabled;     // APRS-IS uplink/downlink
     bool rf_tx_enabled;   // AFSK beacon out through speaker/radio
     bool rf_rx_enabled;   // demodulate mic audio
+    bool nrl_tx_enabled;  // AFSK audio out through the NRL network uplink
+    bool nrl_rx_enabled;  // demodulate NRL network downlink audio
+    bool fwd[APRS_FWD_COUNT]; // gateway forwarding switches, see AprsFwdDir
     uint8_t ssid;         // APRS SSID appended to the radio callsign
     char symbol_table;    // e.g. '/'
     char symbol_code;     // e.g. 'I' for the /I TCP/IP symbol
@@ -110,6 +129,10 @@ bool APRS_SERVICE_IsEnabled(void);
 bool APRS_SERVICE_SetNetEnabled(bool enabled);
 bool APRS_SERVICE_SetRfTxEnabled(bool enabled);
 bool APRS_SERVICE_SetRfRxEnabled(bool enabled);
+bool APRS_SERVICE_SetNrlTxEnabled(bool enabled);
+bool APRS_SERVICE_SetNrlRxEnabled(bool enabled);
+// Gateway forwarding switch for one direction (persisted).
+bool APRS_SERVICE_SetFwdEnabled(AprsFwdDir dir, bool enabled);
 
 // Configuration (persisted; NULL/out-of-range rejected).
 bool APRS_SERVICE_SetServer(const char *host, uint16_t port);
@@ -137,6 +160,14 @@ void APRS_SERVICE_GetConfig(AprsConfig *out);
 
 // Queue a beacon immediately (both directions as enabled).
 bool APRS_SERVICE_SendBeaconNow(void);
+
+// Queue a manual APRS text message (":DEST     :text{seq" frame). `dest` is
+// the addressee callsign (A-Z 0-9 '-', max 9 chars, case-insensitive),
+// `text` the message body (UTF-8, max 67 bytes). The frame leaves over
+// APRS-IS when net is linked and/or as AFSK on every enabled audio path
+// (speaker RF and/or NRL uplink). Returns false on bad input or when the
+// service is off; the actual transmission happens on the APRS task.
+bool APRS_SERVICE_SendMessage(const char *dest, const char *text);
 
 // Own current position: GPS fix when fresh, else the configured default.
 // Returns true when the position came from a live GPS fix.

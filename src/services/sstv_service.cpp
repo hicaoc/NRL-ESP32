@@ -269,7 +269,15 @@ void worker(void *)
             NRLAudioBridge_SetMediaUplinkActive(true);
             SSTV_TxInit(mode);
             (void)SSTV_TxSetImage(s_image, frameWidth(mode), frameHeight(mode));
-            TickType_t next_chunk_tick = xTaskGetTickCount();
+            // Absolute periodic pacing: one chunk every 10 ms (SSTV_CHUNK_SAMPLES
+            // == 160 samples @ 16 kHz). The encode + UDP push + speaker work below
+            // happens INSIDE the period; vTaskDelayUntil() only sleeps the
+            // remainder. A relative vTaskDelay(10) here would add a full 10 ms gap
+            // after every chunk's own processing time, producing audible holes in
+            // the real-time transmission (a recording played back end-to-end hides
+            // them, which is why replays decode fine).
+            TickType_t last_wake = xTaskGetTickCount();
+            const TickType_t period_ticks = pdMS_TO_TICKS(10);
             for (;;) {
                 const bool more = SSTV_TxFillChunk(chunk);
                 for (size_t i = 0u; i < SSTV_CHUNK_SAMPLES / 2u; ++i) {
@@ -297,12 +305,7 @@ void worker(void *)
                     completed = true;
                     break;
                 }
-                // Each chunk already represents exactly 10 ms of 16 kHz
-                // audio. Pace against an absolute schedule so JPEG/network/
-                // speaker processing time is included in that 10 ms period;
-                // adding a relative 10 ms delay here created an audible gap
-                // after every chunk and made live SSTV undecodable.
-                vTaskDelayUntil(&next_chunk_tick, pdMS_TO_TICKS(10));
+                vTaskDelayUntil(&last_wake, period_ticks);
             }
             NRLAudioBridge_SetMediaUplinkActive(false);
         }

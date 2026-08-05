@@ -90,7 +90,7 @@ static SemaphoreHandle_t s_output_queue_mutex = nullptr;
 static uint32_t s_last_output_queue_log_ms = 0;
 static volatile uint8_t s_aec_reference_source = 0; // 0=network playback, 1=second mic
 static constexpr size_t kAecNetworkRefDelayFrames = 12; // ~120 ms at 160 samples/frame
-static int16_t s_aec_network_ref[kFrameSamples * kAecNetworkRefDelayFrames];
+NRL_PSRAM_BSS static int16_t s_aec_network_ref[kFrameSamples * kAecNetworkRefDelayFrames];
 static size_t s_aec_network_ref_head = 0;
 static size_t s_aec_network_ref_fill = 0;
 
