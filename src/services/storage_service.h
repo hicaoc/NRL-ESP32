@@ -46,10 +46,14 @@ const char *STORAGE_UsbMountPoint(void);
 
 // SMB network share backend (docs/architecture.md 3.5): plays audio from a
 // NAS / Windows shared folder mounted at /smb. Configuration persists in
-// NVS; on boot a background task waits for WiFi and mounts automatically
-// (retrying every 30 s while the share is unreachable). Point the share
-// (or its path) directly at the music folder -- the playlist scans the
-// share root, not a /music subdirectory.
+// NVS. The mount is lazy: nothing touches the network at boot (a mount+scan
+// storm there starves internal RAM exactly when the boot OTA check runs);
+// the supervisor task starts on the first playlist browse/play that could
+// reach the share, waits for WiFi, mounts, and retries every 30 s while the
+// share is unreachable. Point the share (or its path) directly at the music
+// folder -- the playlist scans the share root, not a /music subdirectory.
+// Start the mount supervisor if a share is configured; idempotent.
+void STORAGE_SmbAutoStart(void);
 // Configure + persist + (re)mount. Empty user means guest.
 bool STORAGE_SmbConfigure(const char *server, const char *share,
                           const char *user, const char *password);

@@ -7,6 +7,7 @@
 #include "nrl_ethernet.h"
 #include "nrl_g711.h"
 #include "nrl_net_compat.h"
+#include "nrl_psram.h"
 #include "nrl_text_message.h"
 #include "nrl_usb_console.h"
 #include "nrl_wifi.h"
@@ -80,6 +81,15 @@ constexpr uint32_t kSciFlushIntervalMs = 20u;
 int s_udp_fd = -1;
 SemaphoreHandle_t s_udp_mutex = nullptr;
 TaskHandle_t s_bridge_task = nullptr;
+// Static internal stack for the permanent bridge task: 16 KB contiguous is
+// the single biggest runtime stack allocation, and the boot-tail heap can be
+// too fragmented to serve it (same failure class as the BT reserve comment
+// there). Link-time allocation makes the cost visible in the map file and
+// the create can never fail on heap shape. Still internal RAM, per the
+// flash-cache constraint below.
+constexpr size_t kBridgeStackBytes = 16384u;
+StackType_t s_bridge_stack[kBridgeStackBytes / sizeof(StackType_t)];
+StaticTask_t s_bridge_tcb;
 bool s_bridge_initialized = false;
 bool s_udp_started = false;
 bool s_downlink_playback_active = false;
@@ -113,12 +123,12 @@ uint32_t s_voice_dmr_id = 0u;
 size_t s_last_voice_payload_size = 0u;
 uint32_t s_next_wifi_retry_ms = 0u;
 uint8_t s_wifi_connect_failures = 0u;
-uint8_t s_rx_packet_buffer[kNrlMaxPacketSize];
-uint8_t s_at_reply_packet[kNrlMaxPacketSize];
+NRL_PSRAM_BSS uint8_t s_rx_packet_buffer[kNrlMaxPacketSize];
+NRL_PSRAM_BSS uint8_t s_at_reply_packet[kNrlMaxPacketSize];
 uint8_t s_sci_tx_packet[kNrlHeaderSize + kSciPayloadMaxBytes];
 uint8_t s_sci_payload_buffer[kSciPayloadMaxBytes];
-char s_text_message_log[kNrlMaxPayloadSize + 1u];
-int16_t s_downlink_pcm_buffer[kG711RxPayloadMaxBytes];
+NRL_PSRAM_BSS char s_text_message_log[kNrlMaxPayloadSize + 1u];
+NRL_PSRAM_BSS int16_t s_downlink_pcm_buffer[kG711RxPayloadMaxBytes];
 size_t s_sci_payload_count = 0u;
 uint32_t s_last_sci_rx_ms = 0u;
 uint32_t s_last_sci_log_ms = 0u;
@@ -552,7 +562,8 @@ static void uplinkSinkWrite(const uint8_t source_id,
 {
     const bool signaling_tail = source_id == AUDIO_SRC_MDC_NRL ||
                                 source_id == AUDIO_SRC_DTMF_NRL ||
-                                source_id == AUDIO_SRC_CW_NRL;
+                                source_id == AUDIO_SRC_CW_NRL ||
+                                source_id == AUDIO_SRC_APRS;
     // A media stream (nanny/beacon) owns the uplink exclusively while
     // active: captured audio would garble the G.711 accumulator.
     if (s_media_uplink_active) {
@@ -1081,7 +1092,7 @@ static void handleIncomingOpusPayload(const uint8_t *payload, const size_t paylo
             return;
         }
     }
-    static int16_t pcm16k[kOpusFrameSamples * 3u]; // headroom for 40/60 ms senders
+    NRL_PSRAM_BSS static int16_t pcm16k[kOpusFrameSamples * 3u]; // headroom for 40/60 ms senders
     const int decoded = OPUS_VOICE_DecProcess(s_opus_dec, payload, payload_size,
                                               pcm16k, sizeof(pcm16k) / sizeof(pcm16k[0]));
     if (decoded > 0) {
@@ -1138,7 +1149,7 @@ uint8_t s_serial_at_payload[kSerialAtLineMax + 1u];
 // Serial AT commands execute inside nrl_main_loop. Keep the 1 KB reply object
 // off that task's 6 KB stack; the remote AT path has its own result object on
 // the separate 16 KB bridge task.
-NrlAtCommandResult s_serial_at_result = {};
+NRL_PSRAM_BSS NrlAtCommandResult s_serial_at_result = {};
 
 // Execute one AT command line typed on the USB debug serial and print the
 // reply back to the same serial port.
@@ -1402,7 +1413,7 @@ bool NRLAudioBridge_SendTyped(const uint8_t packet_type, const uint8_t *payload,
     if (payload == nullptr || payload_size == 0u || payload_size > kNrlMaxPayloadSize) {
         return false;
     }
-    static uint8_t packet[kNrlMaxPacketSize]; // bridge/video task only; sized for the max payload
+    NRL_PSRAM_BSS static uint8_t packet[kNrlMaxPacketSize]; // bridge/video task only; sized for the max payload
     const size_t packet_size = buildNrlPacket(packet_type, payload, payload_size,
                                               packet, sizeof(packet));
     if (packet_size == 0u) {
@@ -1555,8 +1566,10 @@ bool NRLAudioBridge_Init(void)
     // internal heap on the S31 boards, breaking the Classic BT controller's
     // large contiguous pool. The S3 display boards can afford these 16 KB
     // internal since BLE provisioning became boot-skipped (~66 KB reclaimed).
-    if (xTaskCreatePinnedToCore(bridgeTask, "nrl_audio_bridge", 16384, nullptr,
-                                2, &s_bridge_task, 0) != pdPASS) {
+    s_bridge_task = xTaskCreateStaticPinnedToCore(bridgeTask, "nrl_audio_bridge",
+                                                  kBridgeStackBytes, nullptr, 2,
+                                                  s_bridge_stack, &s_bridge_tcb, 0);
+    if (s_bridge_task == nullptr) {
         ESP_LOGI(TAG,"[NRL] failed to create bridge task");
         return false;
     }

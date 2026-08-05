@@ -153,6 +153,11 @@ void ModemTransmitStop(void);
 void ModemInit(void);
 
 void MODEM_DECODE(int16_t sample,uint16_t mVrms);
+// NRL port: feed one demodulator instance only. Lets the APRS service run
+// the mic tap (demod 0) and the NRL downlink tap (demod 1) as two
+// independent RX streams; decoded frames carry their demodulator index so
+// the gateway can attribute each frame to its audio source.
+void MODEM_DECODE_CH(int16_t sample, uint16_t mVrms, uint8_t demod);
 uint8_t MODEM_BAUDRATE_TIMER_HANDLER(void);
 
 #endif

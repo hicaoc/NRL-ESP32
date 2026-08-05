@@ -3,6 +3,8 @@
 #include "services/config_notify.h"
 #include "services/music_player.h"
 
+#include "lib/nrl_psram.h"
+
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -24,7 +26,7 @@ struct FavEntry {
 // covers list mutation and copy-out so a Remove can't shift entries under a
 // concurrent reader. Playback itself runs outside the lock.
 static SemaphoreHandle_t s_lock = nullptr;
-static FavEntry s_entries[RADIO_FAV_MAX] = {};
+NRL_PSRAM_BSS static FavEntry s_entries[RADIO_FAV_MAX] = {};
 static size_t s_count = 0;
 static int s_current = -1;
 

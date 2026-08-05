@@ -698,6 +698,14 @@ std::string WifiConfigPortalView_BuildAprsSections(void)
     replaceToken(html, "{{APRS_RX_CHECKED}}", checkedAttr(cfg.rf_rx_enabled));
     replaceToken(html, "{{APRS_AUTO_CHECKED}}", checkedAttr(cfg.auto_interval));
     replaceToken(html, "{{APRS_FIXED_CHECKED}}", checkedAttr(cfg.fixed_beacon_without_gps));
+    replaceToken(html, "{{APRS_NRL_TX_CHECKED}}", checkedAttr(cfg.nrl_tx_enabled));
+    replaceToken(html, "{{APRS_NRL_RX_CHECKED}}", checkedAttr(cfg.nrl_rx_enabled));
+    replaceToken(html, "{{APRS_FWD_RF_IS_CHECKED}}", checkedAttr(cfg.fwd[APRS_FWD_RF_TO_IS]));
+    replaceToken(html, "{{APRS_FWD_IS_RF_CHECKED}}", checkedAttr(cfg.fwd[APRS_FWD_IS_TO_RF]));
+    replaceToken(html, "{{APRS_FWD_NRL_IS_CHECKED}}", checkedAttr(cfg.fwd[APRS_FWD_NRL_TO_IS]));
+    replaceToken(html, "{{APRS_FWD_IS_NRL_CHECKED}}", checkedAttr(cfg.fwd[APRS_FWD_IS_TO_NRL]));
+    replaceToken(html, "{{APRS_FWD_RF_NRL_CHECKED}}", checkedAttr(cfg.fwd[APRS_FWD_RF_TO_NRL]));
+    replaceToken(html, "{{APRS_FWD_NRL_RF_CHECKED}}", checkedAttr(cfg.fwd[APRS_FWD_NRL_TO_RF]));
     replaceToken(html, "{{APRS_SERVER_HOST}}", htmlEscape(cfg.server_host));
     replaceToken(html, "{{APRS_SERVER_PORT}}", fromU32(cfg.server_port));
     replaceToken(html, "{{APRS_SSID}}", fromU32(cfg.ssid));

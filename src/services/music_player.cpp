@@ -76,6 +76,16 @@ static bool speaker_hifi_release(void)
 }
 
 static TaskHandle_t s_player_task = nullptr;
+static volatile bool s_track_running = false;
+// Persistent player task on a static internal stack. SD/FatFS access can run
+// with the flash cache paused, so the stack must be internal (PSRAM is
+// unreachable then); and it must be static/one-shot: the runtime heap
+// shatters to ~1.5 KB largest blocks in steady state (see the BT reserve in
+// nrl_bt_hfp.cpp), so the old per-track xTaskCreate of an 8 KB stack failed
+// with "player task create failed" once the device had been up a while.
+constexpr size_t kPlayerStackBytes = 8192;
+static StackType_t s_player_stack[kPlayerStackBytes / sizeof(StackType_t)];
+static StaticTask_t s_player_tcb;
 static volatile bool s_stop_requested = false;
 static volatile bool s_playing = false;
 static volatile bool s_focus_voice_active = false;
@@ -317,7 +327,7 @@ static bool media_focus_blocks_playback()
     return false;
 }
 
-static void player_task(void *)
+static void play_current_track()
 {
     // Tags first (cheap header/tail reads), so the UI has title/cover as
     // soon as -- or before -- the first PCM reaches the speaker. SMB is the
@@ -340,6 +350,9 @@ static void player_task(void *)
     bool bt_active = false;
     bool format_ready = false;
     bool reached_end = false;
+    // Consecutive decode-failure reconnects (live streams only); reset on the
+    // first successfully decoded chunk after a reconnect.
+    int stream_reconnects = 0;
     VoiceResampler resampler = {};
     BtResampler bt_resampler = {};
     // Pacing for the net-only case: without the I2S DMA back-pressure the
@@ -458,12 +471,48 @@ static void player_task(void *)
         const int rc = MEDIA_DECODER_Decode(decoder, &pcm, &bytes);
         if (rc <= 0) {
             if (rc < 0) {
+                // A live stream has no pristine source to re-read: network
+                // jitter can land the MP3 parser on a false sync, and one
+                // garbage frame fails the whole aud_dec job (pipeline abort).
+                // Reconnect at the live point instead of ending the track,
+                // with bounded retries so a dead stream still gives up.
+                constexpr int kMaxStreamReconnects = 3;
+                if (live_stream && !s_stop_requested &&
+                    stream_reconnects < kMaxStreamReconnects) {
+                    ++stream_reconnects;
+                    ESP_LOGW(TAG, "decode error, reconnecting stream (%d/%d): %s",
+                             stream_reconnects, kMaxStreamReconnects, s_current_path);
+                    MEDIA_DECODER_Close(decoder);
+                    decoder = nullptr;
+                    format_ready = false;
+                    s_stream_info_valid = false;
+                    release_outputs();
+                    for (int waited = 0; waited < 1000 * stream_reconnects &&
+                                        !s_stop_requested; waited += 100) {
+                        vTaskDelay(pdMS_TO_TICKS(100));
+                    }
+                    if (!s_stop_requested) {
+                        decoder = MEDIA_DECODER_Open(s_current_path, &s_stop_requested);
+                    }
+                    if (decoder == nullptr) {
+                        ESP_LOGE(TAG, "stream reconnect failed: %s", s_current_path);
+                        break;
+                    }
+                    if (to_net) {
+                        NRLAudioBridge_SetMediaUplinkActive(true);
+                        media_uplink_active = true;
+                        net_start_us = esp_timer_get_time();
+                        net_sent_samples = 0u;
+                    }
+                    continue;
+                }
                 ESP_LOGE(TAG, "decode failed: %s", s_current_path);
             } else {
                 reached_end = format_ready;
             }
             break;
         }
+        stream_reconnects = 0;
 
         MediaDecoderInfo info = {};
         if (!format_ready) {
@@ -613,17 +662,26 @@ static void player_task(void *)
     s_stream_info_valid = false;
     s_focus_suspended = false;
     s_playing = false;
-    s_player_task = nullptr;
+    s_track_running = false;
 
-    // Auto-advance hook: the codec is released and s_player_task cleared, so
-    // the callback may call MUSIC_PlayFile (it spawns a fresh task) while
-    // this one is about to delete itself.
+    // Auto-advance hook: the track is fully released and s_track_running is
+    // clear, so the callback may call MUSIC_PlayFile -- it notifies this
+    // task, and the outer loop starts the next track as soon as we return.
     const MusicTrackEndCb_t end_cb = s_track_end_cb;
     if (reached_end && !s_stop_requested && end_cb != nullptr) {
         end_cb();
     }
+}
 
-    vTaskDelete(nullptr);
+// One persistent player task: MUSIC_PlayFile hands over a track with a
+// notification; play_current_track() runs it to the end and loops. No
+// per-track task create/delete churn on the fragmented runtime heap.
+static void player_task(void *)
+{
+    while (true) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        play_current_track();
+    }
 }
 
 static void on_voice_start(void)
@@ -652,6 +710,16 @@ extern "C" void MUSIC_Init(void)
     AudioFocus_RegisterVoiceStart(on_voice_start);
     AudioFocus_RegisterVoiceEnd(on_voice_end);
     media_config_load();
+    // Create the persistent player task now, while the boot heap is still
+    // whole -- a static stack anyway, so this can only fail on a bug.
+    // Priority below the voice passthrough task (10): file reads, decode and
+    // I2S writes are throughput work, not latency-critical.
+    s_player_task = xTaskCreateStaticPinnedToCore(player_task, "music_player",
+                                                  kPlayerStackBytes, nullptr, 5,
+                                                  s_player_stack, &s_player_tcb, 1);
+    if (s_player_task == nullptr) {
+        ESP_LOGE(TAG, "player task create failed at init");
+    }
 }
 
 extern "C" bool MUSIC_PlayFile(const char *path)
@@ -670,11 +738,11 @@ extern "C" bool MUSIC_PlayFile(const char *path)
     }
 
     MUSIC_Stop();
-    // Wait for the previous player task to wind down (it releases the codec).
-    for (int i = 0; i < 200 && s_player_task != nullptr; ++i) {
+    // Wait for the previous track to wind down (it releases the codec).
+    for (int i = 0; i < 200 && s_track_running; ++i) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-    if (s_player_task != nullptr) {
+    if (s_track_running) {
         ESP_LOGE(TAG, "previous track did not stop");
         return false;
     }
@@ -686,21 +754,19 @@ extern "C" bool MUSIC_PlayFile(const char *path)
     s_stop_requested = false;
     s_playing = true;
 
-    // Priority below the voice passthrough task (10): file reads, decode and
-    // I2S writes are throughput work, not latency-critical. Internal-RAM
-    // stack: stdio/FatFS/SDMMC may run with flash cache paused.
-    if (xTaskCreatePinnedToCore(player_task, "music_player", 8192, nullptr, 5, &s_player_task, 1) != pdPASS) {
+    if (s_player_task == nullptr) {
         s_playing = false;
-        s_player_task = nullptr;
-        ESP_LOGE(TAG, "player task create failed");
+        ESP_LOGE(TAG, "player task unavailable (init failed)");
         return false;
     }
+    s_track_running = true;
+    xTaskNotifyGive(s_player_task);
     return true;
 }
 
 extern "C" void MUSIC_Stop(void)
 {
-    if (s_player_task != nullptr) {
+    if (s_track_running) {
         s_stop_requested = true;
     }
 }
@@ -718,6 +784,11 @@ extern "C" const char *MUSIC_CurrentPath(void)
 extern "C" const MediaTrackInfo *MUSIC_GetTrackInfo(void)
 {
     return &s_track_info;
+}
+
+extern "C" void MUSIC_ReleaseTrackCover(void)
+{
+    MEDIA_META_ReleaseCover(&s_track_info);
 }
 
 extern "C" void MUSIC_SetTrackEndCallback(MusicTrackEndCb_t callback)

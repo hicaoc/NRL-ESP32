@@ -8,6 +8,8 @@
 #include <esp_http_client.h>
 #include <esp_idf_version.h>
 #include <esp_log.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <lwip/sockets.h>
 
 #include "esp_gmf_oal_mem.h"
@@ -29,6 +31,7 @@ typedef struct {
     bool                     is_open;
     esp_http_client_handle_t client;
     const volatile bool     *stop_requested; // armed per playback, may be NULL
+    volatile bool            reading;        // IO thread inside esp_http_client_read
 } radio_stream_t;
 
 // One-entry cache of the last host that needed the TLS insecure fallback.
@@ -159,9 +162,16 @@ esp_gmf_err_io_t _radio_acquire_read(esp_gmf_io_handle_t handle, void *payload,
     if (io->stop_requested != nullptr && *io->stop_requested) {
         return ESP_GMF_IO_ABORT;
     }
+    io->reading = true;
     const int rlen = esp_http_client_read(io->client, reinterpret_cast<char *>(pload->buf),
                                           static_cast<int>(wanted_size));
+    io->reading = false;
     if (rlen < 0) {
+        if (io->stop_requested != nullptr && *io->stop_requested) {
+            // Teardown shut the socket down under this read: an abort, not an
+            // error (keeps GMF off the "Job failed" path on playback stop).
+            return ESP_GMF_IO_ABORT;
+        }
         ESP_LOGW(TAG, "read error %d", rlen);
         return ESP_GMF_IO_FAIL;
     }
@@ -177,12 +187,11 @@ esp_gmf_err_io_t _radio_release_read(esp_gmf_io_handle_t handle, void *payload, 
     return ESP_GMF_IO_OK;
 }
 
-esp_gmf_err_t _radio_prev_close(esp_gmf_io_handle_t handle)
+// Break a read blocked inside the TLS/TCP stack so the IO thread (and with it
+// pipeline stop) does not wait out the 10 s read timeout.
+void radio_shutdown_socket(radio_stream_t *io)
 {
-    // Break a read blocked inside the TLS/TCP stack so the IO thread (and
-    // with it pipeline stop) does not wait out the 10 s read timeout.
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 3)
-    radio_stream_t *io = reinterpret_cast<radio_stream_t *>(handle);
     if (io->client != nullptr) {
         const int fd = esp_http_client_get_socket(io->client);
         if (fd >= 0) {
@@ -190,6 +199,11 @@ esp_gmf_err_t _radio_prev_close(esp_gmf_io_handle_t handle)
         }
     }
 #endif
+}
+
+esp_gmf_err_t _radio_prev_close(esp_gmf_io_handle_t handle)
+{
+    radio_shutdown_socket(reinterpret_cast<radio_stream_t *>(handle));
     return ESP_GMF_ERR_OK;
 }
 
@@ -197,6 +211,15 @@ esp_gmf_err_t _radio_close(esp_gmf_io_handle_t handle)
 {
     radio_stream_t *io = reinterpret_cast<radio_stream_t *>(handle);
     if (io->client != nullptr) {
+        // The IO thread may still be blocked in esp_http_client_read. Closing
+        // the socket under it makes the read fail with ENOTCONN (noisy
+        // transport_base/HTTP_CLIENT errors, and esp_http_client state freed
+        // mid-read). Shut the socket down so the read exits, then wait for it
+        // (bounded) before closing.
+        radio_shutdown_socket(io);
+        for (int i = 0; i < 200 && io->reading; ++i) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
         (void)esp_http_client_close(io->client);
         esp_http_client_cleanup(io->client);
         io->client = nullptr;

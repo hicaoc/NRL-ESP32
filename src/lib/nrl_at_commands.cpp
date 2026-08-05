@@ -1,7 +1,9 @@
 #include "nrl_at_commands.h"
 
+#include "heap_report.h"
 #include "nrl_audio_bridge.h"
 #include "nrl_net_compat.h"
+#include "nrl_psram.h"
 #include "nrl_version.h"
 
 #include "driver/board_pins.h"
@@ -1206,6 +1208,14 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         return;
     }
 
+    // Heap census: AT+MEM logs the internal-DRAM snapshot (and per-task top
+    // consumers when CONFIG_HEAP_TASK_TRACKING is enabled) to the serial log.
+    if (stringEqualsIgnoreCase(command.command, "MEM")) {
+        NRL_HEAP_Report();
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "MEM", "see log");
+        return;
+    }
+
     // TF card maintenance. AT+SDMOUNT=1 retries the mount after a hot insert
     // (AT+SDMOUNT=? reports state). AT+SDFORMAT=YES ERASES the card and
     // formats it FAT in-device -- the rescue path for factory exFAT/NTFS
@@ -1788,6 +1798,8 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     //   AT+APRS_NET=ON|OFF        APRS-IS uplink/downlink
     //   AT+APRS_TX=ON|OFF         AFSK beacon out through the radio
     //   AT+APRS_RX=ON|OFF         demodulate radio audio
+    //   AT+APRS_NRLTX=ON|OFF      AFSK audio out through the NRL network
+    //   AT+APRS_NRLRX=ON|OFF      demodulate NRL network audio
     //   AT+APRS_AUTO=ON|OFF       speed/movement-adaptive beacon interval
     //   AT+APRS_FIXED=ON|OFF      allow default-position beacons without GPS
     //   AT+APRS_SERVER=host:port  APRS-IS server
@@ -1800,18 +1812,26 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     //   AT+APRS_PATH=WIDE1-1      RF digi path
     //   AT+APRS_COMMENT=text      beacon comment
     //   AT+APRS_BEACON            queue a beacon right now
+    //   AT+APRS_MSG=DEST,text     send a text message to callsign DEST
+    //   AT+APRS_FWD=DIR,ON|OFF    gateway forwarding between MIC(RF)/NRL/APRS-IS;
+    //                             DIR = RF2IS|IS2RF|NRL2IS|IS2NRL|RF2NRL|NRL2RF
     //   AT+APRS_LIST              recent stations heard
     if (stringEqualsIgnoreCase(command.command, "APRS")) {
         if (is_query) {
             AprsConfig cfg;
             APRS_SERVICE_GetConfig(&cfg);
-            char status[128];
-            snprintf(status, sizeof(status), "%s net=%s%s rf_tx=%s rf_rx=%s auto=%s fixed=%s gps=%s rx=%lu tx=%lu",
+            char status[192];
+            snprintf(status, sizeof(status), "%s net=%s%s rf_tx=%s rf_rx=%s nrl_tx=%s nrl_rx=%s fwd=%d%d%d%d%d%d auto=%s fixed=%s gps=%s rx=%lu tx=%lu",
                      cfg.enabled ? "ON" : "OFF",
                      cfg.net_enabled ? "ON" : "OFF",
                      APRS_SERVICE_IsNetConnected() ? "(conn)" : "",
                      cfg.rf_tx_enabled ? "ON" : "OFF",
                      cfg.rf_rx_enabled ? "ON" : "OFF",
+                     cfg.nrl_tx_enabled ? "ON" : "OFF",
+                     cfg.nrl_rx_enabled ? "ON" : "OFF",
+                     (int)cfg.fwd[APRS_FWD_RF_TO_IS], (int)cfg.fwd[APRS_FWD_IS_TO_RF],
+                     (int)cfg.fwd[APRS_FWD_NRL_TO_IS], (int)cfg.fwd[APRS_FWD_IS_TO_NRL],
+                     (int)cfg.fwd[APRS_FWD_RF_TO_NRL], (int)cfg.fwd[APRS_FWD_NRL_TO_RF],
                      cfg.auto_interval ? "ON" : "OFF",
                      cfg.fixed_beacon_without_gps ? "ON" : "OFF",
                      APRS_SERVICE_GpsHasFix() ? "FIX" : "NO",
@@ -1833,12 +1853,16 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     if (stringEqualsIgnoreCase(command.command, "APRS_NET") ||
         stringEqualsIgnoreCase(command.command, "APRS_TX") ||
         stringEqualsIgnoreCase(command.command, "APRS_RX") ||
+        stringEqualsIgnoreCase(command.command, "APRS_NRLTX") ||
+        stringEqualsIgnoreCase(command.command, "APRS_NRLRX") ||
         stringEqualsIgnoreCase(command.command, "APRS_AUTO") ||
         stringEqualsIgnoreCase(command.command, "APRS_FIXED")) {
         AprsConfig cfg;
         APRS_SERVICE_GetConfig(&cfg);
         const bool is_net = stringEqualsIgnoreCase(command.command, "APRS_NET");
         const bool is_tx = stringEqualsIgnoreCase(command.command, "APRS_TX");
+        const bool is_nrl_tx = stringEqualsIgnoreCase(command.command, "APRS_NRLTX");
+        const bool is_nrl_rx = stringEqualsIgnoreCase(command.command, "APRS_NRLRX");
         const bool is_auto = stringEqualsIgnoreCase(command.command, "APRS_AUTO");
         const bool is_fixed = stringEqualsIgnoreCase(command.command, "APRS_FIXED");
         if (!is_query) {
@@ -1849,6 +1873,10 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
                     ok = APRS_SERVICE_SetNetEnabled(enabled);
                 } else if (is_tx) {
                     ok = APRS_SERVICE_SetRfTxEnabled(enabled);
+                } else if (is_nrl_tx) {
+                    ok = APRS_SERVICE_SetNrlTxEnabled(enabled);
+                } else if (is_nrl_rx) {
+                    ok = APRS_SERVICE_SetNrlRxEnabled(enabled);
                 } else if (is_auto) {
                     ok = APRS_SERVICE_SetAutoInterval(enabled);
                 } else if (is_fixed) {
@@ -1865,11 +1893,59 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         }
         const bool state = is_net ? cfg.net_enabled
                                   : (is_tx ? cfg.rf_tx_enabled
-                                           : (is_auto ? cfg.auto_interval
-                                                      : (is_fixed ? cfg.fixed_beacon_without_gps
-                                                                  : cfg.rf_rx_enabled)));
+                                           : (is_nrl_tx ? cfg.nrl_tx_enabled
+                                                        : (is_nrl_rx ? cfg.nrl_rx_enabled
+                                                                     : (is_auto ? cfg.auto_interval
+                                                                                : (is_fixed ? cfg.fixed_beacon_without_gps
+                                                                                            : cfg.rf_rx_enabled)))));
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
                            command.command, state ? "ON" : "OFF");
+        return;
+    }
+
+    // Gateway forwarding switches between the three APRS channels:
+    //   AT+APRS_FWD=?                 list all six directions
+    //   AT+APRS_FWD=RF2IS,ON          set one direction (RF2IS|IS2RF|NRL2IS|
+    //                                 IS2NRL|RF2NRL|NRL2RF)
+    if (stringEqualsIgnoreCase(command.command, "APRS_FWD")) {
+        static const char *dir_names[APRS_FWD_COUNT] = {
+            "RF2IS", "IS2RF", "NRL2IS", "IS2NRL", "RF2NRL", "NRL2RF"};
+        AprsConfig cfg;
+        APRS_SERVICE_GetConfig(&cfg);
+        if (is_query || command.value[0] == '\0') {
+            char states[64] = {};
+            size_t used = 0;
+            for (size_t i = 0; i < APRS_FWD_COUNT && used + 10 < sizeof(states); ++i) {
+                used += static_cast<size_t>(snprintf(
+                    states + used, sizeof(states) - used, "%s%s=%s",
+                    i > 0 ? " " : "", dir_names[i],
+                    cfg.fwd[i] ? "ON" : "OFF"));
+            }
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_FWD", states);
+            return;
+        }
+        char dir_name[8] = {};
+        char bool_part[8] = {};
+        if (sscanf(command.value, "%7[^,],%7s", dir_name, bool_part) != 2) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_FWD");
+            return;
+        }
+        AprsFwdDir dir = APRS_FWD_COUNT;
+        for (size_t i = 0; i < APRS_FWD_COUNT; ++i) {
+            if (stringEqualsIgnoreCase(dir_name, dir_names[i])) {
+                dir = static_cast<AprsFwdDir>(i);
+                break;
+            }
+        }
+        bool enabled = false;
+        if (dir == APRS_FWD_COUNT || !parseBoolValue(bool_part, &enabled) ||
+            !APRS_SERVICE_SetFwdEnabled(dir, enabled)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_FWD");
+            return;
+        }
+        char reply[24];
+        snprintf(reply, sizeof(reply), "%s=%s", dir_names[dir], enabled ? "ON" : "OFF");
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_FWD", reply);
         return;
     }
 
@@ -2017,6 +2093,33 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             return;
         }
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_BEACON", "QUEUED");
+        return;
+    }
+
+    // Manual text message: AT+APRS_MSG=DEST,text (DEST = callsign[-SSID]).
+    if (stringEqualsIgnoreCase(command.command, "APRS_MSG")) {
+        if (is_query) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_MSG",
+                               "DEST,text");
+            return;
+        }
+        const char *comma = strchr(command.value, ',');
+        if (comma == nullptr || comma == command.value) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_MSG");
+            return;
+        }
+        char dest[16] = {};
+        const size_t dest_len = static_cast<size_t>(comma - command.value);
+        if (dest_len >= sizeof(dest)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_MSG");
+            return;
+        }
+        memcpy(dest, command.value, dest_len);
+        if (!APRS_SERVICE_SendMessage(dest, comma + 1)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_MSG");
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_MSG", "QUEUED");
         return;
     }
 
@@ -2358,9 +2461,9 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             uint32_t delta;
         };
         // Keep snapshots and sort rows out of the 6 KB nrl_main_loop stack.
-        static TaskStatus_t s_previous[kMaxTasks];
-        static TaskStatus_t s_current[kMaxTasks];
-        static Row s_rows[kMaxTasks];
+        NRL_PSRAM_BSS static TaskStatus_t s_previous[kMaxTasks];
+        NRL_PSRAM_BSS static TaskStatus_t s_current[kMaxTasks];
+        NRL_PSRAM_BSS static Row s_rows[kMaxTasks];
         static UBaseType_t s_previous_n = 0u;
         static uint32_t s_previous_us = 0u;
         const uint32_t now_us = static_cast<uint32_t>(esp_timer_get_time());

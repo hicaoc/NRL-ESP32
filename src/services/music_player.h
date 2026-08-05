@@ -70,9 +70,13 @@ bool MUSIC_IsPlaying(void);
 const char *MUSIC_CurrentPath(void);
 
 // Tags/cover of the current track (parsed when playback starts). The
-// returned pointer -- including cover_data -- stays valid until the next
-// MUSIC_PlayFile; UI consumers should render promptly after a track change.
+// returned pointer stays valid until the next MUSIC_PlayFile -- except
+// cover_data, which MUSIC_ReleaseTrackCover() may free early.
 const MediaTrackInfo *MUSIC_GetTrackInfo(void);
+
+// Free the embedded cover bytes (up to 512 KB of PSRAM) once the UI has
+// copied them out for async decode; no-op afterwards or when there is none.
+void MUSIC_ReleaseTrackCover(void);
 
 // Sample format of the stream currently decoding (rate / bit depth /
 // channel count for the UI's format line). Valid from the first decoded

@@ -29,6 +29,10 @@ constexpr int kJpegQuality = 40;
 constexpr int64_t kRxActiveWindowUs = 2000000; // "receiving" indicator window
 
 // ---- TX ---------------------------------------------------------------------
+// The camera device stays open for the lifetime of the firmware: esp-video's
+// DVP pipeline teardown (esp_video_deinit) takes several seconds and races
+// with the TX task's V4L2 calls, so "Cam OFF" only stops the stream
+// (STREAMOFF) and the TX task; "Cam ON" restarts them on the same handle.
 static bsp_camera_t *s_camera = nullptr;
 static TaskHandle_t s_tx_task = nullptr;
 static volatile bool s_tx_run = false;
@@ -191,37 +195,44 @@ extern "C" bool VIDEO_SetTxEnabled(const bool enabled)
 {
     if (!enabled) {
         s_tx_run = false;
-        for (int i = 0; i < 100 && s_tx_task != nullptr; ++i) {
+        // The TX task may be blocked inside a DQBUF ioctl; it wakes with the
+        // next captured frame (~83 ms at 12 fps). Wait generously, and never
+        // touch the device from here while the task could still issue V4L2
+        // calls on it.
+        for (int i = 0; i < 200 && s_tx_task != nullptr; ++i) {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
-        if (s_camera != nullptr) {
-            (void)bsp_camera_stop(s_camera);
-            (void)bsp_camera_close(s_camera);
-            s_camera = nullptr;
+        if (s_tx_task != nullptr) {
+            ESP_LOGE(TAG, "tx task did not exit; leaving stream running");
+            return false;
         }
+        if (s_camera != nullptr) {
+            (void)bsp_camera_stop(s_camera); // STREAMOFF only; device stays open
+        }
+        s_local_seq = 0; // self-view frames belong to the stopped session
         return true;
     }
 
     if (s_tx_task != nullptr) {
         return true;
     }
-    // The OV3660's only DVP JPEG mode: 1280x720 @ 12 fps, 10 MHz XCLK
-    // (sensor-side encode, no CPU cost). We pace it down to ~5 fps.
-    bsp_camera_config_t cfg = BSP_CAMERA_DEFAULT_CONFIG();
-    cfg.width = 1280;
-    cfg.height = 720;
-    cfg.pixel_format = BSP_CAMERA_PIXEL_FORMAT_JPEG;
-    cfg.xclk_freq_hz = 10 * 1000 * 1000;
-    if (bsp_camera_open(&cfg, &s_camera) != ESP_OK || s_camera == nullptr) {
-        ESP_LOGE(TAG, "camera open failed");
-        s_camera = nullptr;
-        return false;
+    if (s_camera == nullptr) {
+        // The OV3660's only DVP JPEG mode: 1280x720 @ 12 fps, 10 MHz XCLK
+        // (sensor-side encode, no CPU cost). We pace it down to ~5 fps.
+        bsp_camera_config_t cfg = BSP_CAMERA_DEFAULT_CONFIG();
+        cfg.width = 1280;
+        cfg.height = 720;
+        cfg.pixel_format = BSP_CAMERA_PIXEL_FORMAT_JPEG;
+        cfg.xclk_freq_hz = 10 * 1000 * 1000;
+        if (bsp_camera_open(&cfg, &s_camera) != ESP_OK || s_camera == nullptr) {
+            ESP_LOGE(TAG, "camera open failed");
+            s_camera = nullptr;
+            return false;
+        }
+        (void)bsp_camera_set_jpeg_quality(s_camera, kJpegQuality);
     }
-    (void)bsp_camera_set_jpeg_quality(s_camera, kJpegQuality);
-    if (bsp_camera_start(s_camera) != ESP_OK) {
+    if (bsp_camera_start(s_camera) != ESP_OK) { // no-op when already streaming
         ESP_LOGE(TAG, "camera start failed");
-        (void)bsp_camera_close(s_camera);
-        s_camera = nullptr;
         return false;
     }
     s_tx_run = true;
@@ -229,8 +240,6 @@ extern "C" bool VIDEO_SetTxEnabled(const bool enabled)
         s_tx_run = false;
         s_tx_task = nullptr;
         (void)bsp_camera_stop(s_camera);
-        (void)bsp_camera_close(s_camera);
-        s_camera = nullptr;
         ESP_LOGE(TAG, "tx task create failed");
         return false;
     }
@@ -244,9 +253,10 @@ extern "C" bool VIDEO_TxEnabled(void)
     return s_tx_task != nullptr;
 }
 
-extern "C" bool VIDEO_AcquireFrame(const uint8_t **jpeg, size_t *jpeg_size, uint32_t *seq)
+extern "C" bool VIDEO_AcquireFrame(uint8_t *dst, const size_t dst_cap,
+                                    size_t *jpeg_size, uint32_t *seq)
 {
-    if (jpeg == nullptr || jpeg_size == nullptr || seq == nullptr ||
+    if (dst == nullptr || jpeg_size == nullptr || seq == nullptr ||
         s_ready == nullptr || s_ready_lock == nullptr) {
         return false;
     }
@@ -254,17 +264,22 @@ extern "C" bool VIDEO_AcquireFrame(const uint8_t **jpeg, size_t *jpeg_size, uint
     if (current == 0u || current == *seq) {
         return false;
     }
-    // Copy-free handoff: the UI decodes from s_ready under the lock window
-    // opened here and closed by the next Acquire (frames at ~5 fps vs the
-    // ~30 ms decode keep contention negligible).
+    // Copy-out under the lock: the RX reassembly overwrites s_ready whenever
+    // a frame completes, so decoding directly from it would read a torn
+    // JPEG mid-decode. One ~40-90 KB PSRAM memcpy per frame at ~5 fps is
+    // negligible next to the decode itself.
     if (xSemaphoreTake(s_ready_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
         return false;
     }
-    *jpeg = s_ready;
-    *jpeg_size = s_ready_bytes;
-    *seq = current;
+    const size_t bytes = s_ready_bytes;
+    const bool ok = bytes > 0u && bytes <= dst_cap;
+    if (ok) {
+        memcpy(dst, s_ready, bytes);
+        *jpeg_size = bytes;
+        *seq = s_ready_seq; // re-read: a frame may have completed meanwhile
+    }
     xSemaphoreGive(s_ready_lock);
-    return true;
+    return ok;
 }
 
 extern "C" bool VIDEO_CopyLocalFrame(uint8_t *dst, const size_t dst_cap,
@@ -302,7 +317,7 @@ extern "C" bool VIDEO_Receiving(void)
 extern "C" void VIDEO_Init(void) {}
 extern "C" bool VIDEO_SetTxEnabled(bool) { return false; }
 extern "C" bool VIDEO_TxEnabled(void) { return false; }
-extern "C" bool VIDEO_AcquireFrame(const uint8_t **, size_t *, uint32_t *) { return false; }
+extern "C" bool VIDEO_AcquireFrame(uint8_t *, size_t, size_t *, uint32_t *) { return false; }
 extern "C" bool VIDEO_CopyLocalFrame(uint8_t *, size_t, size_t *, uint32_t *) { return false; }
 extern "C" bool VIDEO_Receiving(void) { return false; }
 

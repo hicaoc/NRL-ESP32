@@ -11,6 +11,10 @@ sdkconfig.bh4tdv
 .vscode/launch.json
 .vscode/ipch
 managed_components
+# Local override of espressif/gmf_core (NRL patch for the esp_gmf_io_acquire_read
+# payload leak). Kept out of git like managed_components; clones without it fall
+# back to the registry copy via the EXISTS guard in the root CMakeLists.txt.
+vendor/espressif__gmf_core
 # dependencies.lock is per-target (target + idf version + manifest hash). This
 # tree builds 3 targets (gezipai/bh4tdv on esp32s3 via PlatformIO, s31_korvo on
 # esp32s31 natively), so a single committed lock always mismatches 2 of them and

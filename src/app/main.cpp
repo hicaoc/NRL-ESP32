@@ -11,6 +11,7 @@
 
 #include "../services/config_notify.h"
 #include "../lib/ble_config.h"
+#include "../lib/heap_report.h"
 #include "../services/ai_assistant.h"
 #include "../services/aprs_service.h"
 #include "../services/cellular_rndis_service.h"
@@ -396,6 +397,9 @@ static bool initFullApp()
 
     ESP_LOGI(TAG, "[AT] serial console ready. Type \"AT\" for the command list, "
                   "e.g. AT+WIFI_SSID=MyNet then AT+WIFI_PASS=secret");
+    // Boot-end heap census: with CONFIG_HEAP_TASK_TRACKING this lists the top
+    // per-task internal-DRAM consumers alongside the free/largest snapshot.
+    NRL_HEAP_Report();
     return true;
 }
 
@@ -521,6 +525,21 @@ static void mainLoopTask(void *)
     );
     (void)stack_probe;
     while (true) {
+        // Heap trajectory digest: both heaps run near full on this firmware;
+        // a periodic free/min/largest line pinpoints when and where PSRAM or
+        // internal RAM runs dry (GMF payload OOM, task create failures...).
+        static uint32_t s_last_heap_log_ms = 0;
+        const uint32_t heap_now_ms = nowMsApp();
+        if (heap_now_ms - s_last_heap_log_ms >= 30000u) {
+            s_last_heap_log_ms = heap_now_ms;
+            ESP_LOGI(TAG, "heap: psram free=%u min=%u largest=%u | internal free=%u min=%u largest=%u",
+                     static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+                     static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM)),
+                     static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)),
+                     static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                     static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
+                     static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+        }
         if (!s_loop_profile_enabled) {
             STATUS_IO_Poll();
             WifiConfigPortal_Poll();

@@ -2,6 +2,7 @@ set(app_sources
     app/main.cpp
     app/aec/aec_processor.cpp
     app/aec/esp_sr_probe.cpp
+    app/lv_mem_psram.cpp
     audio/audio_focus.cpp
     audio/audio_router.cpp
     audio/voice_resampler.cpp
@@ -64,6 +65,7 @@ set(app_sources
     lib/nrl_g711.cpp
     lib/nrl_smb_readv.cpp
     lib/dtmf_codec.cpp
+    lib/heap_report.cpp
     lib/ctcss_decoder.cpp
     lib/cw_codec.cpp
     lib/sstv_codec.cpp
@@ -134,7 +136,8 @@ list(APPEND app_priv_requires sahlberg__libsmb2 vfs)
 # USB flash drive and the S31-only assistant/display dependencies.
 if(IDF_TARGET STREQUAL "esp32s31")
     list(APPEND app_priv_requires usb espressif__usb_host_msc espressif__led_strip fatfs
-                                  espressif__esp_websocket_client espressif__cjson)
+                                  espressif__esp_websocket_client espressif__cjson
+                                  esp_driver_jpeg)
 endif()
 
 # Optional USB-RNDIS backend. Current production boards leave this disabled;

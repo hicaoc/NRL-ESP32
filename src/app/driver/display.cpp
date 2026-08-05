@@ -578,6 +578,9 @@ bool initPanel()
     io_cfg.trans_queue_depth = 10;
     io_cfg.lcd_cmd_bits = 8;
     io_cfg.lcd_param_bits = 8;
+    // The LVGL render buffer lives in PSRAM: DMA straight from it instead of
+    // bounce-copying every flush through an internal temporary buffer.
+    io_cfg.flags.psram_dma_direct = 1;
     if (esp_lcd_new_panel_io_spi(SPI3_HOST, &io_cfg, &s_panel_io) != ESP_OK) {
         ESP_LOGI(TAG,"[LCD] panel IO init failed");
         return false;
@@ -654,8 +657,13 @@ void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
     }
 #endif
 
-    esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1,
-                              area->x2 + 1, area->y2 + 1, px_map);
+    if (esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1,
+                                  area->x2 + 1, area->y2 + 1, px_map) != ESP_OK) {
+        // A rejected transfer (e.g. PSRAM buffer while the flash cache is
+        // off for an NVS write) has no completion callback; release LVGL's
+        // render buffer so one SPI error cannot freeze all later frames.
+        lv_display_flush_ready(disp);
+    }
 #if NRL_DISPLAY_BUS_RGB
     lv_display_flush_ready(disp);
 #endif
@@ -670,7 +678,14 @@ bool initLvgl()
 #if NRL_DISPLAY_BUS_RGB
     s_draw_buf = s_rgb_draw_buffer;
 #else
-    s_draw_buf = static_cast<uint8_t *>(heap_caps_malloc(buf_bytes, MALLOC_CAP_DMA));
+    // The SPI panel streams through GDMA, which can source PSRAM on the S3:
+    // keep the ~29 KB render buffer out of the scarce internal heap, and
+    // fall back to internal DMA RAM only if the external alloc fails.
+    s_draw_buf = static_cast<uint8_t *>(heap_caps_aligned_alloc(
+        64, buf_bytes, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM));
+    if (s_draw_buf == nullptr) {
+        s_draw_buf = static_cast<uint8_t *>(heap_caps_malloc(buf_bytes, MALLOC_CAP_DMA));
+    }
 #endif
     if (s_draw_buf == nullptr) {
         ESP_LOGI(TAG,"[LCD] draw buffer alloc failed");
@@ -1350,7 +1365,8 @@ void buildBi4umdScrollableMenu(lv_obj_t *parent, const char *const *items,
     lv_obj_t *list = lv_obj_create(parent);
     lv_obj_remove_style_all(list);
     lv_obj_set_pos(list, 0, 0);
-    lv_obj_set_size(list, kWidth, 170);
+    // Fill the content area, stopping just above the UP/DOWN/OK row (y=178).
+    lv_obj_set_size(list, kWidth, kContentHeight - 76);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
@@ -1734,7 +1750,7 @@ void buildAprsSettingsMenu()
     lv_obj_t *scr = prepareContent();
     AprsConfig cfg{};
     APRS_SERVICE_GetConfig(&cfg);
-    constexpr size_t kItemCount = 9u;
+    constexpr size_t kItemCount = 17u;
 #if NRL_BOARD != NRL_BOARD_BI4UMD
     constexpr size_t kVisibleRows = 5u;
     const size_t start = menuWindowStart(kItemCount, kVisibleRows);
@@ -1743,10 +1759,18 @@ void buildAprsSettingsMenu()
     const char *names[] = {
         menuText("MASTER", "总开关"), "APRS-IS", menuText("RF TX", "射频发送"),
         menuText("RF RX", "射频接收"), menuText("AUTO PERIOD", "自动周期"),
-        menuText("FIXED POS", "固定位置")};
+        menuText("FIXED POS", "固定位置"), menuText("NRL TX", "NRL网络发送"),
+        menuText("NRL RX", "NRL网络接收"), menuText("GW RF>IS", "网关RF>IS"),
+        menuText("GW IS>RF", "网关IS>RF"), menuText("GW NRL>IS", "网关NRL>IS"),
+        menuText("GW IS>NRL", "网关IS>NRL"), menuText("GW RF>NRL", "网关RF>NRL"),
+        menuText("GW NRL>RF", "网关NRL>RF")};
     const bool values[] = {cfg.enabled, cfg.net_enabled, cfg.rf_tx_enabled,
                            cfg.rf_rx_enabled, cfg.auto_interval,
-                           cfg.fixed_beacon_without_gps};
+                           cfg.fixed_beacon_without_gps, cfg.nrl_tx_enabled,
+                           cfg.nrl_rx_enabled, cfg.fwd[APRS_FWD_RF_TO_IS],
+                           cfg.fwd[APRS_FWD_IS_TO_RF], cfg.fwd[APRS_FWD_NRL_TO_IS],
+                           cfg.fwd[APRS_FWD_IS_TO_NRL], cfg.fwd[APRS_FWD_RF_TO_NRL],
+                           cfg.fwd[APRS_FWD_NRL_TO_RF]};
 #if NRL_BOARD == NRL_BOARD_BI4UMD
     char lines[kItemCount][48] = {};
     const char *items[kItemCount] = {};
@@ -1761,9 +1785,12 @@ void buildAprsSettingsMenu()
             snprintf(lines[item], sizeof(lines[item]),
                      menuText("PERIOD: %us", "周期: %u秒"),
                      static_cast<unsigned>(cfg.beacon_interval_s));
-        } else {
+        } else if (item == 8u) {
             snprintf(lines[item], sizeof(lines[item]), "SSID: %u",
                      static_cast<unsigned>(cfg.ssid));
+        } else {
+            snprintf(lines[item], sizeof(lines[item]), "%s: %s", names[item - 3u],
+                     values[item - 3u] ? menuText("ON", "开") : menuText("OFF", "关"));
         }
         items[item] = lines[item];
     }
@@ -1779,8 +1806,11 @@ void buildAprsSettingsMenu()
         } else if (item == 7u) {
             snprintf(line, sizeof(line), menuText("PERIOD: %us", "周期: %u秒"),
                      static_cast<unsigned>(cfg.beacon_interval_s));
-        } else {
+        } else if (item == 8u) {
             snprintf(line, sizeof(line), "SSID: %u", static_cast<unsigned>(cfg.ssid));
+        } else {
+            snprintf(line, sizeof(line), "%s: %s", names[item - 3u],
+                     values[item - 3u] ? menuText("ON", "开") : menuText("OFF", "关"));
         }
         menuRow(scr, 1 + static_cast<int>(item - start) * 28, line,
                 s_menu_index == item, nullptr, static_cast<int>(item));
@@ -1829,7 +1859,10 @@ void buildAprsListMenu()
                  s.name, dist, s.via_rf ? "RF" : "IS", age);
         menuRow(scr, 25 + static_cast<int>(i) * 22, line, false);
     }
+#if NRL_BOARD != NRL_BOARD_BI4UMD
+    // bi4umd draws a touch BACK button over the footer area instead.
     menuFooter(scr, menuText("PTT BACK", "PTT返回"));
+#endif
 }
 
 void gpsInfoLine(lv_obj_t *scr, const int y, const char *text, const uint32_t color)
@@ -1915,7 +1948,10 @@ void buildGpsInfoMenu()
                  nmea_age, static_cast<unsigned>(gps.satellite_detail_count));
     }
     gpsInfoLine(scr, 133, line, kColorSub);
+#if NRL_BOARD != NRL_BOARD_BI4UMD
+    // bi4umd draws a touch BACK button over the footer area instead.
     menuFooter(scr, menuText("PTT BACK", "PTT返回"));
+#endif
 }
 
 bool signalingRouteEnabled(const SignalingConfig &cfg, bool mdc, size_t index)
@@ -4161,7 +4197,7 @@ size_t menuItemCount()
     if (s_menu_page == MenuPage::Language) return 3u;
     if (s_menu_page == MenuPage::About) return 1u;
     if (s_menu_page == MenuPage::Aprs) return 5u;
-    if (s_menu_page == MenuPage::AprsSettings) return 8u;
+    if (s_menu_page == MenuPage::AprsSettings) return 17u;
     if (s_menu_page == MenuPage::AprsList) return 1u;
     if (s_menu_page == MenuPage::AprsGps) return 1u;
     if (s_menu_page == MenuPage::Signaling) return 4u;
@@ -4408,6 +4444,50 @@ void confirmAprsSettingsMenu()
             ok = APRS_SERVICE_SetSsid(static_cast<uint8_t>((cfg.ssid + 1u) & 0x0Fu));
             message = "SSID UPDATED";
             break;
+        case 9:
+            ok = APRS_SERVICE_SetNrlTxEnabled(!cfg.nrl_tx_enabled);
+            message = !cfg.nrl_tx_enabled ? "NRL TX ON" : "NRL TX OFF";
+            break;
+        case 10:
+            ok = APRS_SERVICE_SetNrlRxEnabled(!cfg.nrl_rx_enabled);
+            message = !cfg.nrl_rx_enabled ? "NRL RX ON" : "NRL RX OFF";
+            break;
+        case 11: {
+            const bool en = !cfg.fwd[APRS_FWD_RF_TO_IS];
+            ok = APRS_SERVICE_SetFwdEnabled(APRS_FWD_RF_TO_IS, en);
+            message = en ? "GW RF>IS ON" : "GW RF>IS OFF";
+            break;
+        }
+        case 12: {
+            const bool en = !cfg.fwd[APRS_FWD_IS_TO_RF];
+            ok = APRS_SERVICE_SetFwdEnabled(APRS_FWD_IS_TO_RF, en);
+            message = en ? "GW IS>RF ON" : "GW IS>RF OFF";
+            break;
+        }
+        case 13: {
+            const bool en = !cfg.fwd[APRS_FWD_NRL_TO_IS];
+            ok = APRS_SERVICE_SetFwdEnabled(APRS_FWD_NRL_TO_IS, en);
+            message = en ? "GW NRL>IS ON" : "GW NRL>IS OFF";
+            break;
+        }
+        case 14: {
+            const bool en = !cfg.fwd[APRS_FWD_IS_TO_NRL];
+            ok = APRS_SERVICE_SetFwdEnabled(APRS_FWD_IS_TO_NRL, en);
+            message = en ? "GW IS>NRL ON" : "GW IS>NRL OFF";
+            break;
+        }
+        case 15: {
+            const bool en = !cfg.fwd[APRS_FWD_RF_TO_NRL];
+            ok = APRS_SERVICE_SetFwdEnabled(APRS_FWD_RF_TO_NRL, en);
+            message = en ? "GW RF>NRL ON" : "GW RF>NRL OFF";
+            break;
+        }
+        case 16: {
+            const bool en = !cfg.fwd[APRS_FWD_NRL_TO_RF];
+            ok = APRS_SERVICE_SetFwdEnabled(APRS_FWD_NRL_TO_RF, en);
+            message = en ? "GW NRL>RF ON" : "GW NRL>RF OFF";
+            break;
+        }
         default:
             break;
     }

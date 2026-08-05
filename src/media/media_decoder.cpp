@@ -1,6 +1,7 @@
 #include "media/media_decoder.h"
 
 #include <esp_audio_dec_default.h>
+#include <esp_audio_dec_reg.h>
 #include <esp_audio_simple_dec.h>
 #include <esp_audio_simple_dec_default.h>
 #include <esp_fourcc.h>
@@ -103,6 +104,18 @@ static bool decoder_stop_requested(const MediaDecoder *d)
            (d->external_stop != nullptr && *d->external_stop);
 }
 
+static void log_heap_state(const char *where)
+{
+    ESP_LOGI(TAG, "heap %s: psram free=%u min=%u largest=%u | internal free=%u min=%u largest=%u",
+             where,
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+             static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+}
+
 // ---- GMF pool (shared, created on first Open) -------------------------------
 
 // Source routing is manual, not pool get_score: io_file scores every "/..."
@@ -126,6 +139,113 @@ static const char *select_in_io_tag(const char *path)
     return "io_file";
 }
 
+// ---- tolerant frame decoder (webradio) --------------------------------------
+//
+// A live stream joined mid-frame, or hit by WiFi loss, hands the codec a frame
+// it cannot decode; the stock ops report ESP_AUDIO_ERR_FAIL and the GMF
+// aud_dec element aborts the whole pipeline ("Failed to decode data, ret:-1",
+// track stops). Wrap the MP3/AAC frame decoders so an isolated bad frame is
+// dropped (consumed, zero PCM -- a ~25 ms click) instead of killing playback.
+// Sustained garbage (more than kMaxConsecutiveBadFrames in a row) still
+// propagates the error so the player can reconnect the stream.
+constexpr uint32_t kMaxConsecutiveBadFrames = 10;
+
+struct TolerantDecoder {
+    const esp_audio_dec_ops_t *orig;
+    void *real;
+    uint32_t bad_frames;
+};
+
+static esp_audio_err_t tolerant_open(const esp_audio_dec_ops_t *orig, void *cfg,
+                                     uint32_t cfg_sz, void **decoder)
+{
+    TolerantDecoder *t = static_cast<TolerantDecoder *>(
+        heap_caps_calloc(1, sizeof(TolerantDecoder), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (t == nullptr) {
+        return ESP_AUDIO_ERR_MEM_LACK;
+    }
+    t->orig = orig;
+    const esp_audio_err_t ret = orig->open(cfg, cfg_sz, &t->real);
+    if (ret != ESP_AUDIO_ERR_OK) {
+        heap_caps_free(t);
+        return ret;
+    }
+    *decoder = t;
+    return ESP_AUDIO_ERR_OK;
+}
+
+static esp_audio_err_t tolerant_decode(void *decoder, esp_audio_dec_in_raw_t *raw,
+                                       esp_audio_dec_out_frame_t *frame,
+                                       esp_audio_dec_info_t *info)
+{
+    TolerantDecoder *t = static_cast<TolerantDecoder *>(decoder);
+    const esp_audio_err_t ret = t->orig->decode(t->real, raw, frame, info);
+    if (ret != ESP_AUDIO_ERR_FAIL) {
+        if (ret == ESP_AUDIO_ERR_OK) {
+            t->bad_frames = 0;
+        }
+        return ret; // OK / BUFF_NOT_ENOUGH / DATA_LACK pass through untouched
+    }
+    if (++t->bad_frames > kMaxConsecutiveBadFrames) {
+        return ret;
+    }
+    ESP_LOGW(TAG, "drop undecodable frame (%u/%u)",
+             static_cast<unsigned>(t->bad_frames),
+             static_cast<unsigned>(kMaxConsecutiveBadFrames));
+    raw->consumed = raw->len; // skip the frame, emit no PCM, keep going
+    frame->decoded_size = 0;
+    return ESP_AUDIO_ERR_OK;
+}
+
+static esp_audio_err_t tolerant_reset(void *decoder)
+{
+    TolerantDecoder *t = static_cast<TolerantDecoder *>(decoder);
+    t->bad_frames = 0;
+    return t->orig->reset != nullptr ? t->orig->reset(t->real) : ESP_AUDIO_ERR_OK;
+}
+
+static esp_audio_err_t tolerant_close(void *decoder)
+{
+    TolerantDecoder *t = static_cast<TolerantDecoder *>(decoder);
+    const esp_audio_err_t ret =
+        t->orig->close != nullptr ? t->orig->close(t->real) : ESP_AUDIO_ERR_OK;
+    heap_caps_free(t);
+    return ret;
+}
+
+static const esp_audio_dec_ops_t *s_orig_mp3_ops = nullptr;
+static const esp_audio_dec_ops_t *s_orig_aac_ops = nullptr;
+
+static esp_audio_err_t tolerant_mp3_open(void *cfg, uint32_t cfg_sz, void **decoder)
+{
+    return tolerant_open(s_orig_mp3_ops, cfg, cfg_sz, decoder);
+}
+
+static esp_audio_err_t tolerant_aac_open(void *cfg, uint32_t cfg_sz, void **decoder)
+{
+    return tolerant_open(s_orig_aac_ops, cfg, cfg_sz, decoder);
+}
+
+static const esp_audio_dec_ops_t s_tolerant_mp3_ops = {
+    tolerant_mp3_open, tolerant_decode, tolerant_reset, tolerant_close,
+};
+static const esp_audio_dec_ops_t s_tolerant_aac_ops = {
+    tolerant_aac_open, tolerant_decode, tolerant_reset, tolerant_close,
+};
+
+static bool wrap_tolerant_decoder(esp_audio_type_t type,
+                                  const esp_audio_dec_ops_t **orig_store,
+                                  const esp_audio_dec_ops_t *wrapped)
+{
+    const esp_audio_dec_ops_t *orig = esp_audio_dec_get_ops(type);
+    if (orig == nullptr) {
+        return false;
+    }
+    *orig_store = orig;
+    esp_audio_dec_unregister(type);
+    return esp_audio_dec_register(type, wrapped) == ESP_AUDIO_ERR_OK;
+}
+
 static bool register_default_decoders()
 {
     if (s_default_registered) {
@@ -146,6 +266,14 @@ static bool register_default_decoders()
                     esp_audio_simple_dec_register_default() == ESP_AUDIO_ERR_OK;
     if (!ok) {
         ESP_LOGE(TAG, "register default decoders failed");
+        return false;
+    }
+    // Replace the MP3/AAC frame decoders with the tolerant wrapper; the simple
+    // decoder looks its ops up in this registry at open time. (File playback
+    // of MP3/AAC gets the same skip-bad-frame behavior, which is fine.)
+    if (!wrap_tolerant_decoder(ESP_AUDIO_TYPE_MP3, &s_orig_mp3_ops, &s_tolerant_mp3_ops) ||
+        !wrap_tolerant_decoder(ESP_AUDIO_TYPE_AAC, &s_orig_aac_ops, &s_tolerant_aac_ops)) {
+        ESP_LOGE(TAG, "wrap tolerant decoders failed");
         return false;
     }
     s_default_registered = true;
@@ -188,8 +316,12 @@ static bool gmf_pool_setup()
         smb_cfg.io_cfg.thread.prio = 5;
         smb_cfg.io_cfg.thread.core = 1;
         smb_cfg.io_cfg.thread.stack_in_ext = true;
-        smb_cfg.io_cfg.buffer_cfg.io_size = 32 * 1024;
-        smb_cfg.io_cfg.buffer_cfg.buffer_size = 256 * 1024;
+        // 128 KB per acquire = two 64 KB lane preads in flight (smb_stream);
+        // the ring holds three such payloads (~3.8 s of FLAC at 100 KB/s).
+        // Kept at 384 KB: PSRAM is fully booked during playback (see the
+        // prebuffer log's heap line), a larger ring starves GMF payloads.
+        smb_cfg.io_cfg.buffer_cfg.io_size = 128 * 1024;
+        smb_cfg.io_cfg.buffer_cfg.buffer_size = 384 * 1024;
         if (gmf_io_smb_init(&smb_cfg, &io) != ESP_GMF_ERR_OK ||
             esp_gmf_pool_register_io(s_pool, io, nullptr) != ESP_GMF_ERR_OK) {
             goto fail;
@@ -262,7 +394,10 @@ static int mdec_release_write(void *handle, esp_gmf_payload_t *load, int block_t
     size_t left = load->valid_size;
     while (left > 0u) {
         if (decoder_stop_requested(d)) {
-            return -1; // abort the pipeline job (teardown in progress)
+            // ESP_GMF_IO_ABORT (-2), not FAIL: GMF treats an aborted release
+            // as a quiet task stop; FAIL would log "OUT port release error"
+            // and "Job failed" on every intentional playback stop.
+            return ESP_GMF_IO_ABORT;
         }
         const size_t head = d->ring_head;
         const size_t tail = d->ring_tail;
@@ -459,6 +594,7 @@ extern "C" int MEDIA_DECODER_Decode(MediaDecoder *d, const uint8_t **pcm_out,
                     used >= kMinimumPrebufferBytes &&
                     esp_timer_get_time() - wait_started_us >= max_wait_us;
                 if (target_reached || wait_expired) {
+                    log_heap_state("prebuffer");
                     ESP_LOGI(TAG, "prebuffer: %s buffered %u PCM bytes%s",
                              d->source_is_smb ? "SMB" : "HTTP",
                              static_cast<unsigned>(used),
@@ -524,6 +660,7 @@ extern "C" int MEDIA_DECODER_Decode(MediaDecoder *d, const uint8_t **pcm_out,
                 d->underrun_last_log_us = now_us;
                 ESP_LOGW(TAG, "underrun: PCM ring dry (event #%u, total %u ms)",
                          d->underrun_events, d->underrun_total_ms);
+                log_heap_state("underrun");
             }
         }
         size_t chunk = kRingBytes - tail; // contiguous run up to the wrap
@@ -566,6 +703,7 @@ extern "C" void MEDIA_DECODER_Close(MediaDecoder *d)
         ESP_LOGI(TAG, "underrun summary: %u events, %u ms dry total",
                  d->underrun_events, d->underrun_total_ms);
     }
+    log_heap_state("close");
     // Wake a pipeline job blocked in the PCM release callback before stopping,
     // then stop: the stop flow closes the source IO (its prev_close breaks a
     // blocked network read) and waits for every job to exit.

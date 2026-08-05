@@ -67,6 +67,7 @@ struct FrameHandle
 	uint8_t level;
 	uint8_t corrected;
 	uint16_t mVrms;
+	uint8_t source; // NRL port: demodulator index the frame arrived on
 #ifdef ENABLE_FX25
 	struct Fx25Mode *fx25Mode;
 #endif
@@ -596,7 +597,7 @@ void *Ax25WriteTxFrame(uint8_t *data, uint16_t size)
 }
 
 
-bool Ax25ReadNextRxFrame(uint8_t **dst, uint16_t *size, int8_t *peak, int8_t *valley, uint8_t *level, uint8_t *corrected, uint16_t *mV)
+bool Ax25ReadNextRxFrame(uint8_t **dst, uint16_t *size, int8_t *peak, int8_t *valley, uint8_t *level, uint8_t *corrected, uint16_t *mV, uint8_t *source)
 {
 	if((rxFrameHead == rxFrameTail) && !rxFrameBufferFull)
 		return false;
@@ -614,6 +615,8 @@ bool Ax25ReadNextRxFrame(uint8_t **dst, uint16_t *size, int8_t *peak, int8_t *va
 	*size = rxFrame[rxFrameTail].size;
 	*corrected = rxFrame[rxFrameTail].corrected;
 	*mV = rxFrame[rxFrameTail].mVrms;
+	if(source != NULL)
+		*source = rxFrame[rxFrameTail].source;
 
 	//__disable_irq();
 	rxFrameBufferFull = false;
@@ -714,6 +717,7 @@ void Ax25BitParse(uint8_t bit, uint8_t modem,uint16_t mV)
 									rxFrame[rxFrameHead].fx25Mode = NULL;
 #endif
 									rxFrame[rxFrameHead].corrected = AX25_NOT_FX25;
+									rxFrame[rxFrameHead].source = modem;
 									//__disable_irq();
 									rxFrame[rxFrameHead++].size = rx->frameIdx;
 									rxFrameHead %= FRAME_MAX_COUNT;

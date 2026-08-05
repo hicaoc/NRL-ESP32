@@ -274,6 +274,15 @@ void worker(void *)
         if (ready && !stopped) {
             SSTV_TxInit(mode);
             (void)SSTV_TxSetImage(s_image, frameWidth(mode), frameHeight(mode));
+            // Absolute periodic pacing: one chunk every 10 ms (SSTV_CHUNK_SAMPLES
+            // == 160 samples @ 16 kHz). The encode + UDP push + speaker work below
+            // happens INSIDE the period; vTaskDelayUntil() only sleeps the
+            // remainder. A relative vTaskDelay(10) here would add a full 10 ms gap
+            // after every chunk's own processing time, producing audible holes in
+            // the real-time transmission (a recording played back end-to-end hides
+            // them, which is why replays decode fine).
+            TickType_t last_wake = xTaskGetTickCount();
+            const TickType_t period_ticks = pdMS_TO_TICKS(10);
             for (;;) {
                 const bool more = SSTV_TxFillChunk(chunk);
                 AudioRouter_PushFrame(AUDIO_SRC_SSTV_NRL, SSTV_SAMPLE_RATE_HZ, chunk,
@@ -296,7 +305,7 @@ void worker(void *)
                     completed = true;
                     break;
                 }
-                vTaskDelay(pdMS_TO_TICKS(10));
+                vTaskDelayUntil(&last_wake, period_ticks);
             }
         }
 

@@ -33,7 +33,13 @@ constexpr int kCommandTimeoutMs = 5000;
 // response continuously through the enlarged lwIP receive window. The old
 // 1200-byte workaround was stable but too latency-bound for FLAC.
 constexpr uint32_t kWireReadBytes = 64u * 1024u;
-constexpr size_t kLaneCount = 1;
+// Two lanes (parallel SMB sessions to the same file): a single synchronous
+// pread per round-trip window could not keep a FLAC (lossless, ~100+ KB/s
+// file rate) ahead of the 176 KB/s PCM drain when the NAS answers in
+// 300-600 ms bursts -- the PCM ring ran dry every few seconds. Two 64 KB
+// preads in flight double the windowed throughput; the wait handles partial
+// per-lane results and only the received prefix advances the offset.
+constexpr size_t kLaneCount = 2;
 constexpr size_t kConfigTextBytes = 128;
 constexpr size_t kPathBytes = 512;
 constexpr uint32_t kRetryReadBytes[] = {

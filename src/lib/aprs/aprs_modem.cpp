@@ -393,6 +393,37 @@ void MODEM_DECODE(int16_t sample, uint16_t mVrms)
 }
 
 /**
+ * NRL port: demodulate one sample through a single demodulator instance so
+ * two audio streams (mic tap / NRL downlink tap) can be decoded in parallel
+ * without mixing. DCD reporting still covers every demodulator.
+ */
+void MODEM_DECODE_CH(int16_t sample, uint16_t mVrms, uint8_t demod)
+{
+	if (demod >= demodCount)
+		return;
+
+	uint8_t symbol = (demodulate(sample, (struct DemodState *)&demodState[demod]) > 0);
+	decode(symbol, demod, mVrms);
+
+	bool partialDcd = false;
+	for (uint8_t i = 0; i < demodCount; i++)
+	{
+		if (demodState[i].dcd)
+			partialDcd = true;
+	}
+	if (partialDcd)
+	{
+		setDcd(true);
+		dcd = 1;
+	}
+	else
+	{
+		setDcd(false);
+		dcd = 0;
+	}
+}
+
+/**
  * @brief TX sample generator, one call per output PCM sample. NRZI encoding is done here.
  * NRL port: baud timing and tone phase use Q16.16 accumulators so any output
  * sample rate works exactly (no cumulative baud-rate error at 8/16 kHz).

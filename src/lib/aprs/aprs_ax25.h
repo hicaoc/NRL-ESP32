@@ -145,7 +145,7 @@ void Ax25ClearReceivedFrameBitmap(void);
  * @param *corrected Number of bytes corrected in FX.25 mode. 255 is returned if not a FX.25 packet.
  * @return True if frame was read, false if no more frames to read
  */
-bool Ax25ReadNextRxFrame(uint8_t **dst, uint16_t *size, int8_t *peak, int8_t *valley, uint8_t *level, uint8_t *corrected, uint16_t *mV);
+bool Ax25ReadNextRxFrame(uint8_t **dst, uint16_t *size, int8_t *peak, int8_t *valley, uint8_t *level, uint8_t *corrected, uint16_t *mV, uint8_t *source = NULL);
 
 /**
  * @brief Get current RX stage

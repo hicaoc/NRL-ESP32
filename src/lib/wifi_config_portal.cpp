@@ -1,10 +1,11 @@
-﻿#include "wifi_config_portal.h"
+#include "wifi_config_portal.h"
 #include "wifi_config_portal_view.h"
 #include "wifi_portal_assets.generated.h"
 #include "nrl_audio_bridge.h"
 #include "nrl_at_commands.h"
 #include "nrl_captive_dns.h"
 #include "nrl_net_compat.h"
+#include "nrl_psram.h"
 #include "nrl_version.h"
 #include "nrl_wifi.h"
 #include "../services/ota_service.h"
@@ -298,7 +299,9 @@ private:
     }
 };
 
-PortalRequest s_server;
+// 13 KB of form buffers; only touched by the httpd handler task, so keep it
+// in PSRAM instead of the scarce internal heap.
+NRL_PSRAM_BSS PortalRequest s_server;
 httpd_handle_t s_httpd = nullptr;
 bool s_server_started = false;
 bool s_dns_started = false;
@@ -1479,6 +1482,14 @@ static void sendAprsSavedJson(const bool ok)
     appendField("aprs_rx", cfg.rf_rx_enabled ? "1" : "0");
     appendField("aprs_auto", cfg.auto_interval ? "1" : "0");
     appendField("aprs_fixed", cfg.fixed_beacon_without_gps ? "1" : "0");
+    appendField("aprs_nrl_tx", cfg.nrl_tx_enabled ? "1" : "0");
+    appendField("aprs_nrl_rx", cfg.nrl_rx_enabled ? "1" : "0");
+    appendField("aprs_fwd_rf_is", cfg.fwd[APRS_FWD_RF_TO_IS] ? "1" : "0");
+    appendField("aprs_fwd_is_rf", cfg.fwd[APRS_FWD_IS_TO_RF] ? "1" : "0");
+    appendField("aprs_fwd_nrl_is", cfg.fwd[APRS_FWD_NRL_TO_IS] ? "1" : "0");
+    appendField("aprs_fwd_is_nrl", cfg.fwd[APRS_FWD_IS_TO_NRL] ? "1" : "0");
+    appendField("aprs_fwd_rf_nrl", cfg.fwd[APRS_FWD_RF_TO_NRL] ? "1" : "0");
+    appendField("aprs_fwd_nrl_rf", cfg.fwd[APRS_FWD_NRL_TO_RF] ? "1" : "0");
     char lat[16] = {};
     char lon[16] = {};
     APRS_SERVICE_FormatAprsCoord(static_cast<double>(cfg.default_lat_e6) / 1e6,
@@ -1517,6 +1528,30 @@ static esp_err_t handleSaveAprs(httpd_req_t *req)
     if (ok && s_server.hasArg("aprs_fixed_present")) {
         ok = APRS_SERVICE_SetFixedBeaconWithoutGps(s_server.hasArg("aprs_fixed"));
     }
+    if (ok && s_server.hasArg("aprs_nrl_tx_present")) {
+        ok = APRS_SERVICE_SetNrlTxEnabled(s_server.hasArg("aprs_nrl_tx"));
+    }
+    if (ok && s_server.hasArg("aprs_nrl_rx_present")) {
+        ok = APRS_SERVICE_SetNrlRxEnabled(s_server.hasArg("aprs_nrl_rx"));
+    }
+    if (ok && s_server.hasArg("aprs_fwd_rf_is_present")) {
+        ok = APRS_SERVICE_SetFwdEnabled(APRS_FWD_RF_TO_IS, s_server.hasArg("aprs_fwd_rf_is"));
+    }
+    if (ok && s_server.hasArg("aprs_fwd_is_rf_present")) {
+        ok = APRS_SERVICE_SetFwdEnabled(APRS_FWD_IS_TO_RF, s_server.hasArg("aprs_fwd_is_rf"));
+    }
+    if (ok && s_server.hasArg("aprs_fwd_nrl_is_present")) {
+        ok = APRS_SERVICE_SetFwdEnabled(APRS_FWD_NRL_TO_IS, s_server.hasArg("aprs_fwd_nrl_is"));
+    }
+    if (ok && s_server.hasArg("aprs_fwd_is_nrl_present")) {
+        ok = APRS_SERVICE_SetFwdEnabled(APRS_FWD_IS_TO_NRL, s_server.hasArg("aprs_fwd_is_nrl"));
+    }
+    if (ok && s_server.hasArg("aprs_fwd_rf_nrl_present")) {
+        ok = APRS_SERVICE_SetFwdEnabled(APRS_FWD_RF_TO_NRL, s_server.hasArg("aprs_fwd_rf_nrl"));
+    }
+    if (ok && s_server.hasArg("aprs_fwd_nrl_rf_present")) {
+        ok = APRS_SERVICE_SetFwdEnabled(APRS_FWD_NRL_TO_RF, s_server.hasArg("aprs_fwd_nrl_rf"));
+    }
     if (ok && s_server.hasArg("aprs_server")) {
         unsigned long port = 14580UL;
         ok = parseUIntArg(s_server.arg("aprs_port"), &port) && port > 0UL && port <= 65535UL &&
@@ -1553,6 +1588,13 @@ static esp_err_t handleSaveAprs(httpd_req_t *req)
     if (ok && s_server.hasArg("aprs_beacon")) {
         ok = APRS_SERVICE_SendBeaconNow();
     }
+    if (ok && s_server.hasArg("aprs_msg")) {
+        // Manual text message: both fields required, the service validates
+        // the addressee charset and the message length/encoding.
+        ok = s_server.hasArg("aprs_msg_dest") && s_server.hasArg("aprs_msg_text") &&
+             APRS_SERVICE_SendMessage(s_server.arg("aprs_msg_dest").c_str(),
+                                      s_server.arg("aprs_msg_text").c_str());
+    }
 
     if (!ok) {
         ESP_LOGE(TAG, "APRS config save via web failed (invalid params)");
@@ -1566,7 +1608,8 @@ static esp_err_t handleSaveAprs(httpd_req_t *req)
 static esp_err_t handleAprsStations(httpd_req_t *req)
 {
     s_server.bind(req);
-    static AprsStationInfo stations[32];
+    // Filled only while handling a GET; keep it in PSRAM, not internal RAM.
+    NRL_PSRAM_BSS static AprsStationInfo stations[32];
     const size_t count = APRS_SERVICE_GetStations(stations, 32);
     AprsGpsInfo gps{};
     APRS_SERVICE_GetGpsInfo(&gps);
@@ -2521,9 +2564,9 @@ static const char *pathBasename(const char *path)
 
 static void sendPlaylistJson(const bool ok, size_t offset, const bool include_entries)
 {
-    const bool scanning = PLAYLIST_IsScanning();
-    const size_t track_count = PLAYLIST_Count();
-    const size_t dir_count = PLAYLIST_DirCount();
+    const bool scanning = PLAYLIST_ClientIsScanning(PLAYLIST_CLIENT_WEB);
+    const size_t track_count = PLAYLIST_ClientCount(PLAYLIST_CLIENT_WEB);
+    const size_t dir_count = PLAYLIST_ClientDirCount(PLAYLIST_CLIENT_WEB);
     const size_t total = dir_count + track_count;
     if (offset >= total && total > 0u) {
         offset = ((total - 1u) / kWebPlaylistPageSize) * kWebPlaylistPageSize;
@@ -2541,10 +2584,10 @@ static void sendPlaylistJson(const bool ok, size_t offset, const bool include_en
     body += ",\"scanning\":";
     body += scanning ? "true" : "false";
     body += ",\"scan_ok\":";
-    body += PLAYLIST_LastScanOk() ? "true" : "false";
+    body += PLAYLIST_ClientLastScanOk(PLAYLIST_CLIENT_WEB) ? "true" : "false";
     body += ",\"root\":";
-    body += PLAYLIST_AtRoot() ? "true" : "false";
-    body += ",\"dir\":\"" + jsonEscape(PLAYLIST_CurrentDir()) + "\"";
+    body += PLAYLIST_ClientAtRoot(PLAYLIST_CLIENT_WEB) ? "true" : "false";
+    body += ",\"dir\":\"" + jsonEscape(PLAYLIST_ClientCurrentDir(PLAYLIST_CLIENT_WEB)) + "\"";
     body += ",\"playing\":";
     body += playing ? "true" : "false";
     body += ",\"playing_path\":\"" + jsonEscape(playing_path) + "\"";
@@ -2560,7 +2603,7 @@ static void sendPlaylistJson(const bool ok, size_t offset, const bool include_en
         const size_t dir_begin = offset < dir_count ? offset : dir_count;
         const size_t dir_end = end < dir_count ? end : dir_count;
         for (size_t i = dir_begin; i < dir_end; ++i) {
-            const char *name = PLAYLIST_GetDirName(i);
+            const char *name = PLAYLIST_ClientGetDirName(PLAYLIST_CLIENT_WEB, i);
             if (i > dir_begin) {
                 body += ",";
             }
@@ -2575,7 +2618,7 @@ static void sendPlaylistJson(const bool ok, size_t offset, const bool include_en
                                             ? end - dir_count : track_count)
                                      : 0u;
         for (size_t i = track_begin; i < track_end; ++i) {
-            const char *path = PLAYLIST_GetPath(i);
+            const char *path = PLAYLIST_ClientGetPath(PLAYLIST_CLIENT_WEB, i);
             if (path == nullptr) {
                 continue;
             }
@@ -2613,26 +2656,26 @@ static esp_err_t handlePlaylistControl(httpd_req_t *req)
 
     const bool navigation_action = action == "enter" || action == "up" ||
                                    action == "refresh";
-    if (PLAYLIST_IsScanning() && !navigation_action &&
+    if (PLAYLIST_ClientIsScanning(PLAYLIST_CLIENT_WEB) && !navigation_action &&
         action != "snapshot" && action != "status") {
         ok = false;
     } else if (action == "enter" || action == "play" || action == "favorite") {
         unsigned long index = 0UL;
         ok = parseUIntArg(s_server.arg("index"), &index);
         if (ok && action == "enter") {
-            ok = PLAYLIST_EnterDirAsync(static_cast<size_t>(index));
+            ok = PLAYLIST_ClientEnterDirAsync(PLAYLIST_CLIENT_WEB, static_cast<size_t>(index));
             offset = 0u;
         } else if (ok && action == "play") {
-            ok = PLAYLIST_PlayIndex(static_cast<size_t>(index));
+            ok = PLAYLIST_ClientPlayIndex(PLAYLIST_CLIENT_WEB, static_cast<size_t>(index));
         } else if (ok) {
-            const char *path = PLAYLIST_GetPath(static_cast<size_t>(index));
+            const char *path = PLAYLIST_ClientGetPath(PLAYLIST_CLIENT_WEB, static_cast<size_t>(index));
             ok = path != nullptr && PLAYLIST_ToggleFavorite(path);
         }
     } else if (action == "up") {
-        ok = PLAYLIST_UpAsync();
+        ok = PLAYLIST_ClientUpAsync(PLAYLIST_CLIENT_WEB);
         offset = 0u;
     } else if (action == "refresh") {
-        ok = PLAYLIST_ScanAsync();
+        ok = PLAYLIST_ClientScanAsync(PLAYLIST_CLIENT_WEB);
         offset = 0u;
     } else if (action == "prev") {
         ok = PLAYLIST_Prev();
