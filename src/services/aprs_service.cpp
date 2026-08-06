@@ -1548,28 +1548,35 @@ bool fwdSanitizeHeader(const char *line, char *out, size_t out_size)
         return false;
     }
     size_t used = 0;
-    // SRC>DST prefix verbatim
-    const size_t prefix_len = (size_t)(gt - line) + 1u; // includes '>'
-    if (prefix_len >= out_size) {
+    // Keep SRC>DST intact. The destination is the first token after '>' and
+    // must not be emitted as a comma-prefixed digipeater.
+    const char *first_comma = strchr(gt + 1, ',');
+    const char *dst_end = (first_comma != nullptr && first_comma < colon)
+                              ? first_comma
+                              : colon;
+    const size_t prefix_len = (size_t)(dst_end - line);
+    if (dst_end == gt + 1 || prefix_len >= out_size) {
         return false;
     }
     memcpy(out, line, prefix_len);
     used = prefix_len;
     out[used] = '\0';
-    // walk the comma-separated digi list, dropping q*/TCPIP entries
-    const char *p = gt + 1;
+    // Walk the digipeater list. A q construct and the following APRS-IS
+    // server/gateway form a pair, and neither belongs on an RF path.
+    const char *p = (dst_end < colon) ? dst_end + 1 : colon;
+    bool drop_q_argument = false;
     while (p < colon) {
         const char *comma = strchr(p, ',');
         const char *end = (comma != nullptr && comma < colon) ? comma : colon;
         const size_t tok_len = (size_t)(end - p);
         char tok[12] = {};
-        const bool is_q = tok_len >= 2 && p[0] == 'q' &&
-                          isalpha((unsigned char)p[1]);
-        bool is_tcpip = false;
-        if (tok_len == 5 && strncasecmp(p, "TCPIP", 5) == 0) {
-            is_tcpip = true;
-        }
-        if (!is_q && !is_tcpip && tok_len > 0 && tok_len < sizeof(tok)) {
+        const bool is_q = tok_len >= 2 && (p[0] == 'q' || p[0] == 'Q') &&
+                           isalpha((unsigned char)p[1]);
+        const bool is_tcpip = (tok_len == 5 || (tok_len == 6 && p[5] == '*')) &&
+                              strncasecmp(p, "TCPIP", 5) == 0;
+        const bool drop = drop_q_argument || is_q || is_tcpip;
+        drop_q_argument = is_q;
+        if (!drop && tok_len > 0 && tok_len < sizeof(tok)) {
             memcpy(tok, p, tok_len);
             // strip a trailing '*' (heard marker) -- we re-add ourselves below
             if (tok_len > 1 && tok[tok_len - 1] == '*') {
