@@ -1,9 +1,11 @@
 #include "services/cw_service.h"
 
+#include "app/driver/board_pins.h"
 #include "audio/audio_router.h"
 #include "lib/cw_codec.h"
 
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <esp_random.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
@@ -573,11 +575,33 @@ void CW_SERVICE_Init(void)
     AudioRouter_SetRoute(AUDIO_SRC_CW_NRL, AUDIO_SINK_NRL_UPLINK, true);
     AudioRouter_SetRoute(AUDIO_SRC_CW_SPEAKER, AUDIO_SINK_SPEAKER, true);
     s_queue = xQueueCreate(12u, sizeof(Command));
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    BaseType_t task_result = pdFAIL;
+    if (s_queue != nullptr) {
+        task_result = xTaskCreateWithCaps(worker, "cw_tx", kTxTaskStackBytes,
+                                          nullptr, 5u, &s_task,
+                                          MALLOC_CAP_SPIRAM);
+        if (task_result != pdPASS) {
+            ESP_LOGW(TAG, "PSRAM worker stack failed, trying internal RAM");
+            task_result = xTaskCreate(worker, "cw_tx", kTxTaskStackBytes,
+                                      nullptr, 5u, &s_task);
+        }
+    }
+    if (s_queue == nullptr || task_result != pdPASS) {
+        ESP_LOGE(TAG, "CW transmit worker unavailable");
+        s_task = nullptr;
+        if (s_queue != nullptr) {
+            vQueueDelete(s_queue);
+            s_queue = nullptr;
+        }
+    }
+#else
     if (s_queue == nullptr ||
         xTaskCreate(worker, "cw_tx", kTxTaskStackBytes, nullptr, 5u, &s_task) != pdPASS) {
         ESP_LOGE(TAG, "CW transmit worker unavailable");
         s_task = nullptr;
     }
+#endif
 }
 
 void CW_SERVICE_RecordReceived(const CwSource, const char character,

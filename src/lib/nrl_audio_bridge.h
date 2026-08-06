@@ -44,6 +44,11 @@ void NRLAudioBridge_FeedExternalMic(const short *pcm8k, size_t sample_count);
 void NRLAudioBridge_SetMediaUplinkActive(bool active);
 void NRLAudioBridge_SendMediaUplink(const short *pcm8k, size_t sample_count);
 
+// Send generated narrowband signaling as an immediate G.711 packet stream.
+// The input is already PCM16 mono 8 kHz, so this deliberately bypasses the
+// 16 kHz voice router/resampler and the captured-voice accumulator.
+bool NRLAudioBridge_SendGeneratedPcm8k(const short *pcm8k, size_t sample_count);
+
 // NRL uplink TX voice codec: 0 = G.711 A-law 8 kHz (NRL packet type 1,
 // default), 1 = Opus 16 kHz wideband (packet type 8, 20 ms frames, VOIP/VBR).
 // RX accepts both regardless. Persisted in NVS. Independent of the ESP-NOW

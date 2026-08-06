@@ -320,6 +320,35 @@ static bool udpSendPacket(const uint8_t *packet, const size_t packet_size)
     return udpSendPacketTo(packet, packet_size, s_server_ip, server_port);
 }
 
+extern "C" bool NRLAudioBridge_SendGeneratedPcm8k(const short *pcm8k,
+                                                    const size_t sample_count)
+{
+    if (pcm8k == nullptr || sample_count == 0u) {
+        return false;
+    }
+
+    bool all_sent = true;
+    size_t offset = 0u;
+    while (offset < sample_count) {
+        const size_t count = ((sample_count - offset) < kG711PayloadMinBytes)
+                                 ? (sample_count - offset)
+                                 : kG711PayloadMinBytes;
+        uint8_t payload[kG711PayloadMinBytes];
+        for (size_t i = 0; i < count; ++i) {
+            payload[i] = NRL_G711_EncodeALaw(pcm8k[offset + i]);
+        }
+
+        uint8_t packet[kNrlHeaderSize + kG711PayloadMinBytes];
+        const size_t packet_size = buildNrlPacket(kNrlTypeVoice, payload, count,
+                                                  packet, sizeof(packet));
+        if (packet_size == 0u || !udpSendPacket(packet, packet_size)) {
+            all_sent = false;
+        }
+        offset += count;
+    }
+    return all_sent;
+}
+
 static void flushSciPayload(void)
 {
     if (s_sci_payload_count == 0u) {
@@ -458,17 +487,19 @@ static bool uplinkGateOpen(void)
     return true;
 }
 
+static uint8_t alaw_accumulator[kG711PayloadMaxBytes];
+static size_t alaw_accumulator_count = 0u;
+
 static void sendVoiceFrameInternal(const int16_t *pcm8k, const size_t sample_count, const bool gated)
 {
     if (pcm8k == nullptr || sample_count == 0u) {
         return;
     }
+
     if (gated && !uplinkGateOpen()) {
+        alaw_accumulator_count = 0u; // drop stale partial frame on squelch close
         return;
     }
-
-    static uint8_t alaw_accumulator[kG711PayloadMaxBytes];
-    static size_t alaw_accumulator_count = 0u;
 
     const size_t target_bytes = currentVoicePayloadBytes();
     // If the configured size shrunk while we already had more accumulated,
@@ -560,13 +591,18 @@ static void uplinkSinkWrite(const uint8_t source_id,
                             const size_t sample_count,
                             void *)
 {
+    // Locally generated signaling already owns its transmit timing and must
+    // not depend on the radio SQL/PTT capture gate. SSTV is a long generated
+    // waveform just like CW; gating it would play locally while silently
+    // dropping every network frame when SQL is closed.
     const bool signaling_tail = source_id == AUDIO_SRC_MDC_NRL ||
                                 source_id == AUDIO_SRC_DTMF_NRL ||
                                 source_id == AUDIO_SRC_CW_NRL ||
-                                source_id == AUDIO_SRC_APRS;
-    // A media stream (nanny/beacon) owns the uplink exclusively while
-    // active: captured audio would garble the G.711 accumulator.
-    if (s_media_uplink_active) {
+                                source_id == AUDIO_SRC_SSTV_NRL;
+    // Generated signaling takes priority over a media uplink. Its service
+    // already pauses media through AudioFocus before pushing the waveform;
+    // captured microphone audio must still stay out of the accumulator.
+    if (s_media_uplink_active && !signaling_tail) {
         return;
     }
     // When a Bluetooth headset is connected, its mic is the uplink source;
@@ -1513,9 +1549,11 @@ bool NRLAudioBridge_Init(void)
     NRL_G711_Init();
 
     // Restore the persisted TX voice codec (0 = G.711 type 1, 1 = Opus type 8).
-    // Opus pre-allocates its encoders/decoders here; if boot-time RAM cannot
-    // hold them, run this session as G.711 (NVS keeps the user's choice, so a
-    // later boot or manual re-switch can succeed).
+    // Do NOT prewarm the Opus encoder here: this runs on the main task whose
+    // stack (~24 KB) cannot accommodate the silk encoder init (~10 KB on top
+    // of all the other init frames already on the stack).  The encoder is
+    // lazily created in sendOpusVoice16k() on the audio_passthrough task
+    // (32 KB stack) the first time an Opus frame is actually produced.
     {
         nvs_handle_t nvs;
         uint8_t codec = 0u;
@@ -1523,13 +1561,7 @@ bool NRLAudioBridge_Init(void)
             (void)nvs_get_u8(nvs, "codec", &codec);
             nvs_close(nvs);
         }
-        codec = (codec <= 1u) ? codec : 0u;
-        if (codec == 1u && !bridgePrewarmOpus()) {
-            ESP_LOGW(TAG, "[NRL] persisted Opus codec needs RAM that isn't available; "
-                          "falling back to G.711 for this session");
-            codec = 0u;
-        }
-        s_voice_codec = codec;
+        s_voice_codec = (codec <= 1u) ? codec : 0u;
     }
 
     if (s_udp_mutex == nullptr) {

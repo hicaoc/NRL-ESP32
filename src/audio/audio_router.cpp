@@ -58,23 +58,27 @@ static size_t downsample_2to1(const int16_t *src, const size_t src_count,
     return out;
 }
 
-// 8k -> 16k: linear interpolation, duplicating the final sample. Same
-// algorithm the speaker path uses at queue pop (upsample_8k_to_16k_frame).
-static size_t upsample_1to2(const int16_t *src, const size_t src_count,
-                            int16_t *dst, const size_t dst_capacity)
+// 8k -> 16k: linear interpolation with cross-chunk continuity. `last` carries
+// the final sample of the previous chunk so the first interpolated pair of
+// the next chunk bridges the boundary smoothly instead of repeating a value
+// (which created a 10 ms "flat spot" that broke MDC1200 four-point decode).
+static size_t upsample_1to2_cont(const int16_t *src, const size_t src_count,
+                                 int16_t *dst, const size_t dst_capacity,
+                                 int16_t &last)
 {
     const size_t out_pairs = (src_count * 2u < dst_capacity) ? src_count : dst_capacity / 2u;
     for (size_t i = 0; i < out_pairs; ++i) {
         const int16_t current = src[i];
-        const int16_t next = (i + 1u < src_count) ? src[i + 1u] : current;
-        dst[i * 2u] = current;
-        dst[i * 2u + 1u] = static_cast<int16_t>(
-            (static_cast<int32_t>(current) + static_cast<int32_t>(next)) / 2);
+        dst[i * 2u] = static_cast<int16_t>(
+            (static_cast<int32_t>(last) + static_cast<int32_t>(current)) / 2);
+        dst[i * 2u + 1u] = current;
+        last = current;
     }
     return out_pairs * 2u;
 }
 
 static void deliver_converted(const uint8_t source_id,
+                              const uint8_t sink_id,
                               const SinkSlot &sink,
                               const uint32_t src_rate,
                               const uint16_t gain_q8,
@@ -103,12 +107,17 @@ static void deliver_converted(const uint8_t source_id,
     }
 
     if (src_rate == 8000u && sink.sample_rate_hz == 16000u) {
+        // Per-sink state: carry the last 8 kHz sample across PushFrame calls
+        // so the interpolated stream has no boundary discontinuities.
+        static int16_t s_upsample_last[AUDIO_SINK_COUNT] = {};
+        int16_t &last = s_upsample_last[sink_id < AUDIO_SINK_COUNT ? sink_id : 0];
         size_t offset = 0;
         while (offset < sample_count) {
             const size_t take = ((sample_count - offset) < kConvertChunkSamples / 2u)
                                     ? (sample_count - offset)
                                     : kConvertChunkSamples / 2u;
-            const size_t out = upsample_1to2(samples + offset, take, scratch, kConvertChunkSamples);
+            const size_t out = upsample_1to2_cont(samples + offset, take, scratch,
+                                                  kConvertChunkSamples, last);
             if (out == 0u) {
                 break;
             }
@@ -205,6 +214,6 @@ extern "C" void AudioRouter_PushFrame(const uint8_t source_id,
             continue;
         }
 
-        deliver_converted(source_id, sink, sample_rate_hz, gain_q8, samples, sample_count);
+        deliver_converted(source_id, sink_id, sink, sample_rate_hz, gain_q8, samples, sample_count);
     }
 }

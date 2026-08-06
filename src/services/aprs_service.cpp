@@ -12,6 +12,7 @@
 #include "lib/aprs/parse_aprs.h"
 #include "lib/aprs/pbuf.h"
 #include "lib/nrl_version.h"
+#include "lib/nrl_audio_bridge.h"
 #include "lib/nrl_psram.h"
 #include "lib/nrl_wifi.h"
 #include "services/config_notify.h"
@@ -68,7 +69,12 @@ constexpr uint32_t kIsReconnectMs = 30000u;   // APRS-IS reconnect backoff
 constexpr size_t kStationCount = 64u;         // PSRAM station table size
 constexpr size_t kRxRingSamples = 16384u;     // ~1 s of 16 kHz mic tap
 constexpr size_t kTxChunkSamples = 160u;      // 20 ms at MODEM_TX_SAMPLE_RATE
-constexpr int16_t kTxAmplitude = 180;         // per 8-bit sine step (~0.7 FS)
+// Match the level of known-decodable NRL AFSK captures (~12032 PCM peak).
+// The previous value decoded to ~23040 after G.711: DCD locked, but the
+// correlator never produced a valid HDLC frame because the tones were driven
+// well outside the receiver's reliable level window.
+constexpr int16_t kTxAmplitude = 94;
+constexpr uint32_t kTxLeadSamples = kTxChunkSamples;
 constexpr size_t kPersistCommentLegacyBytes = 40u;
 constexpr size_t kPersistCommentV2Bytes = 96u;
 
@@ -1432,13 +1438,18 @@ void txPump()
         tx_pushed_samples = 0;
         AudioFocus_NotifyVoiceStart(); // pause music playback for the beacon
     }
-    // Keep the pushed sample count ~200 ms ahead of wall clock. The speaker
-    // queue (~1.3 s) absorbs the lead; generating strictly against real time
-    // avoids both overflowing the queue (dropped samples tear the AFSK frame)
-    // and underruns when the task tick jitters.
+    lockCfg();
+    const bool nrl_tx = s_cfg.enabled && s_cfg.nrl_tx_enabled;
+    unlockCfg();
+    // Keep only one 20 ms frame ahead of wall clock. A larger lead is harmless
+    // for the queued speaker path, but the NRL sink sends synchronously: the
+    // previous 200 ms lead emitted roughly ten voice packets back-to-back at
+    // burst start and could destroy the AFSK preamble through loss/jitter.
+    // One frame still covers normal task wake-up jitter without bursting the
+    // network uplink.
     const int64_t elapsed_us = esp_timer_get_time() - tx_start_us;
     const uint32_t target = (uint32_t)(elapsed_us * MODEM_TX_SAMPLE_RATE / 1000000) +
-                            MODEM_TX_SAMPLE_RATE / 5;
+                            kTxLeadSamples;
     while (tx_pushed_samples < target && ModemIsTransmitting()) {
         for (size_t i = 0; i < kTxChunkSamples; ++i) {
             const uint8_t s = MODEM_BAUDRATE_TIMER_HANDLER();
@@ -1453,6 +1464,9 @@ void txPump()
         }
         AudioRouter_PushFrame(AUDIO_SRC_APRS, MODEM_TX_SAMPLE_RATE, chunk,
                               kTxChunkSamples);
+        if (nrl_tx && !NRLAudioBridge_SendGeneratedPcm8k(chunk, kTxChunkSamples)) {
+            ESP_LOGW(TAG, "NRL AFSK packet send failed");
+        }
         tx_pushed_samples += kTxChunkSamples;
     }
 }
@@ -1630,6 +1644,9 @@ bool fwdToAfsk(const char *line, bool sanitize, bool add_own_digi)
 void aprsSinkWrite(uint8_t source_id, const int16_t *samples,
                    size_t sample_count, void *)
 {
+    if (samples == nullptr || sample_count == 0u) {
+        return;
+    }
     int16_t *ring = s_rx_ring;
     volatile size_t *head_ptr = &s_rx_head;
     volatile size_t tail = s_rx_tail;
@@ -1723,7 +1740,6 @@ void rxFramePoll()
                                  &corrected, &mv, &rx_source)) {
             break;
         }
-
         AX25Msg msg = {};
         ax25_decode(frame, size, mv, &msg);
         if (msg.ctrl != AX25_CTRL_UI || msg.pid != AX25_PID_NOLAYER3) {
@@ -1815,7 +1831,6 @@ void applyRouteState()
     lockCfg();
     const bool rx = s_cfg.enabled && s_cfg.rf_rx_enabled;
     const bool tx = s_cfg.enabled && s_cfg.rf_tx_enabled;
-    const bool nrl_tx = s_cfg.enabled && s_cfg.nrl_tx_enabled;
     const bool nrl_rx = s_cfg.enabled && s_cfg.nrl_rx_enabled;
     unlockCfg();
     AudioRouter_SetRoute(AUDIO_SRC_MIC, AUDIO_SINK_APRS, rx);
@@ -1823,7 +1838,9 @@ void applyRouteState()
     // NRL network audio path: 8 kHz AFSK is upsampled to the 16 kHz uplink
     // sink at the router edge; the downlink arrives 8 kHz and is upsampled
     // to the 16 kHz demodulator tap the same way.
-    AudioRouter_SetRoute(AUDIO_SRC_APRS, AUDIO_SINK_NRL_UPLINK, nrl_tx);
+    // APRS network TX bypasses the generic 16 kHz voice sink in txPump();
+    // keep this route disabled to avoid duplicate packets and resampling.
+    AudioRouter_SetRoute(AUDIO_SRC_APRS, AUDIO_SINK_NRL_UPLINK, false);
     AudioRouter_SetRoute(AUDIO_SRC_NRL_DOWNLINK, AUDIO_SINK_APRS, nrl_rx);
 }
 

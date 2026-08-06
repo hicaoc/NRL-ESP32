@@ -15,7 +15,7 @@
 #include <freertos/task.h>
 
 #include "../audio/audio_router.h"
-#include "../lib/nrl_psram.h"
+#include "../lib/nrl_audio_bridge.h"
 #include "../media/cover_decoder.h"
 #include "storage_service.h"
 
@@ -54,8 +54,10 @@ char s_req_path[sizeof(s_snap.path)] = {};
 uint8_t *s_req_jpeg = nullptr; // kCamJpegCap, allocated once (camera frames)
 size_t s_req_jpeg_size = 0u;
 
-// Frame buffer, allocated once (160 KB): PSRAM where available.
+// TX frame buffer: prefer the 620 KB PD120 size, with a 160 KB fallback for
+// Robot36/Martin M1 when fragmented PSRAM cannot provide the larger block.
 uint16_t *s_image = nullptr;
+size_t s_image_pixels = 0u;
 
 // RX side: the decoder callbacks fire from the audio task that pushes into
 // our sink, so they only touch plain single-writer fields (no lock, no heap).
@@ -133,16 +135,6 @@ void sstvSink(uint8_t source, const int16_t *samples, size_t sample_count, void 
     SSTV_RX_Feed(samples, sample_count);
 }
 
-// Stack in PSRAM where the target allows external stacks (the worker blocks
-// on FatFS reads and the 10 ms pacing); internal SRAM otherwise.
-#if defined(CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY) && \
-    CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY
-NRL_PSRAM_BSS StackType_t s_task_stack[kTaskStackBytes / sizeof(StackType_t)];
-#else
-StackType_t s_task_stack[kTaskStackBytes / sizeof(StackType_t)];
-#endif
-StaticTask_t s_task_tcb;
-
 void setState(SstvState state)
 {
     s_snap.state = state;
@@ -156,6 +148,7 @@ bool prepareImageBuffer(const uint8_t *jpeg, size_t jpeg_size, SSTV_Mode mode,
 {
     const uint16_t target_w = frameWidth(mode);
     const uint16_t target_h = frameHeight(mode);
+    const size_t target_pixels = static_cast<size_t>(target_w) * target_h;
     CoverBitmap bmp = {};
     const bool decoded = COVER_DecodeJpeg(jpeg, jpeg_size, kDecodeMaxDim, &bmp);
     if (!decoded || bmp.rgb565 == nullptr || bmp.width == 0u || bmp.height == 0u) {
@@ -163,7 +156,7 @@ bool prepareImageBuffer(const uint8_t *jpeg, size_t jpeg_size, SSTV_Mode mode,
         *error = "DECODE";
         return false;
     }
-    if (s_image == nullptr) {
+    if (s_image == nullptr || s_image_pixels < target_pixels) {
         COVER_Free(&bmp);
         *error = "NOMEM";
         return false;
@@ -236,6 +229,7 @@ bool prepareImage(const char *path, SSTV_Mode mode, const char **error)
 void worker(void *)
 {
     int16_t chunk[SSTV_CHUNK_SAMPLES];
+    int16_t network_chunk[SSTV_CHUNK_SAMPLES / 2u];
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
@@ -272,6 +266,7 @@ void worker(void *)
 
         bool completed = false;
         if (ready && !stopped) {
+            NRLAudioBridge_SetMediaUplinkActive(true);
             SSTV_TxInit(mode);
             (void)SSTV_TxSetImage(s_image, frameWidth(mode), frameHeight(mode));
             // Absolute periodic pacing: one chunk every 10 ms (SSTV_CHUNK_SAMPLES
@@ -285,8 +280,13 @@ void worker(void *)
             const TickType_t period_ticks = pdMS_TO_TICKS(10);
             for (;;) {
                 const bool more = SSTV_TxFillChunk(chunk);
-                AudioRouter_PushFrame(AUDIO_SRC_SSTV_NRL, SSTV_SAMPLE_RATE_HZ, chunk,
-                                      SSTV_CHUNK_SAMPLES);
+                for (size_t i = 0u; i < SSTV_CHUNK_SAMPLES / 2u; ++i) {
+                    const int32_t a = chunk[i * 2u];
+                    const int32_t b = chunk[i * 2u + 1u];
+                    network_chunk[i] = static_cast<int16_t>((a + b) / 2);
+                }
+                NRLAudioBridge_SendMediaUplink(network_chunk,
+                                               SSTV_CHUNK_SAMPLES / 2u);
                 AudioRouter_PushFrame(AUDIO_SRC_SSTV_SPEAKER, SSTV_SAMPLE_RATE_HZ, chunk,
                                       SSTV_CHUNK_SAMPLES);
                 xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -307,6 +307,7 @@ void worker(void *)
                 }
                 vTaskDelayUntil(&last_wake, period_ticks);
             }
+            NRLAudioBridge_SetMediaUplinkActive(false);
         }
 
         xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -334,12 +335,22 @@ void SSTV_SERVICE_Init(void)
         ESP_LOGE(TAG, "no mutex");
         return;
     }
+    constexpr size_t kLargestFramePixels = static_cast<size_t>(640u) * 496u;
+    constexpr size_t kStandardFramePixels = static_cast<size_t>(320u) * 256u;
     s_image = static_cast<uint16_t *>(heap_caps_malloc(
-        static_cast<size_t>(640u) * 496u * sizeof(uint16_t), // largest frame: PD120
+        kLargestFramePixels * sizeof(uint16_t), // largest frame: PD120
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (s_image != nullptr) {
+        s_image_pixels = kLargestFramePixels;
+    }
     if (s_image == nullptr) {
         s_image = static_cast<uint16_t *>(heap_caps_malloc(
-            static_cast<size_t>(640u) * 496u * sizeof(uint16_t), MALLOC_CAP_8BIT));
+            kStandardFramePixels * sizeof(uint16_t),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (s_image != nullptr) {
+            s_image_pixels = kStandardFramePixels;
+            ESP_LOGW(TAG, "using standard-mode frame buffer; PD120 disabled");
+        }
     }
     if (s_image == nullptr) {
         ESP_LOGE(TAG, "no frame buffer");
@@ -365,14 +376,27 @@ void SSTV_SERVICE_Init(void)
     s_snap.state = SSTV_STATE_IDLE;
     SSTV_RX_Init(rxOnVis, rxOnLine, rxOnDone, nullptr);
     AudioRouter_RegisterSink(AUDIO_SINK_SSTV, SSTV_SAMPLE_RATE_HZ, sstvSink, nullptr);
-    AudioRouter_SetRoute(AUDIO_SRC_SSTV_NRL, AUDIO_SINK_NRL_UPLINK, true);
     AudioRouter_SetRoute(AUDIO_SRC_SSTV_SPEAKER, AUDIO_SINK_SPEAKER, true);
-    // Core 1 with the audio pipeline, same priority as the CW tx worker.
-    if (xTaskCreateStaticPinnedToCore(worker, "sstv_tx", kTaskStackBytes, nullptr, 5,
-                                      s_task_stack, &s_task_tcb, 1) == nullptr) {
+    // Core 1 with the audio pipeline, same priority as the CW tx worker. Use
+    // the caps-aware API for a PSRAM stack; static external stacks are not
+    // accepted consistently across ESP-IDF target/config combinations.
+    BaseType_t task_result = xTaskCreatePinnedToCoreWithCaps(
+        worker, "sstv_tx", kTaskStackBytes, nullptr, 5, &s_task, 1,
+        MALLOC_CAP_SPIRAM);
+    if (task_result != pdPASS) {
+        ESP_LOGW(TAG, "PSRAM worker stack failed, trying internal RAM");
+        task_result = xTaskCreatePinnedToCore(
+            worker, "sstv_tx", kTaskStackBytes, nullptr, 5, &s_task, 1);
+    }
+    if (task_result != pdPASS) {
         ESP_LOGE(TAG, "worker task create failed");
         s_task = nullptr;
     }
+}
+
+bool SSTV_SERVICE_IsReady(void)
+{
+    return s_lock != nullptr && s_task != nullptr && s_image != nullptr;
 }
 
 bool SSTV_SERVICE_GetImageDirectory(char *out_path, size_t out_path_size)
@@ -404,11 +428,17 @@ bool SSTV_SERVICE_GetImageDirectory(char *out_path, size_t out_path_size)
 bool SSTV_SERVICE_SendJpeg(const char *path, SSTV_Mode mode)
 {
     if (path == nullptr || path[0] == '\0' || s_lock == nullptr || s_task == nullptr) {
+        ESP_LOGE(TAG, "JPEG send rejected: path=%s lock=%s task=%s",
+                 path != nullptr && path[0] != '\0' ? "ok" : "missing",
+                 s_lock != nullptr ? "ok" : "missing",
+                 s_task != nullptr ? "ok" : "missing");
         return false;
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (s_snap.state == SSTV_STATE_PREPARING || s_snap.state == SSTV_STATE_SENDING ||
         s_snap.rx_active) {
+        ESP_LOGW(TAG, "JPEG send rejected: tx_state=%u rx_active=%u",
+                 static_cast<unsigned>(s_snap.state), s_snap.rx_active ? 1u : 0u);
         xSemaphoreGive(s_lock);
         return false;
     }
