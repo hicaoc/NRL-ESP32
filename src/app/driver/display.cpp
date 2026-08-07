@@ -2537,13 +2537,16 @@ void refreshMapMenu()
 {
     const uint32_t tile_rev = MAP_TILES_Revision();
     const uint32_t station_rev = APRS_SERVICE_GetStationRevision();
-    if (tile_rev == s_map_tile_rev && station_rev == s_map_station_rev) {
-        return;
-    }
-    s_map_tile_rev = tile_rev;
-    s_map_station_rev = station_rev;
+    // Re-run layout even when the revision is unchanged: failed/offline tile
+    // requests are placed in a cooldown and need a later pass to be queued
+    // again after Wi-Fi or TLS has recovered. Filled tiles are skipped by
+    // layoutMapTiles(), so this does not reload successful tiles.
     layoutMapTiles();
-    layoutMapMarkers();
+    if (tile_rev != s_map_tile_rev || station_rev != s_map_station_rev) {
+        s_map_tile_rev = tile_rev;
+        s_map_station_rev = station_rev;
+        layoutMapMarkers();
+    }
 }
 
 void buildMapMenu()

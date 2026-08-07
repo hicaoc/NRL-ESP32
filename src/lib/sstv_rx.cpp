@@ -30,10 +30,11 @@ constexpr uint16_t kGoertzelN = 80u; // 5 ms window: exactly 6 cycles of 1200 Hz
 constexpr float kToneOnRatio = 0.45f;
 constexpr float kToneOffRatio = 0.25f;
 // With no input, the phase discriminator naturally relaxes back to its
-// 1900 Hz centre and can look exactly like a VIS leader. Require a tiny but
-// real signal (RMS > 20 PCM counts) before accepting header tones. This is
-// still far below the 2%-gain weak-signal test (about 100 RMS counts).
-constexpr float kHeaderMinEnergy = 400.0f;
+// 1900 Hz centre and can look exactly like a VIS leader. Keep a non-zero
+// energy gate, but allow the very low levels produced by some ES8311 boards
+// (observed peaks of 4..10 PCM counts). Tone ratio and duration checks still
+// reject idle quantisation noise.
+constexpr float kHeaderMinEnergy = 4.0f; // RMS > 2 PCM counts
 constexpr uint32_t kLeaderMinSamples = 3520u; // 220 ms of the 300 ms leader
 constexpr uint16_t kBreakMinSamples = 80u;    // accept >=5 ms of the 10 ms break
 constexpr uint16_t kBreakMaxSamples = 400u;   // reject unrelated long 1200 Hz tones
@@ -80,6 +81,8 @@ float s_g1 = 0.0f;
 float s_g2 = 0.0f;
 float s_eng = 0.0f;
 float s_ratio = 0.0f;
+float s_dc = 0.0f;
+float s_quality = 0.0f;
 
 uint32_t s_index = 0u;
 bool s_tone = false;
@@ -449,8 +452,11 @@ void huntStandardHeader()
     // at about 1837 Hz and rings briefly at transitions. Use a deliberately
     // broad calibration band; VIS/data tones remain below it.
     const bool signal_present = s_eng >= kHeaderMinEnergy;
-    const bool leader = signal_present && s_freq >= 1600.0f && s_freq <= 2150.0f;
-    const bool break_tone = signal_present && s_freq >= 1050.0f && s_freq <= 1350.0f;
+    const float carrier_ratio = (s_i * s_i + s_q * s_q) / (s_eng + 1.0e-6f);
+    const bool leader = signal_present && carrier_ratio >= 0.35f &&
+                        s_freq >= 1600.0f && s_freq <= 2150.0f;
+    const bool break_tone = signal_present && s_tone &&
+                            s_freq >= 1050.0f && s_freq <= 1350.0f;
 
     if (s_header_phase == HEADER_FIRST_LEADER) {
         if (leader) {
@@ -530,7 +536,10 @@ void processSample(const int16_t x)
     s_i += kIqAlpha * (mix_i - s_i);
     s_q += kIqAlpha * (mix_q - s_q);
     const float num = s_i * s_q_prev - s_q * s_i_prev;
-    const float mag2 = s_i * s_i + s_q * s_q + 1.0f;
+    // Only guard the true zero-input case. A fixed +1 term dominates |Z|^2
+    // when the ADC delivers single-digit PCM levels and pulls every measured
+    // tone back toward the 1900 Hz centre frequency.
+    const float mag2 = s_i * s_i + s_q * s_q + 1.0e-6f;
     const float inst = kCenterHz + num / mag2 * (static_cast<float>(kSampleRate) / 6.283185307179586f);
     s_freq += kFreqBeta * (inst - s_freq);
     s_i_prev = s_i;
@@ -548,6 +557,14 @@ void processSample(const int16_t x)
     const float xf = static_cast<float>(x);
     s_eng += (xf * xf - s_eng) * (2.0f / kGoertzelN);
     s_ratio = power / (s_eng * (static_cast<float>(kGoertzelN) * kGoertzelN / 2.0f) + 1.0f);
+
+    const float instant_quality = clampf(s_ratio * 100.0f, 0.0f, 100.0f);
+    if (instant_quality > s_quality) {
+        s_quality = instant_quality;
+    } else {
+        // Hold recent sync quality long enough for the UI refresh interval.
+        s_quality *= 0.99998f;
+    }
 
     // --- sync tone Schmitt ---
     const bool on = s_tone ? s_ratio > kToneOffRatio : s_ratio > kToneOnRatio;
@@ -708,6 +725,8 @@ void SSTV_RX_Reset(void)
     s_g2 = 0.0f;
     s_eng = 0.0f;
     s_ratio = 0.0f;
+    s_dc = 0.0f;
+    s_quality = 0.0f;
     s_index = 0u;
     s_state = SSTV_RX_HUNT;
     s_lines_received = 0u;
@@ -743,7 +762,15 @@ void SSTV_RX_Feed(const int16_t *samples, size_t count)
         return;
     }
     for (size_t i = 0u; i < count; ++i) {
-        processSample(samples[i]);
+        const float input = static_cast<float>(samples[i]);
+        // AC-couple the decoder input. Some ES8311 configurations produce a
+        // roughly 13.8k-count DC offset; without removal it dominates total
+        // energy and reduces the 1200 Hz sync ratio to almost zero.
+        s_dc += (input - s_dc) * (1.0f / 256.0f);
+        const float ac = input - s_dc;
+        const float limited = clampf(ac, -32768.0f, 32767.0f);
+        processSample(static_cast<int16_t>(limited >= 0.0f ? limited + 0.5f
+                                                          : limited - 0.5f));
     }
 }
 
@@ -769,6 +796,5 @@ uint16_t SSTV_RX_LinesTotal(void)
 
 uint8_t SSTV_RX_SignalQuality(void)
 {
-    const float q = clampf(s_ratio * 100.0f, 0.0f, 100.0f);
-    return static_cast<uint8_t>(q);
+    return static_cast<uint8_t>(clampf(s_quality, 0.0f, 100.0f));
 }

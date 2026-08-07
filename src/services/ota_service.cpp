@@ -46,6 +46,14 @@ constexpr uint32_t kFailRetryMs = 5u * 60u * 1000u;
 // the "check failed" heap logs). User-requested checks bypass the gate.
 constexpr uint32_t kMinInternalFreeForCheck = 16u * 1024u;
 constexpr uint32_t kMinInternalLargestForCheck = 8u * 1024u;
+// HTTPS receive, image validation and encrypted-flash writes otherwise form a
+// permanently-ready loop. A small per-block pause leaves idle time on both
+// cores for audio/UI/network work while only marginally extending an update.
+constexpr uint32_t kOtaBlockPaceMs = 3u;
+// ESP-IDF otherwise uses its 1 KiB minimum OTA buffer. Four KiB amortizes TLS,
+// HTTP and scheduler overhead enough to approach local Wi-Fi upload speed
+// while keeping the same per-block CPU pacing.
+constexpr int kOtaHttpBufferBytes = 4096;
 
 struct OtaState {
     NrlOtaStatus status = {};
@@ -166,7 +174,10 @@ void setUpdateProgress(uint32_t bytes, uint32_t size)
     s_ota.status.update_percent = static_cast<uint8_t>(percent);
     xSemaphoreGive(s_ota.lock);
 
-    if (percent_changed && size > 0u) {
+    // Redrawing the progress overlay 100 times is disproportionately costly on
+    // display boards. Status consumers still see every percentage; the notice
+    // layer advances in 2% steps (plus the final 100%).
+    if (percent_changed && size > 0u && (percent == 100u || (percent % 2u) == 0u)) {
         char notice[40] = {};
         snprintf(notice, sizeof(notice), "OTA UPDATING %u%%",
                  static_cast<unsigned>(percent));
@@ -340,6 +351,7 @@ bool installVersion(const char *version)
     DISPLAY_NOTICE_Post("OTA UPDATING...", DISPLAY_NOTICE_WARNING, 0u);
     esp_http_client_config_t http = {};
     http.url = url.c_str(); http.timeout_ms = 30000; http.crt_bundle_attach = esp_crt_bundle_attach;
+    http.buffer_size = kOtaHttpBufferBytes;
     esp_https_ota_config_t ota = {};
     ota.http_config = &http;
     ota.bulk_flash_erase = false;
@@ -358,6 +370,9 @@ bool installVersion(const char *version)
             if (current_size > 0) image_size = static_cast<uint32_t>(current_size);
             if (bytes_read >= 0) {
                 setUpdateProgress(static_cast<uint32_t>(bytes_read), image_size);
+            }
+            if (err == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
+                vTaskDelay(pdMS_TO_TICKS(kOtaBlockPaceMs));
             }
         } while (err == ESP_ERR_HTTPS_OTA_IN_PROGRESS);
 

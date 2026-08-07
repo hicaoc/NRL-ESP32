@@ -2777,6 +2777,8 @@ static esp_err_t handleOtaInstall(httpd_req_t *req)
 // each chunk into esp_ota_write. Multipart uploads are no longer supported --
 // wifi_update_portal.js sends application/octet-stream; refusing multipart
 // keeps the body parser trivial. Stale clients see a 415.
+constexpr uint32_t kLocalOtaBlockPaceMs = 3u;
+
 static esp_err_t handleUpdate(httpd_req_t *req)
 {
     s_server.bind(req);
@@ -2831,6 +2833,10 @@ static esp_err_t handleUpdate(httpd_req_t *req)
             }
             total += static_cast<size_t>(got);
             consecutive_timeouts = 0u;
+            // The HTTP worker and flash writer otherwise remain runnable for
+            // the entire upload and can pin both cores near 100%. Pace each
+            // block so audio, UI and Wi-Fi maintenance retain idle headroom.
+            vTaskDelay(pdMS_TO_TICKS(kLocalOtaBlockPaceMs));
             continue;
         }
         if (got == HTTPD_SOCK_ERR_TIMEOUT) {
