@@ -59,6 +59,10 @@ CONFIG_SPIRAM_MODE_OCT=y
 # must not land in the scarce internal heap.
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=128
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+# Let Wi-Fi/lwIP place compatible dynamic buffers in PSRAM. DMA-only buffers
+# still come from the reserved internal heap, while sockets and protocol state
+# no longer compete with audio task stacks and peripheral allocations.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 # Tile loader worker keeps its 8 KB stack in PSRAM (blocks on HTTP for seconds).
 CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y

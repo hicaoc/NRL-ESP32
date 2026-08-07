@@ -11,7 +11,9 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 #include "esp_gmf_audio_dec.h"
 #include "esp_gmf_audio_helper.h"
@@ -70,6 +72,8 @@ static esp_gmf_pool_handle_t s_pool = nullptr;
 struct MediaDecoder {
     esp_gmf_pipeline_handle_t pipe;
     esp_gmf_task_handle_t task;
+    FILE *pcm_wav;
+    size_t pcm_wav_remaining;
     // PCM ring: the out-port release callback (pipeline task) produces,
     // MEDIA_DECODER_Decode (player task) consumes.
     uint8_t *ring;
@@ -97,6 +101,101 @@ struct MediaDecoder {
 };
 
 namespace {
+
+static bool read_exact(FILE *file, void *dst, size_t bytes)
+{
+    return file != nullptr && fread(dst, 1, bytes, file) == bytes;
+}
+
+static uint16_t read_le16(const uint8_t *p)
+{
+    return static_cast<uint16_t>(p[0]) |
+           (static_cast<uint16_t>(p[1]) << 8u);
+}
+
+static uint32_t read_le32(const uint8_t *p)
+{
+    return static_cast<uint32_t>(p[0]) |
+           (static_cast<uint32_t>(p[1]) << 8u) |
+           (static_cast<uint32_t>(p[2]) << 16u) |
+           (static_cast<uint32_t>(p[3]) << 24u);
+}
+
+// PCM WAV is already in the exact interleaved format consumed by the player.
+// Bypass esp_audio_simple_dec for local files: the ESP-GMF 1.0.0 WAV path
+// retains PSRAM in proportion to bytes read and consistently dies near 2.2 MB.
+static bool open_local_pcm_wav(const char *path, MediaDecoder *d)
+{
+    const char *ext = strrchr(path, '.');
+    if (ext == nullptr || strcasecmp(ext, ".wav") != 0) {
+        return false;
+    }
+    FILE *file = fopen(path, "rb");
+    if (file == nullptr) {
+        return false;
+    }
+
+    uint8_t riff[12];
+    if (!read_exact(file, riff, sizeof(riff)) ||
+        memcmp(riff, "RIFF", 4) != 0 || memcmp(riff + 8, "WAVE", 4) != 0) {
+        fclose(file);
+        return false;
+    }
+
+    bool have_fmt = false;
+    MediaDecoderInfo info = {};
+    while (true) {
+        uint8_t chunk[8];
+        if (!read_exact(file, chunk, sizeof(chunk))) {
+            break;
+        }
+        const uint32_t size = read_le32(chunk + 4);
+        if (memcmp(chunk, "fmt ", 4) == 0) {
+            uint8_t fmt[16];
+            if (size < sizeof(fmt) || !read_exact(file, fmt, sizeof(fmt))) {
+                break;
+            }
+            const uint16_t format = read_le16(fmt);
+            const uint16_t channels = read_le16(fmt + 2);
+            const uint32_t sample_rate = read_le32(fmt + 4);
+            const uint16_t bits = read_le16(fmt + 14);
+            if (format != 1u || sample_rate == 0u ||
+                (channels != 1u && channels != 2u) ||
+                (bits != 16u && !(bits == 24u && channels == 2u))) {
+                break;
+            }
+            info.sample_rate_hz = sample_rate;
+            info.channels = static_cast<uint8_t>(channels);
+            info.bits_per_sample = static_cast<uint8_t>(bits);
+            have_fmt = true;
+            const long skip = static_cast<long>(size - sizeof(fmt) + (size & 1u));
+            if (skip > 0 && fseek(file, skip, SEEK_CUR) != 0) {
+                break;
+            }
+        } else if (memcmp(chunk, "data", 4) == 0 && have_fmt) {
+            d->pcm_wav = file;
+            d->pcm_wav_remaining = size;
+            d->info = info;
+            d->info_valid = true;
+            d->opened = true;
+            d->started = true;
+            d->wait_full = true;
+            ESP_LOGI(TAG, "direct PCM WAV: %luHz %ubit %uch, %lu bytes",
+                     static_cast<unsigned long>(info.sample_rate_hz),
+                     static_cast<unsigned>(info.bits_per_sample),
+                     static_cast<unsigned>(info.channels),
+                     static_cast<unsigned long>(size));
+            return true;
+        } else {
+            const long skip = static_cast<long>(size + (size & 1u));
+            if (fseek(file, skip, SEEK_CUR) != 0) {
+                break;
+            }
+        }
+    }
+    fclose(file);
+    return false;
+}
 
 static bool decoder_stop_requested(const MediaDecoder *d)
 {
@@ -378,7 +477,16 @@ fail:
 static int mdec_acquire_write(void *handle, esp_gmf_payload_t *load,
                               uint32_t wanted_size, int block_ticks)
 {
-    return static_cast<int>(wanted_size);
+    (void)handle;
+    (void)load;
+    (void)wanted_size;
+    (void)block_ticks;
+    // GMF callbacks return a status, not the number of bytes acquired. A
+    // positive byte count prevents esp_gmf_port_acquire_out() from linking
+    // the output payload to the input payload's reference counter. The input
+    // block is then never released and WAV playback retains one block per
+    // decode call until PSRAM is exhausted at a repeatable file offset.
+    return ESP_GMF_IO_OK;
 }
 
 static int mdec_release_write(void *handle, esp_gmf_payload_t *load, int block_ticks)
@@ -459,9 +567,6 @@ extern "C" MediaDecoder *MEDIA_DECODER_Open(
     if (path == nullptr || (stop_requested != nullptr && *stop_requested)) {
         return nullptr;
     }
-    if (!register_default_decoders() || !gmf_pool_setup()) {
-        return nullptr;
-    }
     if (s_media_buffers_in_use) {
         ESP_LOGE(TAG, "only one media decoder can be active");
         return nullptr;
@@ -477,6 +582,14 @@ extern "C" MediaDecoder *MEDIA_DECODER_Open(
     d->ring = s_media_ring;
 
     const char *in_tag = select_in_io_tag(path);
+    if (strcmp(in_tag, "io_file") == 0 && open_local_pcm_wav(path, d)) {
+        ESP_LOGI(TAG, "decoding %s via direct PCM WAV", path);
+        return d;
+    }
+    if (!register_default_decoders() || !gmf_pool_setup()) {
+        MEDIA_DECODER_Close(d);
+        return nullptr;
+    }
     d->live = strcmp(in_tag, "io_radio") == 0 || strcmp(in_tag, "io_hls") == 0;
     d->source_is_smb = strcmp(in_tag, "io_smb") == 0;
     d->wait_full = !d->live;
@@ -576,6 +689,25 @@ extern "C" int MEDIA_DECODER_Decode(MediaDecoder *d, const uint8_t **pcm_out,
 {
     if (d == nullptr || pcm_out == nullptr || bytes_out == nullptr) {
         return -1;
+    }
+
+    if (d->pcm_wav != nullptr) {
+        if (decoder_stop_requested(d) || d->pcm_wav_remaining == 0u) {
+            return 0;
+        }
+        size_t wanted = d->pcm_wav_remaining < kDecodeChunkBytes
+                            ? d->pcm_wav_remaining : kDecodeChunkBytes;
+        const size_t frame_bytes =
+            static_cast<size_t>(d->info.channels) * d->info.bits_per_sample / 8u;
+        wanted -= wanted % frame_bytes;
+        const size_t got = fread(s_out_buffer, 1, wanted, d->pcm_wav);
+        d->pcm_wav_remaining -= got;
+        if (got == 0u) {
+            return ferror(d->pcm_wav) ? -1 : 0;
+        }
+        *pcm_out = s_out_buffer;
+        *bytes_out = got;
+        return 1;
     }
 
     if (!d->started) {
@@ -703,20 +835,28 @@ extern "C" void MEDIA_DECODER_Close(MediaDecoder *d)
         ESP_LOGI(TAG, "underrun summary: %u events, %u ms dry total",
                  d->underrun_events, d->underrun_total_ms);
     }
-    log_heap_state("close");
     // Wake a pipeline job blocked in the PCM release callback before stopping,
-    // then stop: the stop flow closes the source IO (its prev_close breaks a
-    // blocked network read) and waits for every job to exit.
+    // then stop. The GMF task must be deinitialized while the bound pipeline
+    // is still alive; GMF's own lifecycle is stop -> task_deinit -> destroy.
+    // Destroying the pipeline first leaves the task holding its jobs/ports and
+    // leaks their PSRAM payloads after a decode error.
     d->abort = true;
+    if (d->pcm_wav != nullptr) {
+        fclose(d->pcm_wav);
+        d->pcm_wav = nullptr;
+    }
     if (d->pipe != nullptr) {
         (void)esp_gmf_pipeline_stop(d->pipe);
-        (void)esp_gmf_pipeline_destroy(d->pipe);
-        d->pipe = nullptr;
     }
     if (d->task != nullptr) {
         (void)esp_gmf_task_deinit(d->task);
         d->task = nullptr;
     }
+    if (d->pipe != nullptr) {
+        (void)esp_gmf_pipeline_destroy(d->pipe);
+        d->pipe = nullptr;
+    }
     heap_caps_free(d);
     s_media_buffers_in_use = false;
+    log_heap_state("closed");
 }

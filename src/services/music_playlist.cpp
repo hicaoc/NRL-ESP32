@@ -488,6 +488,27 @@ static bool queue_play_index(const size_t index)
     return true;
 }
 
+static bool snapshot_queue(const PlaylistSession *session)
+{
+    if (session == nullptr || session->scanning || !session->entries_visible ||
+        session->paths == nullptr) {
+        return false;
+    }
+    size_t count = session->count.load();
+    if (count > kMaxTracks) {
+        count = kMaxTracks;
+    }
+    if (count == 0u) {
+        return false;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        memcpy(s_queue_paths[i], session->paths[i], kMaxPathLen);
+    }
+    s_queue_count = count;
+    s_current = -1;
+    return true;
+}
+
 static void on_track_end(void)
 {
     if (!s_auto_advance) {
@@ -652,15 +673,9 @@ extern "C" bool PLAYLIST_ClientPlayIndex(const PlaylistClient client, const size
     }
     // Snapshot the client's whole track listing into the playback queue so
     // next/prev/auto-advance stay stable however any client browses later.
-    size_t n = s->count.load();
-    if (n > kMaxTracks) {
-        n = kMaxTracks;
+    if (!snapshot_queue(s) || index >= s_queue_count) {
+        return false;
     }
-    for (size_t i = 0; i < n; ++i) {
-        memcpy(s_queue_paths[i], s->paths[i], kMaxPathLen);
-    }
-    s_queue_count = n;
-    s_current = -1;
     if (!MUSIC_PlayFile(s_queue_paths[index])) {
         return false;
     }
@@ -763,7 +778,8 @@ extern "C" bool PLAYLIST_PlayIndex(const size_t index)
 
 extern "C" bool PLAYLIST_Next(void)
 {
-    if (s_queue_count == 0u) {
+    if (s_queue_count == 0u &&
+        !snapshot_queue(&s_sessions[PLAYLIST_CLIENT_LEGACY])) {
         return false;
     }
     const size_t next = (s_current < 0) ? 0u : (static_cast<size_t>(s_current) + 1u) % s_queue_count;
@@ -772,7 +788,8 @@ extern "C" bool PLAYLIST_Next(void)
 
 extern "C" bool PLAYLIST_Prev(void)
 {
-    if (s_queue_count == 0u) {
+    if (s_queue_count == 0u &&
+        !snapshot_queue(&s_sessions[PLAYLIST_CLIENT_LEGACY])) {
         return false;
     }
     const size_t prev = (s_current <= 0) ? (s_queue_count - 1u) : (static_cast<size_t>(s_current) - 1u);

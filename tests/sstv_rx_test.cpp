@@ -35,7 +35,7 @@ void onDone(void *)
 
 } // namespace
 
-static bool feedRobot36(const float gain, const int noise_peak)
+static bool feedRobot36(const float gain, const int noise_peak, const int dc_offset = 0)
 {
     std::vector<uint16_t> image(SSTV_IMAGE_WIDTH * 240u, 0xFFFFu);
     SSTV_TxInit(SSTV_MODE_ROBOT36);
@@ -52,7 +52,10 @@ static bool feedRobot36(const float gain, const int noise_peak)
             s_noise_state = s_noise_state * 1664525u + 1013904223u;
             const int noise = noise_peak == 0 ? 0 :
                 static_cast<int>((s_noise_state >> 16u) % (noise_peak * 2 + 1)) - noise_peak;
-            const int sample = static_cast<int>(lroundf(static_cast<float>(chunk[i]) * gain)) + noise;
+            int sample = static_cast<int>(lroundf(static_cast<float>(chunk[i]) * gain)) +
+                         noise + dc_offset;
+            if (sample < -32768) sample = -32768;
+            if (sample > 32767) sample = 32767;
             chunk[i] = static_cast<int16_t>(sample);
         }
         SSTV_RX_Feed(chunk, SSTV_CHUNK_SAMPLES);
@@ -60,17 +63,18 @@ static bool feedRobot36(const float gain, const int noise_peak)
     return true;
 }
 
-static bool runRobot36(const float gain, const int noise_peak)
+static bool runRobot36(const float gain, const int noise_peak, const int dc_offset = 0)
 {
     s_vis_count = 0u;
     s_line_count = 0u;
     s_done_count = 0u;
     s_callback_error = false;
     SSTV_RX_Init(onVis, onLine, onDone, nullptr);
-    if (!feedRobot36(gain, noise_peak)) return false;
+    if (!feedRobot36(gain, noise_peak, dc_offset)) return false;
 
-    printf("gain=%.3f noise=%d: vis=%u lines=%u done=%u state=%u quality=%u\n",
-           static_cast<double>(gain), noise_peak, s_vis_count, s_line_count, s_done_count,
+    printf("gain=%.3f noise=%d dc=%d: vis=%u lines=%u done=%u state=%u quality=%u\n",
+           static_cast<double>(gain), noise_peak, dc_offset,
+           s_vis_count, s_line_count, s_done_count,
            static_cast<unsigned>(SSTV_RX_GetState()),
            static_cast<unsigned>(SSTV_RX_SignalQuality()));
     return !s_callback_error && s_vis_count == 1u && s_line_count == 240u &&
@@ -111,6 +115,11 @@ int main()
     ok = runRobot36(1.0f, 0) && ok;
     ok = runRobot36(0.05f, 100) && ok;
     ok = runRobot36(0.02f, 20) && ok;
+    ok = runRobot36(0.05f, 100, 13800) && ok;
+    // Some ES8311 boards have been observed at only 4..10 PCM counts peak.
+    // Preserve reception at that level while retaining the non-zero silence
+    // gate in the header detector.
+    ok = runRobot36(0.0005f, 0) && ok;
     ok = runSequentialRobot36() && ok;
     if (!ok) {
         fprintf(stderr, "sstv_rx_test: FAILED\n");
