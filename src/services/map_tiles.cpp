@@ -73,7 +73,14 @@ static const char *TAG = "MAP_TILES";
 
 namespace {
 
-constexpr uint8_t kMaxSlots = 16u;      // 16 x 128 KiB RGB565 in PSRAM
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+// BI4UMD has substantially less free PSRAM after LVGL/AEC startup. Four
+// tiles (512 KiB) leave room for TLS and the JPEG/PNG decoder's transient
+// buffers; successful tiles are still reused and reloaded on pan.
+constexpr uint8_t kMaxSlots = 4u;
+#else
+constexpr uint8_t kMaxSlots = 16u;
+#endif
 constexpr size_t kTilePx = MAP_TILES_TILE_PX;
 constexpr size_t kTileBytes = kTilePx * kTilePx * 2u;
 constexpr uint8_t kQueueDepth = 32u;
@@ -87,13 +94,23 @@ constexpr size_t kTaskStackBytes = 8192u;
 
 // Default raster source, {z}/{x}/{y} substituted. Compile-time constant for
 // now; an NVS-backed override is planned (tile packing scripts must match).
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+// The main .org endpoint is unreachable from some networks used by BI4UMD;
+// the German OSM tile mirror serves the same 256px raster format reliably.
+constexpr char kTileUrlTemplate[] = "https://tile.openstreetmap.de/{z}/{x}/{y}.png";
+#else
 constexpr char kTileUrlTemplate[] = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+#endif
 constexpr char kTileUserAgent[] = NRL_FIRMWARE_NAME "/" NRL_FIRMWARE_VERSION
                                   " (+https://github.com/hicaoc/NRL-ESP32)";
 // v2 deliberately ignores files written before policy-block responses were
 // detected; OSM returns those error images with HTTP 200, so older firmware
 // could have cached them as ordinary JPEG tiles.
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+constexpr char kTileCacheDir[] = "osm_tiles_v3";
+#else
 constexpr char kTileCacheDir[] = "osm_tiles_v2";
+#endif
 // Offline packs produced by scripts/fetch_tiles.py use the public, stable
 // layout documented in map_tiles.h. Keep them separate from the versioned
 // write-through cache so cache invalidation never hides user-provided maps.
@@ -369,7 +386,8 @@ bool httpDownload(const TileKey &key, uint8_t *buf, size_t cap, size_t *out_size
     (void)esp_http_client_set_header(http, "User-Agent", kTileUserAgent);
     (void)esp_http_client_set_header(http, "Accept", "image/png");
     bool ok = false;
-    if (esp_http_client_open(http, 0) == ESP_OK) {
+    const esp_err_t open_err = esp_http_client_open(http, 0);
+    if (open_err == ESP_OK) {
         (void)esp_http_client_fetch_headers(http);
         const int status = esp_http_client_get_status_code(http);
         // OSM intentionally serves policy error tiles as HTTP 200. Never
@@ -395,6 +413,8 @@ bool httpDownload(const TileKey &key, uint8_t *buf, size_t cap, size_t *out_size
             ESP_LOGW(TAG, "GET %s -> %d", url, status);
         }
         (void)esp_http_client_close(http);
+    } else {
+        ESP_LOGW(TAG, "open tile URL failed: %s err=%s", url, esp_err_to_name(open_err));
     }
     esp_http_client_cleanup(http);
     return ok;
