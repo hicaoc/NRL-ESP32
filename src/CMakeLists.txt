@@ -19,6 +19,11 @@ set(app_sources
     services/cw_service.cpp
     services/display_notice.cpp
     services/espnow_link.cpp
+    services/fmo_adpcm.cpp
+    services/fmo_cert_store.cpp
+    services/fmo_frame.cpp
+    services/fmo_protocol.cpp
+    services/fmo_service.cpp
     services/lan_discovery.cpp
     services/map_tiles.cpp
     services/music_player.cpp
@@ -26,17 +31,19 @@ set(app_sources
     services/nanny.cpp
     services/ota_service.cpp
     services/radio_favorites.cpp
+    services/server_list_store.cpp
     services/signaling_service.cpp
     services/smb_stream.cpp
     services/smb_vfs.cpp
     services/storage_service.cpp
     services/sstv_service.cpp
+    services/time_sync_service.cpp
     services/video_call.cpp
     app/driver/audio_passthrough.cpp
     app/driver/game_tetris.cpp
     app/driver/fonts/lv_font_cjk_16.c
     app/driver/fonts/lv_font_cjk_20.c
-    app/driver/eeprom.cpp
+    app/driver/fonts/lv_font_callsign_72.c
     app/driver/display.cpp
     app/driver/display_bi4umd.cpp
     app/driver/touch_bi4umd.cpp
@@ -101,6 +108,10 @@ set(app_priv_requires
     esp_http_client
     esp_https_ota
     esp_http_server
+    espressif__cjson
+    espressif__libsodium
+    espressif__mqtt
+    joltwallet__littlefs
     mbedtls
     mdc1200
     esp_lcd
@@ -136,7 +147,7 @@ list(APPEND app_priv_requires sahlberg__libsmb2 vfs)
 # USB flash drive and the S31-only assistant/display dependencies.
 if(IDF_TARGET STREQUAL "esp32s31")
     list(APPEND app_priv_requires usb espressif__usb_host_msc espressif__led_strip fatfs
-                                  espressif__esp_websocket_client espressif__cjson
+                                  espressif__esp_websocket_client
                                   esp_driver_jpeg)
 endif()
 

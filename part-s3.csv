@@ -1,0 +1,11 @@
+# Shared partition table for 16 MB ESP32-S3 boards.
+# Used by Gezipai, Gezipai 4G, BI4UMD, and BH4TDV.
+# Device settings use the 64 KiB NVS; the remaining tail is LittleFS.
+# Name,   Type, SubType, Offset,    Size,      Flags
+nvs,      data, nvs,     0x009000,  0x010000,
+otadata,  data, ota,     0x019000,  0x002000,
+app0,     app,  ota_0,   0x020000,  0x500000,
+app1,     app,  ota_1,   0x520000,  0x500000,
+# ESP-SR raw model image (the spiffs subtype does not mean it is mounted).
+model,    data, spiffs,  0xA20000,  0x4C0000,
+serverfs, data, littlefs,0xEE0000,  0x120000,

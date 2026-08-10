@@ -24,12 +24,23 @@ PAGES = [
     ),
 ]
 
-TEMPLATE_FILES = [
-    (
-        "wifi_config_portal_sections.html",
-        "wifi_config_portal_sections.generated.h",
-        "SRC_LIB_WIFI_CONFIG_PORTAL_SECTIONS_GENERATED_H",
-    ),
+# Each management page keeps its section templates in its own small file;
+# all of them are combined into one generated header with one C++ variable per
+# @template block (e.g. NETWORK_SECTION -> kWifiConfigPortalNetworkSectionTemplate).
+# Keep the shared form controls (sliders, number inputs, WiFi option) in
+# wifi_config_portal_sections.html.
+SECTION_HEADER = (
+    "wifi_config_portal_sections.generated.h",
+    "SRC_LIB_WIFI_CONFIG_PORTAL_SECTIONS_GENERATED_H",
+)
+SECTION_SOURCES = [
+    "wifi_config_portal_sections.html",
+    "wifi_config_portal_wifi.html",
+    "wifi_config_portal_nrl.html",
+    "wifi_config_portal_audio.html",
+    "wifi_config_portal_media.html",
+    "wifi_config_portal_aprs.html",
+    "wifi_config_portal_signaling.html",
 ]
 
 # Raw asset files served as standalone HTTP responses (text/css, text/javascript).
@@ -107,20 +118,21 @@ def generate_headers(*args, **kwargs):
         (lib_dir / dst_name).write_text(content, encoding="utf-8")
         print(f"[wifi_portal] generated {dst_name} from {src_name} and includes")
 
-    for src_name, dst_name, guard in TEMPLATE_FILES:
+    dst_name, guard = SECTION_HEADER
+    lines = [f"#ifndef {guard}", f"#define {guard}", ""]
+    for src_name in SECTION_SOURCES:
         html = read_html_with_includes(lib_dir / src_name)
         templates = template_pattern.findall(html)
         if not templates:
             raise RuntimeError(f"no @template blocks found in {src_name}")
-        lines = [f"#ifndef {guard}", f"#define {guard}", ""]
         for name, body in templates:
             value = body.strip()
             lines.append(f"static const char kWifiConfigPortal{name.title().replace('_', '')}Template[] = " + json.dumps(value) + ";")
-        lines.append("")
-        lines.append("#endif")
-        lines.append("")
-        (lib_dir / dst_name).write_text("\n".join(lines), encoding="utf-8")
-        print(f"[wifi_portal] generated {dst_name} from {src_name} templates")
+    lines.append("")
+    lines.append("#endif")
+    lines.append("")
+    (lib_dir / dst_name).write_text("\n".join(lines), encoding="utf-8")
+    print(f"[wifi_portal] generated {dst_name} from {len(SECTION_SOURCES)} section files")
 
     asset_dst, asset_guard = ASSET_OUTPUT
     asset_lines = [f"#ifndef {asset_guard}", f"#define {asset_guard}", ""]

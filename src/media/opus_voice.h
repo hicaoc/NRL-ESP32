@@ -25,6 +25,12 @@ typedef struct OpusVoiceDec OpusVoiceDec;
 // frame_ms must be one of 20/40/60. Samples per frame = 16 * frame_ms.
 OpusVoiceEnc *OPUS_VOICE_EncOpen(uint32_t frame_ms);
 
+// Variant used by FMO-V4 narrowband voice. sample_rate_hz is 8000 or 16000;
+// frame_ms is 20/40/60 and bitrate_bps must be positive.
+OpusVoiceEnc *OPUS_VOICE_EncOpenEx(uint32_t sample_rate_hz,
+                                   uint32_t frame_ms,
+                                   uint32_t bitrate_bps);
+
 // Encode exactly one frame (16 * frame_ms mono samples). Returns encoded
 // byte count, or < 0 on error.
 int OPUS_VOICE_EncProcess(OpusVoiceEnc *enc, const int16_t *pcm, size_t samples,
@@ -33,6 +39,9 @@ int OPUS_VOICE_EncProcess(OpusVoiceEnc *enc, const int16_t *pcm, size_t samples,
 void OPUS_VOICE_EncClose(OpusVoiceEnc *enc);
 
 OpusVoiceDec *OPUS_VOICE_DecOpen(uint32_t frame_ms);
+
+OpusVoiceDec *OPUS_VOICE_DecOpenEx(uint32_t sample_rate_hz,
+                                   uint32_t frame_ms);
 
 // Decode one Opus packet. Returns decoded sample count (mono 16 kHz), or
 // < 0 on error.

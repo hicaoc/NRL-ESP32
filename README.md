@@ -100,6 +100,16 @@ python scripts/publish_ota_mcp.py --version 0.8.33 --verify-only
   - 收到服务器下行语音时，拉起 PTT 输出，并通过 ES8311 或 ES8389 播放到电台或板载扬声器。
   - 默认使用 G.711 A-law 8 kHz；可切换为 Opus 16 kHz 宽带语音，接收端可自动识别两种编码。
 
+- FMO-V4 网络通联（所有板卡）
+  - 兼容 Open FMO 的 MQTT/SAS 认证、Ed25519 身份证书链、`FMO/RAW` 语音帧，以及 Opus 8 kHz/40 ms 和 IMA-ADPCM 下行解码。
+  - 通过 APRS-IS 自动发现 FMO 中继服务器；FMO 下行复用现有扬声器/PTT，发射可在 NRL 与 FMO 间显式切换，避免麦克风同时发往两个网络。
+  - NRL 与 FMO 的完整服务器列表统一缓存在 Flash 末尾的 LittleFS 分区（ESP32-S3 为 1152 KiB，ESP32-S31 为 896 KiB，旧 4 MB 布局为 640 KiB）；FMO 最多保存 256 台服务器，NRL 最多接受 512 台且单份 JSON 不超过 64 KiB。刷入新分区表后，设备会在首次启动阶段自动格式化空白文件系统，无需用户手工初始化。
+  - 运行中的 FMO 服务器数组以及 NRL/FMO 列表读写缓冲均放在 PSRAM；PSRAM 分配失败时保留现有列表并返回错误，不回退占用内部 SRAM。
+  - 在配置门户打开 `/fmo`，依次上传同一身份的 `userCert`、`intermediateCert`、`deviceKey` JSON，等待服务器列表出现后选择服务器并启用连接。证书与服务器列表保存在同一 LittleFS，网页不提供私钥读回接口。
+  - FMO SAS 密码带有实时时间戳；设备需先完成 NTP 校时。页面中的“可用”身份状态和“已连接”状态均正常后，才会开始通联。
+  - 物理 PTT 目标统一支持 `NRL`、`ESP-NOW`、`FMO` 三档，可从格子派/BI4UMD 菜单、Web“PTT 模式”或 `AT+PTT_MODE=NRL|ESPNOW|FMO` 切换并保存到 NVS。
+  - S31 触屏主页在 FMO 发射启用后显示上下两个独立按钮（`NRL PTT` / `FMO PTT`）；FMO 来电呼号使用琥珀色，并在呼号上方显示来源、右上角显示实际语音编码。格子派和 BI4UMD 来电标题同样显示来源与编码。
+
 - WiFi 和服务器配置门户
   - 设备启动后提供配置 AP 和 Web 页面。
   - 默认配置入口 IP 为 `192.168.4.1`。
@@ -153,7 +163,7 @@ python scripts/publish_ota_mcp.py --version 0.8.33 --verify-only
   - 常用命令包括 `AT+CH`、`AT+D_IP`、`AT+D_PORT`、`AT+CALL`、`AT+SSID`、`AT+PTT_TIMEOUT`、`AT+TAIL_SUPPRESS`、`AT+MIC_GAIN`、`AT+MIC_PCM_GAIN`（`0.1`–`5.0`）、`AT+VOLUME`、`AT+HP_DRIVE`、`AT+SCI`、`AT+REBOOT`。
 
 - 参数持久化
-  - 电台配置保存到共享 Flash/EEPROM 区域。
+  - Wi-Fi、NRL、音频、串口及板卡运行参数以带版本和 CRC 的 Blob 保存到 64 KiB NVS。
   - 首次启动会写入默认配置，之后从持久化配置恢复。
 
 ## 默认配置

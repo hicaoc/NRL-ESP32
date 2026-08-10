@@ -47,7 +47,7 @@ static const uint8_t kBroadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 static volatile bool s_enabled = false;
 static volatile bool s_rx_enabled = true;     // RX switch; defaults ON
-static volatile uint8_t s_ptt_mode = 0;       // 0 = NRL, 1 = ESP-NOW
+static volatile uint8_t s_ptt_mode = 0;       // 0 = NRL, 1 = ESP-NOW, 2 = FMO
 static volatile uint8_t s_tx_codec = 0;       // 0 = G.711, 1 = Opus; independent of NRL
 static bool s_espnow_inited = false;
 static uint8_t s_tx_packet[kPacketBytes];
@@ -86,7 +86,7 @@ static void save_ptt_mode(const uint8_t mode)
 {
     nvs_handle_t nvs;
     if (nvs_open(kNvsNamespace, NVS_READWRITE, &nvs) == ESP_OK) {
-        (void)nvs_set_u8(nvs, "ptt", mode <= 1u ? mode : 0u);
+        (void)nvs_set_u8(nvs, "ptt", mode <= 2u ? mode : 0u);
         (void)nvs_commit(nvs);
         nvs_close(nvs);
     }
@@ -100,7 +100,7 @@ static uint8_t load_ptt_mode(void)
         (void)nvs_get_u8(nvs, "ptt", &mode);
         nvs_close(nvs);
     }
-    return mode <= 1u ? mode : 0u;
+    return mode <= 2u ? mode : 0u;
 }
 
 static void save_rx_enabled(const bool enabled)
@@ -523,15 +523,10 @@ extern "C" bool ESPNOW_LINK_SetEnabled(const bool enabled)
         s_ptt_held = false;
         reset_tx_accumulators();
     }
-#if NRL_BOARD != NRL_BOARD_S31_KORVO && NRL_BOARD != NRL_BOARD_S31_FUNCTION_COREBOARD
-    // Boards without the dedicated touch ESP-NOW PTT (gezipai's physical PTT
-    // button, bh4tdv's radio squelch) have a single keying source, so enabling
-    // the intercom re-targets it to ESP-NOW (which also mutes the NRL uplink
-    // via uplinkGateOpen) and disabling restores normal NRL keying. The S31
-    // touch UI has separate NRL and ESP-NOW PTT buttons and manages the mode
-    // itself. AT+PTT_MODE / the web portal can still override afterwards.
-    ESPNOW_LINK_SetPttMode(enabled ? 1u : 0u);
-#endif
+    // Link enable and physical PTT target are independent settings. Disarming
+    // the link only falls back when the button currently targets ESP-NOW;
+    // enabling it never steals an existing NRL or FMO selection.
+    if (!enabled && s_ptt_mode == 1u) ESPNOW_LINK_SetPttMode(0u);
     save_enabled(enabled);
     CONFIG_NOTIFY_Bump();
     return true;
@@ -581,8 +576,8 @@ extern "C" uint8_t ESPNOW_LINK_GetTxCodec(void)
 
 extern "C" void ESPNOW_LINK_SetPttMode(const uint8_t mode)
 {
-    s_ptt_mode = mode <= 1u ? mode : 0u;
-    if (s_ptt_mode == 0u) {
+    s_ptt_mode = mode <= 2u ? mode : 0u;
+    if (s_ptt_mode != 1u) {
         s_ptt_held = false;
     }
     save_ptt_mode(s_ptt_mode);

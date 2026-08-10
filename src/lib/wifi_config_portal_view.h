@@ -25,6 +25,7 @@ struct WifiConfigPortalPageState {
     bool media_active;
     bool aprs_active;
     bool signaling_active;
+    bool home_page;
     std::string footer;
 };
 
@@ -40,6 +41,8 @@ std::string WifiConfigPortalView_BuildMediaSections(void);
 std::string WifiConfigPortalView_BuildAprsSections(void);
 // MDC1200/DTMF decode and voice-tail transmit routing.
 std::string WifiConfigPortalView_BuildSignalingSections(void);
+// Simple navigation home: one button per management page.
+std::string WifiConfigPortalView_BuildHomeCards(void);
 std::string WifiConfigPortalView_BuildConfigPage(const ExternalRadioConfig *config,
                                                  const WifiConfigPortalPageState &state,
                                                  const std::string &form_sections);

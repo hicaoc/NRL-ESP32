@@ -236,7 +236,7 @@ CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
 
 # --- Partition table: 7 MB app slots (S31 only) ---
 # The media stack (MP3/AAC/FLAC decoder libs + esp-sr + LVGL + FreeType)
-# outgrew part-gezipai.csv's 5 MB app partitions; part-s31.csv widens them
+# outgrew part-s3.csv's 5 MB app partitions; part-s31.csv widens them
 # to 7 MB and shrinks the oversized model partition (srmodels.bin ~330 KB).
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="part-s31.csv"

@@ -583,3 +583,12 @@ extern "C" void MEDIA_META_ReleaseCover(MediaTrackInfo *info)
     info->cover_size = 0;
     info->cover_type = MEDIA_COVER_NONE;
 }
+
+extern "C" void MEDIA_TEXT_8BitToUtf8(const uint8_t *data, const size_t bytes,
+                                        char *out, const size_t capacity)
+{
+    if (out == nullptr || capacity == 0u) return;
+    out[0] = '\0';
+    if (data == nullptr || bytes == 0u) return;
+    eightbit_text_to_utf8(data, bytes, out, capacity);
+}

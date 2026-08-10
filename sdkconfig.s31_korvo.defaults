@@ -266,7 +266,7 @@ CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
 
 # --- Partition table: 7 MB app slots (S31 only) ---
 # The media stack (MP3/AAC/FLAC decoder libs + esp-sr + LVGL + FreeType)
-# outgrew part-gezipai.csv's 5 MB app partitions; part-s31.csv widens them
+# outgrew part-s3.csv's 5 MB app partitions; part-s31.csv widens them
 # to 7 MB and shrinks the oversized model partition (srmodels.bin ~330 KB).
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="part-s31.csv"
@@ -308,6 +308,7 @@ CONFIG_LV_FONT_MONTSERRAT_16=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_MONTSERRAT_28=y
 CONFIG_LV_FONT_MONTSERRAT_48=y
+CONFIG_LV_USE_FONT_COMPRESSED=y
 CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
 CONFIG_LV_BUILD_EXAMPLES=n
 CONFIG_LV_BUILD_DEMOS=n
@@ -341,6 +342,7 @@ CONFIG_LWIP_MAX_SOCKETS=16
 # many MB/s -- far above what FLAC playback needs.
 CONFIG_LWIP_TCP_WND_DEFAULT=8192
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
-# Per-task heap census (AT+MEM): tags every allocation with its owning
-# task so 'who ate the internal DRAM' is answerable without a debug build.
-CONFIG_HEAP_TASK_TRACKING=y
+# ESP32-S31 currently faults during early scheduler startup when heap task
+# tracking releases its lazily-created mutex. Keep the aggregate heap stats
+# used by AT+MEM, but disable the optional per-task allocation census.
+# CONFIG_HEAP_TASK_TRACKING is not set

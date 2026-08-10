@@ -46,6 +46,11 @@ void MEDIA_META_Free(MediaTrackInfo *info);
 // 512 KB of PSRAM) for the rest of the track is pure waste.
 void MEDIA_META_ReleaseCover(MediaTrackInfo *info);
 
+// Converts unknown 8-bit text to UTF-8, accepting ASCII/UTF-8 first and GBK
+// second. Used by legacy radio/network metadata as well as media tags.
+void MEDIA_TEXT_8BitToUtf8(const uint8_t *data, size_t bytes,
+                           char *out, size_t capacity);
+
 #ifdef __cplusplus
 }
 #endif

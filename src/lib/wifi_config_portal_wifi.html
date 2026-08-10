@@ -1,0 +1,41 @@
+<!-- @template NETWORK_SECTION -->
+<section class="panel">
+  <div class="section-head">
+    <h2 data-i18n="network">Network</h2>
+    <span class="hint" id="scan-status" data-i18n="scanIdle">Click Scan to find nearby WiFi networks.</span>
+  </div>
+  <div class="grid">
+    <form class="item-form span-2" method="post" action="/save_wifi" data-reload-on-save="1">
+      <div class="subgrid">
+        <div>
+          <label data-i18n="wifiSsid">WiFi SSID</label>
+          <div class="row">
+            <select id="wifi-ssid-select" name="wifi_ssid">
+              <option value="" data-i18n="selectWifi">Select detected WiFi...</option>
+              {{WIFI_OPTIONS}}
+            </select>
+            <button class="secondary btn-small icon-btn" type="button" onclick="scanWifi()" data-i18n-title="scan" title="Scan" aria-label="Scan">&#x21BB;</button>
+          </div>
+        </div>
+        <div><label data-i18n="wifiPassword">WiFi Password</label><input name="wifi_password" value="{{WIFI_PASSWORD}}"></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="submit" data-i18n="wifiAddOrUpdate">Add / Update</button></div>
+    </form>
+    <div class="span-2">
+      <label data-i18n="wifiSavedNetworks">Saved WiFi Networks</label>
+      <div class="hint" data-i18n="wifiSavedHint">Up to 5 networks; the displayed order is the connection priority.</div>
+      <div class="grid">{{WIFI_SAVED_PROFILES}}</div>
+    </div>
+    <form class="item-form span-2" method="post" action="/save_wifi">
+      <div class="subgrid">
+        <div class="span-2"><label data-i18n="dhcp">DHCP</label><input type="hidden" name="wifi_dhcp_present" value="1"><label class="hint"><input id="wifi-dhcp-enabled" type="checkbox" name="wifi_dhcp_enabled" value="1" onchange="syncDhcpFields()" {{DHCP_CHECKED}}><span data-i18n="useDhcp">Use DHCP for station IP</span></label></div>
+        <div><label data-i18n="wifiIp">WiFi IP</label><input class="wifi-static-field" name="wifi_ip" value="{{WIFI_IP}}"></div>
+        <div><label data-i18n="wifiMask">WiFi Mask</label><input class="wifi-static-field" name="wifi_mask" value="{{WIFI_MASK}}"></div>
+        <div><label data-i18n="wifiGateway">WiFi Gateway</label><input class="wifi-static-field" name="wifi_gateway" value="{{WIFI_GATEWAY}}"></div>
+        <div><label data-i18n="wifiDns">WiFi DNS</label><input class="wifi-static-field" name="wifi_dns" value="{{WIFI_DNS}}"></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div>
+    </form>
+  </div>
+</section>
+<!-- @endtemplate -->

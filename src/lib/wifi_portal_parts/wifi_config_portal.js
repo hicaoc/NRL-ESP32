@@ -5,6 +5,10 @@ const translations = {
         nrlConfig: 'NRL Config',
         audioSettings: 'Audio Settings',
         firmwareUpdate: 'Firmware Update',
+        homeTitle: 'Configuration',
+        homeIntro: 'Choose the settings page to open.',
+        backHome: 'Back to home',
+        fmoConfig: 'FMO',
         configAp: 'Config AP',
         stationIp: 'Station IP',
         bootNotice: 'Hold BOOT for 5 seconds after startup to reset WiFi settings.',
@@ -46,8 +50,10 @@ const translations = {
         server: 'Server',
         serverHost: 'Server Host / IP',
         serverPort: 'Server Port',
+        currentNrlServer: 'Current NRL server',
         serverListLoading: 'Loading server list...',
         serverListLoaded: 'Loaded {count} servers',
+        serverListCached: 'Loaded {count} cached servers from flash',
         serverListFailed: 'Could not load the server list; the current server is retained.',
         saveWifi: 'Save WiFi Config',
         radio: 'Radio',
@@ -326,6 +332,7 @@ const translations = {
         pttMode: 'PTT Mode',
         pttModeNrl: 'NRL network PTT',
         pttModeEspnow: 'ESP-NOW PTT',
+        pttModeFmo: 'FMO PTT',
         aiAssistant: 'AI Assistant (xiaozhi)',
         aiUrl: 'Server URL (ws:// or wss://)',
         aiToken: 'Access Token',
@@ -337,6 +344,10 @@ const translations = {
         nrlConfig: 'NRL配置',
         audioSettings: '音频设置',
         firmwareUpdate: '固件升级',
+        homeTitle: '配置导航',
+        homeIntro: '选择要打开的管理页面。',
+        backHome: '返回导航首页',
+        fmoConfig: 'FMO',
         configAp: '配置热点',
         stationIp: '联网地址',
         bootNotice: '开机后按住 BOOT 5 秒可重置 WiFi 和服务器设置。',
@@ -378,8 +389,10 @@ const translations = {
         server: '服务器',
         serverHost: '服务器地址 / IP',
         serverPort: '服务器端口',
+        currentNrlServer: '当前 NRL 服务器',
         serverListLoading: '正在加载服务器列表...',
         serverListLoaded: '已加载 {count} 个服务器',
+        serverListCached: '已从 Flash 加载 {count} 个缓存服务器',
         serverListFailed: '服务器列表加载失败，已保留当前服务器。',
         saveWifi: '保存WiFi配置',
         radio: '电台',
@@ -663,6 +676,7 @@ const translations = {
         pttMode: 'PTT 模式',
         pttModeNrl: 'NRL 网络 PTT',
         pttModeEspnow: 'ESP-NOW PTT',
+        pttModeFmo: 'FMO PTT',
         aiAssistant: 'AI 助手 (小智)',
         aiUrl: '服务器地址 (ws:// 或 wss://)',
         aiToken: '访问令牌 (Token)',
@@ -1212,32 +1226,27 @@ const translations = {
       if (!select || !port || select.selectedIndex < 0) return;
       const selected = select.options[select.selectedIndex];
       if (selected && selected.dataset.port) port.value = selected.dataset.port;
+      updateNrlServerCurrent();
     }
 
-    async function loadNrlServers() {
+    function updateNrlServerCurrent() {
       const select = document.getElementById('nrl-server-select');
-      const port = document.getElementById('nrl-server-port');
-      if (!select || !port) return;
-      const currentHost = select.value;
-      const currentPort = port.value;
-      select.addEventListener('change', syncNrlServerPort);
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 8000);
-      try {
-        const response = await fetch('https://www.nrlptt.com/api/platform-servers', {
-          cache: 'no-store',
-          credentials: 'omit',
-          referrerPolicy: 'no-referrer',
-          signal: controller.signal,
-        });
-        if (!response.ok) throw new Error('HTTP ' + response.status);
-        const payload = await response.json();
-        const servers = (payload && Array.isArray(payload.data) ? payload.data : [])
+      const current = document.getElementById('nrl-server-current');
+      if (!select || !current || select.selectedIndex < 0) return;
+      const selected = select.options[select.selectedIndex];
+      current.textContent = t('currentNrlServer') + ': ' +
+                            (selected ? selected.textContent : '---');
+    }
+
+    function renderNrlServers(payload, currentHost, currentPort) {
+        const select = document.getElementById('nrl-server-select');
+        const servers = (payload && payload.data && Array.isArray(payload.data.items)
+          ? payload.data.items
+          : payload && Array.isArray(payload.data) ? payload.data : [])
           .filter((item) => item && !item.hidden && platformServerHost(item.host) &&
                             Number(item.port) > 0 && Number(item.port) <= 65535)
           .sort((a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0));
         if (!servers.length) throw new Error('empty server list');
-
         select.innerHTML = '';
         let matched = false;
         servers.forEach((server) => {
@@ -1263,9 +1272,55 @@ const translations = {
           option.selected = true;
           select.insertBefore(option, select.firstChild);
         }
-        setServerListStatus('serverListLoaded', servers.length);
+        updateNrlServerCurrent();
+        return servers.length;
+    }
+
+    async function loadNrlServers() {
+      const select = document.getElementById('nrl-server-select');
+      const port = document.getElementById('nrl-server-port');
+      if (!select || !port) return;
+      const currentHost = select.value;
+      const currentPort = port.value;
+      select.addEventListener('change', () => {
+        syncNrlServerPort();
+        if (select.form) submitFormFromButton(select.form);
+      });
+      const current = document.getElementById('nrl-server-current');
+      if (current) {
+        const openPicker = () => {
+          if (typeof select.showPicker === 'function') select.showPicker();
+          else select.focus();
+        };
+        current.addEventListener('click', openPicker);
+        current.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' || event.key === ' ') openPicker();
+        });
+      }
+      let cachedCount = 0;
+      try {
+        const cached = await fetch('/nrl/servers', {cache: 'no-store'});
+        if (cached.ok) {
+          cachedCount = renderNrlServers(await cached.json(), currentHost, currentPort);
+          setServerListStatus('serverListCached', cachedCount);
+        }
+      } catch (_) {}
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 12000);
+      try {
+        // The platform endpoint does not expose browser CORS headers. Ask the
+        // board to perform the HTTPS request against its current NRL hostname;
+        // the response is atomically cached in LittleFS for LCD/Web reuse.
+        const response = await fetch('/nrl/servers/refresh', {
+          cache: 'no-store', credentials: 'same-origin', referrerPolicy: 'no-referrer',
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const payload = await response.json();
+        const count = renderNrlServers(payload, currentHost, currentPort);
+        setServerListStatus('serverListLoaded', count);
       } catch (error) {
-        setServerListStatus('serverListFailed', 0);
+        if (!cachedCount) setServerListStatus('serverListFailed', 0);
       } finally {
         clearTimeout(timer);
       }
@@ -1312,7 +1367,10 @@ const translations = {
       });
       document.querySelectorAll('input[name="lang"]').forEach((r) => {
         r.addEventListener('change', function () {
-          if (this.checked) applyLanguage(this.value);
+          if (this.checked) {
+            applyLanguage(this.value);
+            updateNrlServerCurrent();
+          }
         });
       });
     }

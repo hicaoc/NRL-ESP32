@@ -2,7 +2,6 @@
 
 #include "board_pins.h"
 #include "audio_passthrough.h"
-#include "eeprom.h"
 #include "es7210.h"
 #include "es8311.h"
 #include "es8389.h"
@@ -19,8 +18,11 @@
 
 #include <driver/gpio.h>
 #include <esp_log.h>
+#include <esp_rom_crc.h>
+#include <nvs.h>
 
 #include <ctype.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -28,9 +30,10 @@ static const char *TAG = "IO";
 
 namespace {
 
-constexpr uint32_t kConfigAddress = 0x2C00U;
+constexpr const char *kConfigNvsNamespace = "device_config";
+constexpr const char *kConfigNvsKey = "config";
 constexpr uint32_t kConfigMagic = 0x58455655U;
-constexpr uint8_t kConfigVersion = 6U;
+constexpr uint8_t kConfigVersion = 7U;
 constexpr uint8_t kLegacyConfigVersion1 = 1U;
 constexpr uint8_t kLegacyConfigVersion2 = 2U;
 constexpr uint8_t kLegacyConfigVersion3 = 3U;
@@ -117,11 +120,11 @@ struct PersistedExternalRadioConfig {
     uint32_t adceq_b2;
     uint8_t reserved4[4];
     ExternalWifiProfile wifi_extra[EXTERNAL_RADIO_MAX_WIFI_PROFILES - 1U];
+    uint32_t crc32;
 } __attribute__((packed));
 
-static_assert((sizeof(PersistedExternalRadioConfig) % 8U) == 0U, "config must stay 8-byte aligned");
-static_assert(sizeof(PersistedExternalRadioConfig) <= 0x400U,
-              "config must fit its reserved 0x2C00..0x2FFF EEPROM window");
+static_assert(sizeof(PersistedExternalRadioConfig) <= 1024U,
+              "device configuration must remain a small NVS blob");
 
 ExternalRadioConfig s_config = {};
 bool s_loaded = false;
@@ -635,15 +638,19 @@ static void normalizeConfig(void)
 static bool loadPersistedConfig(void)
 {
     PersistedExternalRadioConfig persisted = {};
-    EEPROM_ReadBufferLarge(kConfigAddress, &persisted, sizeof(persisted));
-
-    if (persisted.magic != kConfigMagic ||
-        (persisted.version != kConfigVersion &&
-         persisted.version != kLegacyConfigVersion1 &&
-         persisted.version != kLegacyConfigVersion2 &&
-         persisted.version != kLegacyConfigVersion3 &&
-         persisted.version != kLegacyConfigVersion4 &&
-         persisted.version != kLegacyConfigVersion5)) {
+    nvs_handle_t nvs = 0;
+    if (nvs_open(kConfigNvsNamespace, NVS_READONLY, &nvs) != ESP_OK)
+        return false;
+    size_t size = sizeof(persisted);
+    const esp_err_t read_error = nvs_get_blob(
+        nvs, kConfigNvsKey, &persisted, &size);
+    nvs_close(nvs);
+    const uint32_t expected_crc = esp_rom_crc32_le(
+        0u, reinterpret_cast<const uint8_t *>(&persisted),
+        offsetof(PersistedExternalRadioConfig, crc32));
+    if (read_error != ESP_OK || size != sizeof(persisted) ||
+        persisted.magic != kConfigMagic ||
+        persisted.version != kConfigVersion || persisted.crc32 != expected_crc) {
         return false;
     }
 
@@ -871,12 +878,23 @@ static bool savePersistedConfig(void)
     }
     copyBounded(persisted.server_host, sizeof(persisted.server_host), s_config.server_host);
     copyBounded(persisted.callsign, sizeof(persisted.callsign), s_config.callsign);
+    persisted.crc32 = esp_rom_crc32_le(
+        0u, reinterpret_cast<const uint8_t *>(&persisted),
+        offsetof(PersistedExternalRadioConfig, crc32));
 
-    EEPROM_WriteBufferLarge(kConfigAddress, &persisted, sizeof(persisted));
-    PersistedExternalRadioConfig verify = {};
-    EEPROM_ReadBufferLarge(kConfigAddress, &verify, sizeof(verify));
-    if (memcmp(&verify, &persisted, sizeof(persisted)) != 0) {
-        ESP_LOGE(TAG, "config EEPROM verify failed");
+    nvs_handle_t nvs = 0;
+    if (nvs_open(kConfigNvsNamespace, NVS_READWRITE, &nvs) != ESP_OK) {
+        ESP_LOGE(TAG, "device config NVS open failed");
+        return false;
+    }
+    const esp_err_t write_error = nvs_set_blob(
+        nvs, kConfigNvsKey, &persisted, sizeof(persisted));
+    const esp_err_t commit_error = write_error == ESP_OK ? nvs_commit(nvs)
+                                                         : write_error;
+    nvs_close(nvs);
+    if (commit_error != ESP_OK) {
+        ESP_LOGE(TAG, "device config NVS write failed: %s",
+                 esp_err_to_name(commit_error));
         return false;
     }
     CONFIG_NOTIFY_Bump(); // let the LCD UI refresh pages showing this config

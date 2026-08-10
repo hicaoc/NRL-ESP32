@@ -1,0 +1,62 @@
+<!-- @template AEC_SECTION -->
+<div class="group-label span-2" data-i18n="{{AFE_GROUP_I18N}}">{{AFE_GROUP_LABEL}}</div><form class="item-form" method="post" action="/save_nrl"><label data-i18n="micHpfFilter">哑音过滤</label><input type="hidden" name="mic_hpf_enabled_present" value="1"><label class="hint"><input type="checkbox" name="mic_hpf_enabled" value="1" onchange="submitSwitch(this)" {{MIC_HPF_CHECKED}}><span data-i18n="micHpfFilterText">软件高通滤波 (~200Hz)</span></label></form><form class="item-form" method="post" action="/save_nrl"><label data-i18n="aiNoiseLabel">AI Noise Reduction</label><input type="hidden" name="ai_noise_present" value="1"><label class="hint"><input type="checkbox" name="ai_noise_enabled" value="1" onchange="submitSwitch(this)" {{AI_NOISE_CHECKED}}><span data-i18n="aiNoiseText">Enable esp-sr NSNET2 noise suppression on mic uplink</span></label></form>{{AEC_TOGGLE}}
+<!-- @endtemplate -->
+
+<!-- @template AEC_TOGGLE -->
+<form class="item-form" method="post" action="/save_nrl"><label data-i18n="aecLabel">Acoustic Echo Cancellation</label><input type="hidden" name="aec_present" value="1"><label class="hint"><input type="checkbox" name="aec_enabled" value="1" onchange="submitSwitch(this)" {{AEC_CHECKED}}><span data-i18n="aecText">Enable esp-sr echo cancellation on mic uplink</span></label></form><form class="item-form" method="post" action="/save_nrl"><label data-i18n="aecReferenceSource">AEC Reference Source</label><select name="aec_reference_source" onchange="submitSwitch(this)"><option value="0"{{AEC_REF_NETWORK_SELECTED}} data-i18n="aecRefNetwork">Network playback</option><option value="1"{{AEC_REF_MIC_SELECTED}} data-i18n="aecRefMic">Second microphone</option></select></form>
+<!-- @endtemplate -->
+
+<!-- @template AUDIO_SECTIONS -->
+<section class="panel">
+  <div class="section-head">
+    <h2 data-i18n="audio">Audio</h2>
+    <div class="audio-actions">
+      <form class="inline-form" method="post" action="/save_nrl"><input type="hidden" name="audio_reset_defaults" value="1"><button class="secondary btn-small" type="submit" data-i18n="audioResetDefaults">恢复默认值</button></form>
+      <label class="switch-label"{{AUDIO_EXPERT_TOGGLE_HIDDEN}}><input id="audio-expert-mode" type="checkbox" onchange="toggleAudioExpert(this.checked)"><span data-i18n="audioExpertMode">专家模式</span></label>
+    </div>
+  </div>
+  <div class="grid">
+    <div class="subpanel"><h3 data-i18n="volume">Volume</h3><div class="subgrid">{{MIC_VOLUME_SLIDER}}{{MIC_PCM_GAIN_INPUT}}{{LINE_OUT_VOLUME_SLIDER}}</div></div>
+    <div class="subpanel"><h3 data-i18n="audioProcessing">Audio Processing</h3><div class="subgrid">
+      {{AEC_SECTION}}
+    </div></div>
+    {{ES8311_ADC_SECTION}}
+    {{ES8311_DAC_SECTION}}
+  </div>
+</section>
+<!-- @endtemplate -->
+
+<!-- @template ES8311_DAC_SECTION -->
+    <div class="subpanel" data-audio-expert="1" hidden><h3 data-i18n="dac">DAC</h3><div class="subgrid">
+      <div class="group-label span-2" data-i18n="output">Output</div>
+      <form class="item-form span-2" method="post" action="/save_nrl"><label data-i18n="hpDrive">ES8311 HP Drive</label><input type="hidden" name="hp_drive_present" value="1"><label class="hint"><input type="checkbox" name="hp_drive_enabled" value="1" onchange="submitSwitch(this)" {{HP_DRIVE_CHECKED}}><span data-i18n="hpDriveText">Enable headphone output drive (REG13 HPSW)</span></label></form>
+      <div class="group-label span-2" data-i18n="drc">DRC</div>
+      <form class="item-form span-2" method="post" action="/save_nrl"><label data-i18n="drcEnable">ES8311 DRC Enable</label><input type="hidden" name="drc_present" value="1"><label class="hint"><input type="checkbox" name="drc_enabled" value="1" onchange="submitSwitch(this)" {{DRC_CHECKED}}><span data-i18n="drcEnableText">Enable DAC DRC (REG34 bit7)</span></label></form>
+      {{DRC_WINSIZE_SLIDER}}{{DRC_MAXLEVEL_SLIDER}}{{DRC_MINLEVEL_SLIDER}}{{DAC_RAMPRATE_SLIDER}}
+      <div class="group-label span-2" data-i18n="eq">EQ</div>
+      <form class="item-form" method="post" action="/save_nrl"><label data-i18n="dacEqBypass">DAC EQ Bypass</label><input type="hidden" name="dac_eq_bypass_present" value="1"><label class="hint"><input type="checkbox" name="dac_eq_bypass" value="1" onchange="submitSwitch(this)" {{DAC_EQ_BYPASS_CHECKED}}><span data-i18n="dacEqBypassText">Bypass DAC EQ (REG37 bit3)</span></label></form>
+      <div class="span-2 eq-panel"><div class="section-head"><h2 data-i18n="dacEqCoefficients">DAC EQ Coefficients</h2><span class="hint" data-i18n="dacEqCoefficientsText">30-bit unsigned register values for B0/B1/A1</span></div>{{DACEQ_B0_SLIDER}}{{DACEQ_B1_SLIDER}}{{DACEQ_A1_SLIDER}}</div>
+    </div></div>
+<!-- @endtemplate -->
+
+<!-- @template ES8311_ADC_SECTION -->
+    <div class="subpanel" data-audio-expert="1" hidden><h3 data-i18n="adc">ADC</h3><div class="subgrid">
+      <div class="group-label span-2" data-i18n="input">Input</div>
+      <form class="item-form" method="post" action="/save_nrl"><label data-i18n="dmic">DMIC</label><input type="hidden" name="adc_dmic_present" value="1"><label class="hint"><input type="checkbox" name="adc_dmic_enabled" value="1" onchange="submitSwitch(this)" {{ADC_DMIC_CHECKED}}><span data-i18n="dmicText">REG14 bit6 select DMIC from MIC1P</span></label></form>
+      <form class="item-form" method="post" action="/save_nrl"><label data-i18n="micInput">MIC1P-MIC1N Input</label><input type="hidden" name="adc_linsel_present" value="1"><label class="hint"><input type="checkbox" name="adc_linsel" value="1" onchange="submitSwitch(this)" {{ADC_LINSEL_CHECKED}}><span data-i18n="micInputText">REG14 bit4 line input select</span></label></form>
+      {{ADC_PGA_GAIN_SLIDER}}{{ADC_RAMPRATE_SLIDER}}{{ADC_SCALE_SLIDER}}
+      <form class="item-form" method="post" action="/save_nrl"><label data-i18n="dmicLatchSense">DMIC Latch Sense</label><input type="hidden" name="adc_dmic_sense_present" value="1"><label class="hint"><input type="checkbox" name="adc_dmic_sense" value="1" onchange="submitSwitch(this)" {{ADC_DMIC_SENSE_CHECKED}}><span data-i18n="dmicLatchSenseText">REG15 bit0 latch on negative edge</span></label></form>
+      <form class="item-form" method="post" action="/save_nrl"><label data-i18n="adcSync">ADC Sync</label><input type="hidden" name="adc_sync_present" value="1"><label class="hint"><input type="checkbox" name="adc_sync" value="1" onchange="submitSwitch(this)" {{ADC_SYNC_CHECKED}}><span data-i18n="adcSyncText">REG16 bit5 standard audio clock</span></label></form>
+      <form class="item-form" method="post" action="/save_nrl"><label data-i18n="adcInvert">ADC Invert</label><input type="hidden" name="adc_inv_present" value="1"><label class="hint"><input type="checkbox" name="adc_inv" value="1" onchange="submitSwitch(this)" {{ADC_INV_CHECKED}}><span data-i18n="adcInvertText">REG16 bit4 ADC polarity inverted</span></label></form>
+      <form class="item-form" method="post" action="/save_nrl"><label data-i18n="adcRamClear">ADC RAM Clear</label><input type="hidden" name="adc_ramclr_present" value="1"><label class="hint"><input type="checkbox" name="adc_ramclr" value="1" onchange="submitSwitch(this)" {{ADC_RAMCLR_CHECKED}}><span data-i18n="adcRamClearText">REG16 bit3 clear ADC RAM</span></label></form>
+      <div class="group-label span-2" data-i18n="alcAutomute">ALC / Automute</div>
+      <form class="item-form" method="post" action="/save_nrl"><label data-i18n="alcEnable">ALC Enable</label><input type="hidden" name="alc_enabled_present" value="1"><label class="hint"><input type="checkbox" name="alc_enabled" value="1" onchange="submitSwitch(this)" {{ALC_CHECKED}}><span data-i18n="alcEnableText">REG18 bit7 auto level control</span></label></form>
+      <form class="item-form" method="post" action="/save_nrl"><label data-i18n="adcAutomuteEnable">ADC Automute Enable</label><input type="hidden" name="adc_automute_enabled_present" value="1"><label class="hint"><input type="checkbox" name="adc_automute_enabled" value="1" onchange="submitSwitch(this)" {{ADC_AUTOMUTE_CHECKED}}><span data-i18n="adcAutomuteEnableText">REG18 bit6 automute</span></label></form>
+      {{ALC_WINSIZE_SLIDER}}{{ALC_MAXLEVEL_SLIDER}}{{ALC_MINLEVEL_SLIDER}}{{ADC_AUTOMUTE_WINSIZE_SLIDER}}{{ADC_AUTOMUTE_NOISE_GATE_SLIDER}}{{ADC_AUTOMUTE_VOLUME_SLIDER}}
+      <div class="group-label span-2" data-i18n="hpfEq">HPF / EQ</div>
+      {{ADC_HPFS1_SLIDER}}{{ADC_HPFS2_SLIDER}}
+      <form class="item-form" method="post" action="/save_nrl"><label data-i18n="adcEqBypass">ADC EQ Bypass</label><input type="hidden" name="adc_eq_bypass_present" value="1"><label class="hint"><input type="checkbox" name="adc_eq_bypass" value="1" onchange="submitSwitch(this)" {{ADC_EQ_BYPASS_CHECKED}}><span data-i18n="adcEqBypassText">REG1C bit6 bypass ADC EQ</span></label></form>
+      <form class="item-form" method="post" action="/save_nrl"><label data-i18n="adcDynamicHpf">ADC Dynamic HPF</label><input type="hidden" name="adc_hpf_present" value="1"><label class="hint"><input type="checkbox" name="adc_hpf" value="1" onchange="submitSwitch(this)" {{ADC_HPF_CHECKED}}><span data-i18n="adcDynamicHpfText">REG1C bit5 dynamic HPF</span></label></form>
+      <div class="span-2 eq-panel"><div class="section-head"><h2 data-i18n="adcEqCoefficients">ADC EQ Coefficients</h2><span class="hint" data-i18n="adcEqCoefficientsText">30-bit unsigned register values for B0/A1/A2/B1/B2</span></div><form class="eq-preset-form" method="post" action="/save_nrl"><input type="hidden" name="adceq_b0" value="227219675"><input type="hidden" name="adceq_a1" value="625668518"><input type="hidden" name="adceq_a2" value="192369940"><input type="hidden" name="adceq_b1" value="619302472"><input type="hidden" name="adceq_b2" value="227219675"><button class="secondary btn-small" type="button" onclick="applyAdcEqPreset(this)">硬件哑音过滤</button></form>{{ADCEQ_B0_SLIDER}}{{ADCEQ_A1_SLIDER}}{{ADCEQ_A2_SLIDER}}{{ADCEQ_B1_SLIDER}}{{ADCEQ_B2_SLIDER}}</div>
+    </div></div>
+<!-- @endtemplate -->

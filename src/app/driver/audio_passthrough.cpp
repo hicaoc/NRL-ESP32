@@ -620,6 +620,7 @@ static void speaker_sink_write(uint8_t source_id,
                                size_t sample_count,
                                void *) {
     const bool network_voice = source_id == AUDIO_SRC_NRL_DOWNLINK ||
+                               source_id == AUDIO_SRC_FMO_DOWNLINK ||
                                source_id == AUDIO_SRC_ESPNOW ||
                                source_id == AUDIO_SRC_AI;
     output_queue_set_prime(network_voice ? kNetworkVoicePrimeSamples : 0u);

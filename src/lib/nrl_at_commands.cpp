@@ -17,6 +17,7 @@
 #include "services/aprs_service.h"
 #include "services/display_notice.h"
 #include "services/espnow_link.h"
+#include "services/fmo_service.h"
 #include "services/video_call.h"
 #include "services/music_player.h"
 #include "services/music_playlist.h"
@@ -295,8 +296,9 @@ static bool appendSupportedAtList(uint8_t *payload,
     if (config != nullptr) {
         formatSciConfig(config->sci, sci_config, sizeof(sci_config));
         snprintf(hp_drive, sizeof(hp_drive), "%s", config->hp_drive_enabled ? "ON" : "OFF");
+        const uint8_t mode = ESPNOW_LINK_GetPttMode();
         snprintf(ptt_mode, sizeof(ptt_mode), "%s",
-                 (ESPNOW_LINK_GetPttMode() == 1u) ? "ESPNOW" : "NRL");
+                 mode == 2u ? "FMO" : mode == 1u ? "ESPNOW" : "NRL");
         const bool show_dhcp_values = config->wifi_dhcp_enabled && nrlWifiStaConnected();
         ipText(currentWifiIpValue(config->wifi_ip, nrlWifiStaIp(), show_dhcp_values), wifi_ip, sizeof(wifi_ip));
         formatMicPcmGain(config->mic_pcm_gain_milli, mic_pcm_gain, sizeof(mic_pcm_gain));
@@ -2160,10 +2162,12 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     // Physical/user PTT target:
     //   AT+PTT_MODE=NRL     -> existing NRL uplink behavior
     //   AT+PTT_MODE=ESPNOW  -> the same PTT/SQL gate broadcasts over ESP-NOW
+    //   AT+PTT_MODE=FMO     -> the same PTT/SQL gate transmits to FMO
     if (stringEqualsIgnoreCase(command.command, "PTT_MODE")) {
         if (is_query) {
+            const uint8_t mode = ESPNOW_LINK_GetPttMode();
             appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
-                               "PTT_MODE", (ESPNOW_LINK_GetPttMode() == 1u) ? "ESPNOW" : "NRL");
+                               "PTT_MODE", mode == 2u ? "FMO" : mode == 1u ? "ESPNOW" : "NRL");
             return;
         }
         uint8_t mode = 0xFFu;
@@ -2174,8 +2178,10 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         } else if (stringEqualsIgnoreCase(command.value, "ESPNOW") ||
                    stringEqualsIgnoreCase(command.value, "ESP-NOW")) {
             mode = 1u;
+        } else if (stringEqualsIgnoreCase(command.value, "FMO")) {
+            mode = 2u;
         }
-        if (mode > 1u) {
+        if (mode > 2u) {
             appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
                                "ERR", "PTT_MODE");
             return;
@@ -2186,9 +2192,23 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
                                "ERR", "ESPNOW");
             return;
         }
+        if (mode == 2u) {
+            FmoConfig fmo = {};
+            FMO_GetConfig(&fmo);
+            bool fmo_ready = fmo.enabled;
+            if (fmo_ready && !fmo.transmit) {
+                fmo.transmit = true;
+                fmo_ready = FMO_SetConfig(&fmo, true);
+            }
+            if (!fmo_ready) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                                   "ERR", "FMO");
+                return;
+            }
+        }
         ESPNOW_LINK_SetPttMode(mode);
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
-                           "PTT_MODE", (mode == 1u) ? "ESPNOW" : "NRL");
+                           "PTT_MODE", mode == 2u ? "FMO" : mode == 1u ? "ESPNOW" : "NRL");
         return;
     }
 

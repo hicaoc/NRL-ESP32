@@ -1,0 +1,82 @@
+<!-- @template MEDIA_SECTIONS -->
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="musicTarget">Playback Target</h2><span class="hint" data-i18n="musicTargetHint">One shared setting for everything the player outputs: music, nanny beacon, and net radio.</span></div>
+  <div class="grid">
+    <form class="item-form" method="post" action="/save_media"><label data-i18n="musicTarget">Playback Target</label><select name="music_target" onchange="submitSwitch(this)"><option value="0"{{TARGET_LOCAL_SELECTED}} data-i18n="targetLocal">Local speaker</option><option value="1"{{TARGET_NET_SELECTED}} data-i18n="targetNet">NRL network</option><option value="2"{{TARGET_BOTH_SELECTED}} data-i18n="targetBoth">Local + network</option></select></form>
+    <form class="item-form" method="post" action="/save_media"><label data-i18n="musicOutput">Music Output Device</label><select name="music_output" onchange="submitSwitch(this)"><option value="0"{{OUTPUT_SPK_SELECTED}} data-i18n="outputSpk">Onboard speaker</option><option value="1"{{OUTPUT_BT_SELECTED}} data-i18n="outputBt">Bluetooth headset (A2DP)</option></select></form>
+    <form class="item-form" method="post" action="/save_media"><label data-i18n="pttMode">PTT Mode</label><select name="ptt_mode" onchange="submitSwitch(this)"><option value="0"{{PTT_MODE_NRL_SELECTED}} data-i18n="pttModeNrl">NRL network PTT</option><option value="1"{{PTT_MODE_ESPNOW_SELECTED}} data-i18n="pttModeEspnow">ESP-NOW PTT</option><option value="2"{{PTT_MODE_FMO_SELECTED}} data-i18n="pttModeFmo">FMO PTT</option></select></form>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="espnowLabel">ESP-NOW Intercom</h2></div>
+  <div class="grid">
+    <form class="item-form" method="post" action="/save_media"><label data-i18n="espnowLabel">ESP-NOW Intercom</label><input type="hidden" name="espnow_present" value="1"><label class="hint"><input type="checkbox" name="espnow_enabled" value="1" onchange="submitSwitch(this)" {{ESPNOW_CHECKED}}><span data-i18n="espnowText">Off-grid voice link between nearby devices</span></label></form>
+    <form class="item-form" method="post" action="/save_media"><label data-i18n="espnowRxLabel">ESP-NOW Receive</label><input type="hidden" name="espnow_rx_present" value="1"><label class="hint"><input type="checkbox" name="espnow_rx" value="1" onchange="submitSwitch(this)" {{ESPNOW_RX_CHECKED}}><span data-i18n="espnowRxText">Hear intercom voice even while TX stays off</span></label></form>
+    <form class="item-form" method="post" action="/save_media"><label data-i18n="espnowCodec">ESP-NOW Voice Codec (TX)</label><select name="espnow_codec" onchange="submitSwitch(this)"><option value="0"{{ESPNOW_CODEC_G711_SELECTED}} data-i18n="codecG711">G.711 8 kHz (compatible)</option><option value="1"{{ESPNOW_CODEC_OPUS_SELECTED}} data-i18n="codecOpus">Opus 16 kHz wideband</option></select></form>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="nannyBeacon">Nanny Beacon</h2><span class="hint" data-i18n="nannyBeaconHint">Play a beacon file every N minutes through the configured target.</span></div>
+  <div class="grid">
+    <form class="item-form span-2" method="post" action="/save_media">
+      <div class="subgrid">
+        <div><label data-i18n="beaconPath">Beacon file path</label><input name="beacon_path" value="{{BEACON_PATH}}" placeholder="/sdcard/beacon/id.wav"></div>
+        <div><label data-i18n="beaconInterval">Interval (minutes, 1-1440)</label><input name="beacon_interval" value="{{BEACON_INTERVAL}}"></div>
+        <div class="span-2"><input type="hidden" name="beacon_present" value="1"><label class="hint"><input type="checkbox" name="beacon_enabled" value="1" {{BEACON_CHECKED}}><span data-i18n="beaconEnabledText">Beacon armed (uncheck and Save to disable)</span></label></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div>
+    </form>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="netRadio">Net Radio</h2><span class="hint mono">{{RADIO_STATUS}}</span></div>
+  <div class="grid">
+    <form class="item-form span-2" method="post" action="/save_media">
+      <div class="subgrid">
+        <div class="span-2"><label data-i18n="radioUrl">Stream URL (http:// or https://)</label><input name="radio_url" value="{{RADIO_URL}}" placeholder="http://..."></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button><button class="btn-small" type="button" onclick="submitFormAction(this, 'radio_play')" data-i18n="radioPlay">Play</button><button class="secondary btn-small" type="button" onclick="submitFormAction(this, 'radio_stop')" data-i18n="radioStop">Stop</button></div>
+    </form>
+    <div class="span-2">
+      <div class="group-label" data-i18n="radioFavs">Favorite stations</div>
+      <div id="radio-fav-list" class="fav-list"></div>
+    </div>
+    <form class="item-form span-2" method="post" action="/save_media" id="radio-fav-form">
+      <div class="subgrid">
+        <div><label data-i18n="radioFavName">Station name</label><input name="fav_name" value="" maxlength="47"></div>
+        <div><label data-i18n="radioFavUrl">Stream URL (http:// or https://)</label><input name="fav_url" value="" maxlength="199" placeholder="http://..."></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="button" onclick="addRadioFav(this)" data-i18n="radioFavAdd">Add favorite</button></div>
+    </form>
+    <script>window.RADIO_FAVS={{RADIO_FAVS_JSON}};window.RADIO_FAV_CUR={{RADIO_FAV_CUR}};</script>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="smbShare">Network Share (SMB)</h2><span class="hint mono">{{SMB_STATUS}}</span></div>
+  <div class="grid">
+    <form class="item-form span-2" method="post" action="/save_media">
+      <div class="subgrid">
+        <div><label data-i18n="smbServer">Server (NAS / PC)</label><input name="smb_server" value="{{SMB_SERVER}}" placeholder="192.168.1.10"></div>
+        <div><label data-i18n="smbShareName">Share name</label><input name="smb_share" value="{{SMB_SHARE}}" placeholder="music"></div>
+        <div><label data-i18n="smbUser">Username (empty = guest)</label><input name="smb_user" value="{{SMB_USER}}"></div>
+        <div><label data-i18n="smbPassword">Password</label><input name="smb_password" type="password" value="{{SMB_PASSWORD}}"></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button><button class="secondary btn-small" type="button" onclick="submitFormAction(this, 'smb_clear')" data-i18n="smbClear">Clear</button></div>
+    </form>
+  </div>
+</section>
+{{MUSIC_BROWSER}}
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="aiAssistant">AI Assistant (xiaozhi)</h2><span class="hint mono">{{AI_STATUS}}</span></div>
+  <div class="grid">
+    <form class="item-form span-2" method="post" action="/save_media">
+      <div class="subgrid">
+        <div class="span-2"><label data-i18n="aiUrl">Server URL (ws:// or wss://)</label><input name="ai_url" value="{{AI_URL}}" placeholder="wss://api.tenclass.net/xiaozhi/v1/"></div>
+        <div class="span-2"><label data-i18n="aiToken">Access Token</label><input name="ai_token" type="password" value="{{AI_TOKEN}}"></div>
+        <div class="span-2"><input type="hidden" name="ai_present" value="1"><label class="hint"><input type="checkbox" name="ai_enabled" value="1" {{AI_CHECKED}}><span data-i18n="aiEnabledText">Enable the assistant connection</span></label></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div>
+    </form>
+  </div>
+</section>
+<!-- @endtemplate -->

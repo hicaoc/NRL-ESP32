@@ -26,12 +26,7 @@
       </div>
     </div>
 
-    <nav class="nav">
-      <a class="{{NETWORK_ACTIVE}}" href="/" data-i18n="wifiConfig">WiFi Config</a>
-      <a class="{{DEVICE_ACTIVE}}" href="/nrl" data-i18n="nrlConfig">NRL Config</a>
-      <a class="{{AUDIO_ACTIVE}}" href="/audio" data-i18n="audioSettings">Audio Settings</a>{{MEDIA_TAB}}{{APRS_TAB}}{{SIGNALING_TAB}}
-      <a href="/update" data-i18n="firmwareUpdate">Firmware Update</a>
-    </nav>
+    <p class="back-home">{{BACK_HOME}}</p>
 
     <p class="notice" data-i18n="bootNotice">Hold BOOT for 5 seconds after startup to reset WiFi and server settings.</p>
     <p class="sub"><span data-i18n="firmwareVersion">Firmware version</span> <span class="mono">{{VERSION}}</span></p>
@@ -39,6 +34,7 @@
     <script>
 <!-- @include wifi_portal_parts/wifi_config_portal_lang_boot.js -->
 </script>
+    {{HOME_CARDS}}
     {{FORM_SECTIONS}}
     <div class="footer-links">{{FOOTER}}</div>
   </main>

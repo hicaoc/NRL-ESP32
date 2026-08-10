@@ -460,16 +460,14 @@ static volatile NrlVideoRxHandler_t s_video_rx_handler = nullptr;
 // mic frames are dropped for the duration so the G.711 accumulator carries
 // exactly one producer at a time.
 static volatile bool s_media_uplink_active = false;
+static volatile bool s_touch_ptt_held = false;
 
 // Captured-audio gate shared by the G.711 and Opus uplink paths: transmit
 // only while the radio squelch is open and outside the tail-suppression
 // window (see stopDownlinkPlayback).
 static bool uplinkGateOpen(void)
 {
-    if (ESPNOW_LINK_GetPttMode() == 1u) {
-        return false;
-    }
-    if (!STATUS_IO_IsSqlActive()) {
+    if (!NRLAudioBridge_PttActive()) {
         return false;
     }
     // Tail-audio suppression: for a configured window after the device
@@ -1276,8 +1274,8 @@ static void pollSerialAtConsole(void)
 
 static void bridgeTask(void *)
 {
-    bool previous_sql = STATUS_IO_IsSqlActive();
-    if (previous_sql && ESPNOW_LINK_GetPttMode() == 0u) {
+    bool previous_nrl_ptt = NRLAudioBridge_PttActive();
+    if (previous_nrl_ptt) {
         AudioFocus_NotifyVoiceStart();
     }
     while (true) {
@@ -1426,17 +1424,17 @@ static void bridgeTask(void *)
         }
 
         STATUS_IO_Poll();
-        const bool current_sql = STATUS_IO_IsSqlActive();
-        if (!previous_sql && current_sql && ESPNOW_LINK_GetPttMode() == 0u) {
+        const bool current_nrl_ptt = NRLAudioBridge_PttActive();
+        if (!previous_nrl_ptt && current_nrl_ptt) {
             AudioFocus_NotifyVoiceStart();
         }
-        if (previous_sql && !current_sql && ESPNOW_LINK_GetPttMode() == 0u) {
+        if (previous_nrl_ptt && !current_nrl_ptt) {
             // The captured voice gate just closed: queue the signaling burst
             // ungated so it follows the final NRL voice packet.
             SIGNALING_OnLocalPttReleased();
             AudioFocus_NotifyVoiceEnd();
         }
-        previous_sql = current_sql;
+        previous_nrl_ptt = current_nrl_ptt;
 
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -1652,6 +1650,17 @@ uint32_t NRLAudioBridge_GetRemoteDmrId(void)
 uint8_t NRLAudioBridge_GetRxCodec(void)
 {
     return s_last_rx_codec;
+}
+
+void NRLAudioBridge_SetPtt(const bool held)
+{
+    s_touch_ptt_held = held;
+}
+
+bool NRLAudioBridge_PttActive(void)
+{
+    return s_touch_ptt_held ||
+           (ESPNOW_LINK_GetPttMode() == 0u && STATUS_IO_IsSqlActive());
 }
 
 void NRLAudioBridge_ApplyConfig(bool restart_wifi, bool restart_udp)

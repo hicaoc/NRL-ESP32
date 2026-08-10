@@ -1,4 +1,5 @@
 #include "services/aprs_service.h"
+#include "services/fmo_service.h"
 
 #include "audio/audio_router.h"
 #include "audio/audio_focus.h"
@@ -1827,7 +1828,7 @@ void modemPtt(bool on)
     lockCfg();
     const bool nrl_tx = s_cfg.enabled && s_cfg.nrl_tx_enabled;
     unlockCfg();
-    if (nrl_tx) {
+    if (nrl_tx && !FMO_IsTransmitSelected()) {
         AudioRouter_SetRoute(AUDIO_SRC_MIC, AUDIO_SINK_NRL_UPLINK, !on);
         AudioRouter_SetRoute(AUDIO_SRC_BT_HFP_MIC, AUDIO_SINK_NRL_UPLINK, !on);
     }

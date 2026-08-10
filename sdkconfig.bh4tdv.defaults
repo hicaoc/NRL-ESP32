@@ -139,8 +139,8 @@ CONFIG_BT_BLE_42_SCAN_EN=y
 # Keep Wi-Fi voice packets evenly spaced; throughput is not the bottleneck.
 # CONFIG_ESP_WIFI_AMPDU_TX_ENABLED is not set
 # --- BH4TDV partition layout ---
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="part-bh4tdv.csv"
-CONFIG_PARTITION_TABLE_FILENAME="part-bh4tdv.csv"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="part-s3.csv"
+CONFIG_PARTITION_TABLE_FILENAME="part-s3.csv"
 
 # --- Compiler optimization: -O2  ---
 # The shared defaults inherit the legacy "default" (-Og debug) level; LVGL's

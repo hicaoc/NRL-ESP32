@@ -1,0 +1,172 @@
+<!-- @template APRS_SECTIONS -->
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="aprsSwitches">APRS</h2><span class="hint mono">{{APRS_STATUS}}</span></div>
+  <div class="grid">
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsEnabled">APRS</label><input type="hidden" name="aprs_present" value="1"><label class="hint"><input type="checkbox" name="aprs_enabled" value="1" onchange="submitSwitch(this)" {{APRS_ENABLED_CHECKED}}><span data-i18n="aprsEnabledText">Master switch for the APRS transceiver</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsNet">APRS-IS Network</label><input type="hidden" name="aprs_net_present" value="1"><label class="hint"><input type="checkbox" name="aprs_net" value="1" onchange="submitSwitch(this)" {{APRS_NET_CHECKED}}><span data-i18n="aprsNetText">Send beacons to and hear stations from the APRS-IS server</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsRfTx">RF Transmit (AFSK)</label><input type="hidden" name="aprs_tx_present" value="1"><label class="hint"><input type="checkbox" name="aprs_tx" value="1" onchange="submitSwitch(this)" {{APRS_TX_CHECKED}}><span data-i18n="aprsRfTxText">Modulate beacons out through the speaker into the radio</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsRfRx">RF Receive (AFSK)</label><input type="hidden" name="aprs_rx_present" value="1"><label class="hint"><input type="checkbox" name="aprs_rx" value="1" onchange="submitSwitch(this)" {{APRS_RX_CHECKED}}><span data-i18n="aprsRfRxText">Demodulate APRS audio heard on the microphone/radio</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsAuto">Auto interval</label><input type="hidden" name="aprs_auto_present" value="1"><label class="hint"><input type="checkbox" name="aprs_auto" value="1" onchange="submitSwitch(this)" {{APRS_AUTO_CHECKED}}><span data-i18n="aprsAutoText">With a GPS fix, beacon faster while moving (30 s at 60+ km/h, or after a 300 m jump); the interval below is the ceiling when parked</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsFixed">Fixed beacon without GPS</label><input type="hidden" name="aprs_fixed_present" value="1"><label class="hint"><input type="checkbox" name="aprs_fixed" value="1" onchange="submitSwitch(this)" {{APRS_FIXED_CHECKED}}><span data-i18n="aprsFixedText">When GPS has no fix, allow periodic beacons using the configured default position</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsNrlTx">NRL Network Transmit (AFSK)</label><input type="hidden" name="aprs_nrl_tx_present" value="1"><label class="hint"><input type="checkbox" name="aprs_nrl_tx" value="1" onchange="submitSwitch(this)" {{APRS_NRL_TX_CHECKED}}><span data-i18n="aprsNrlTxText">Modulate beacons/messages out through the NRL network voice uplink</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsNrlRx">NRL Network Receive (AFSK)</label><input type="hidden" name="aprs_nrl_rx_present" value="1"><label class="hint"><input type="checkbox" name="aprs_nrl_rx" value="1" onchange="submitSwitch(this)" {{APRS_NRL_RX_CHECKED}}><span data-i18n="aprsNrlRxText">Demodulate APRS audio arriving over the NRL network voice downlink</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsFwdRfIs">Gateway RF &#8594; APRS-IS</label><input type="hidden" name="aprs_fwd_rf_is_present" value="1"><label class="hint"><input type="checkbox" name="aprs_fwd_rf_is" value="1" onchange="submitSwitch(this)" {{APRS_FWD_RF_IS_CHECKED}}><span data-i18n="aprsFwdRfIsText">iGate upload: relay packets heard on the microphone/radio to APRS-IS</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsFwdIsRf">Gateway APRS-IS &#8594; RF</label><input type="hidden" name="aprs_fwd_is_rf_present" value="1"><label class="hint"><input type="checkbox" name="aprs_fwd_is_rf" value="1" onchange="submitSwitch(this)" {{APRS_FWD_IS_RF_CHECKED}}><span data-i18n="aprsFwdIsRfText">Relay packets from APRS-IS out as AFSK through the radio (needs RF Transmit)</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsFwdNrlIs">Gateway NRL &#8594; APRS-IS</label><input type="hidden" name="aprs_fwd_nrl_is_present" value="1"><label class="hint"><input type="checkbox" name="aprs_fwd_nrl_is" value="1" onchange="submitSwitch(this)" {{APRS_FWD_NRL_IS_CHECKED}}><span data-i18n="aprsFwdNrlIsText">Relay packets heard on the NRL network downlink to APRS-IS</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsFwdIsNrl">Gateway APRS-IS &#8594; NRL</label><input type="hidden" name="aprs_fwd_is_nrl_present" value="1"><label class="hint"><input type="checkbox" name="aprs_fwd_is_nrl" value="1" onchange="submitSwitch(this)" {{APRS_FWD_IS_NRL_CHECKED}}><span data-i18n="aprsFwdIsNrlText">Relay packets from APRS-IS out as AFSK through the NRL network (needs NRL Transmit)</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsFwdRfNrl">Gateway RF &#8594; NRL</label><input type="hidden" name="aprs_fwd_rf_nrl_present" value="1"><label class="hint"><input type="checkbox" name="aprs_fwd_rf_nrl" value="1" onchange="submitSwitch(this)" {{APRS_FWD_RF_NRL_CHECKED}}><span data-i18n="aprsFwdRfNrlText">Relay packets heard on the microphone/radio out through the NRL network (needs NRL Transmit)</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsFwdNrlRf">Gateway NRL &#8594; RF</label><input type="hidden" name="aprs_fwd_nrl_rf_present" value="1"><label class="hint"><input type="checkbox" name="aprs_fwd_nrl_rf" value="1" onchange="submitSwitch(this)" {{APRS_FWD_NRL_RF_CHECKED}}><span data-i18n="aprsFwdNrlRfText">Relay packets heard on the NRL network out as AFSK through the radio (needs RF Transmit)</span></label></form>
+  </div>
+</section>
+<section class="panel" id="gps-live-panel" hidden>
+  <div class="section-head"><h2 data-i18n="gpsLive">GPS Live Information</h2><span class="hint mono" id="gps-live-state"></span></div>
+  <div class="grid">
+    <div><label data-i18n="gpsFixStatus">Fix status</label><div class="mono" id="gps-live-fix">-</div></div>
+    <div><label data-i18n="gpsSatellitesUsed">Satellites used</label><div class="mono" id="gps-live-satellites">-</div></div>
+    <div><label data-i18n="gpsSatellitesVisible">Satellites visible (GSV)</label><div class="mono" id="gps-live-visible">-</div></div>
+    <div><label data-i18n="gpsLatitude">Latitude</label><div class="mono" id="gps-live-latitude">-</div></div>
+    <div><label data-i18n="gpsLongitude">Longitude</label><div class="mono" id="gps-live-longitude">-</div></div>
+    <div><label data-i18n="gpsSpeed">Speed</label><div class="mono" id="gps-live-speed">-</div></div>
+    <div><label data-i18n="gpsCourse">Course</label><div class="mono" id="gps-live-course">-</div></div>
+    <div><label data-i18n="gpsAltitude">Altitude</label><div class="mono" id="gps-live-altitude">-</div></div>
+    <div><label data-i18n="gpsAccuracy">Fix quality / HDOP</label><div class="mono" id="gps-live-accuracy">-</div></div>
+    <div><label data-i18n="gpsUpdated">NMEA updated</label><div class="mono" id="gps-live-updated">-</div></div>
+    <div><label data-i18n="gpsGsvUpdated">GSV updated</label><div class="mono" id="gps-live-gsv-updated">-</div></div>
+    <div class="span-2"><label data-i18n="gpsSatelliteSignals">Satellite signals (constellation/PRN, elevation, azimuth, SNR)</label><div class="mono" id="gps-live-signals" style="white-space:pre-wrap;line-height:1.7">-</div></div>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="aprsSettings">APRS Settings</h2><span class="hint" data-i18n="aprsSettingsHint">Callsign comes from the Radio page; passcode is derived automatically.</span></div>
+  <div class="grid">
+    <form class="item-form span-2" method="post" action="/save_aprs">
+      <div class="subgrid">
+        <div><label data-i18n="aprsServer">APRS-IS Server</label><input name="aprs_server" value="{{APRS_SERVER_HOST}}" placeholder="asia.aprs2.net"></div>
+        <div><label data-i18n="aprsPort">Port</label><input name="aprs_port" value="{{APRS_SERVER_PORT}}"></div>
+        <div><label data-i18n="aprsSsid">SSID (0-15)</label><input name="aprs_ssid" value="{{APRS_SSID}}"></div>
+        <div><label data-i18n="aprsSymbol">Symbol (table+code)</label><input name="aprs_symbol" value="{{APRS_SYMBOL}}" maxlength="2" placeholder="/I"></div>
+        <div><label data-i18n="aprsInterval">Beacon interval (s, 10-3600)</label><input name="aprs_interval" value="{{APRS_INTERVAL}}"></div>
+        <div><label data-i18n="aprsPath">RF path</label><input name="aprs_path" value="{{APRS_PATH}}" placeholder="WIDE1-1"></div>
+        <div><label data-i18n="aprsLat">Default latitude (WGS-84 ddmm.mmmm or decimal degrees; N added automatically)</label><input name="aprs_lat" value="{{APRS_LAT}}" placeholder="3153.3100"></div>
+        <div><label data-i18n="aprsLon">Default longitude (WGS-84 dddmm.mmmm or decimal degrees; E added automatically)</label><input name="aprs_lon" value="{{APRS_LON}}" placeholder="11848.8460"></div>
+        <div class="span-2"><label data-i18n="aprsComment">Beacon comment (up to 219 UTF-8 bytes)</label><input name="aprs_comment" value="{{APRS_COMMENT}}" maxlength="219" data-max-utf8-bytes="219"></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button><button class="btn-small" type="button" onclick="submitFormAction(this, 'aprs_beacon', 'sent', 'sendFailed')" data-i18n="aprsBeaconNow">Beacon now</button></div>
+    </form>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="aprsMessage">Manual APRS Message</h2><span class="hint" data-i18n="aprsMessageHint">Sent over APRS-IS when linked, and as AFSK on every enabled audio path.</span></div>
+  <div class="grid">
+    <form class="item-form span-2" method="post" action="/save_aprs">
+      <div class="subgrid">
+        <div><label data-i18n="aprsMsgDest">Addressee callsign (A-Z 0-9 -, e.g. BI4UMD-9)</label><input name="aprs_msg_dest" maxlength="9" placeholder="BI4UMD-9"></div>
+        <div><label data-i18n="aprsMsgText">Message text (up to 67 bytes)</label><input name="aprs_msg_text" maxlength="67"></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="button" onclick="submitFormAction(this, 'aprs_msg', 'aprsMsgSent', 'sendFailed')" data-i18n="aprsMsgSend">Send message</button></div>
+    </form>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="aprsStations">Stations Heard</h2><span class="hint mono" id="aprs-stn-status"></span></div>
+  <div class="grid">
+    <div class="span-2" style="overflow-x:auto">
+      <table class="mono" id="aprs-stn-table" style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="text-align:left">
+          <th data-i18n="aprsStnCall">Callsign</th><th data-i18n="aprsStnPos">Lat / Lon</th><th data-i18n="aprsStnAlt">Alt</th>
+          <th data-i18n="aprsStnDist">Distance</th><th data-i18n="aprsStnSpeed">Speed</th><th data-i18n="aprsStnCourse">Course</th>
+          <th>via</th><th data-i18n="aprsStnAge">Heard</th><th data-i18n="aprsStnComment">Comment</th>
+        </tr></thead>
+        <tbody id="aprs-stn-body"><tr><td colspan="9" class="hint" data-i18n="aprsStnEmpty">No stations heard yet.</td></tr></tbody>
+      </table>
+    </div>
+    <script>
+    (function(){
+      function fmt(v, suffix, digits) {
+        if (v === null || v === undefined || !Number.isFinite(Number(v))) return '-';
+        v = Number(v);
+        return v.toFixed(digits === undefined ? 0 : digits) + (suffix || '');
+      }
+      function text(id, value) {
+        var el = document.getElementById(id);
+        if (el) el.textContent = value;
+      }
+      function tr(key, fallback) {
+        return typeof t === 'function' ? t(key) : fallback;
+      }
+      function renderGps(gps) {
+        var panel = document.getElementById('gps-live-panel');
+        if (!panel) return;
+        var connected = !!(gps && gps.connected);
+        panel.hidden = !connected;
+        if (!connected) return;
+        var fixed = !!gps.fix;
+        text('gps-live-state', 'NMEA: OK');
+        text('gps-live-fix', fixed ? tr('gpsFixed', 'Fixed') : tr('gpsAcquiring', 'Acquiring'));
+        text('gps-live-satellites', gps.satellites === undefined ? '-' : String(gps.satellites));
+        text('gps-live-visible', gps.visible_satellites === undefined ? '-' : String(gps.visible_satellites));
+        text('gps-live-latitude', fixed ? fmt(gps.lat, '', 6) : '-');
+        text('gps-live-longitude', fixed ? fmt(gps.lon, '', 6) : '-');
+        text('gps-live-speed', fixed ? fmt(gps.speed, ' km/h', 1) : '-');
+        text('gps-live-course', fixed ? fmt(gps.course, '\u00b0', 0) : '-');
+        text('gps-live-altitude', fixed ? fmt(gps.alt, ' m', 1) : '-');
+        var quality = gps.quality === undefined ? '-' : 'Q=' + gps.quality;
+        if (gps.hdop !== undefined) quality += ' / HDOP=' + fmt(gps.hdop, '', 1);
+        text('gps-live-accuracy', quality);
+        text('gps-live-updated', fmt(Number(gps.age_ms) / 1000, ' s', 1));
+        text('gps-live-gsv-updated', gps.gsv_age_ms === undefined ? '-' :
+             fmt(Number(gps.gsv_age_ms) / 1000, ' s', 1));
+        var signals = Array.isArray(gps.satellite_signals) ? gps.satellite_signals.slice() : [];
+        signals.sort(function(a, b) { return Number(b.snr) - Number(a.snr); });
+        text('gps-live-signals', signals.length ? signals.map(function(s) {
+          var id = String(s.talker || '--') + String(s.prn).padStart(2, '0');
+          var elevation = Number(s.elevation) >= 0 ? s.elevation + '\u00b0' : '--';
+          var azimuth = Number(s.azimuth) >= 0 ? s.azimuth + '\u00b0' : '--';
+          var snr = Number(s.snr) >= 0 ? s.snr + ' dB-Hz' : '--';
+          return id + '  EL ' + elevation + '  AZ ' + azimuth + '  SNR ' + snr;
+        }).join('\n') : tr('gpsNoSatelliteSignals', 'No GSV satellite signal data'));
+      }
+      function refresh() {
+        fetch('/aprs/stations').then(function(r){ return r.json(); }).then(function(data){
+          if (!data) return;
+          renderGps(data.gps_info);
+          var body = document.getElementById('aprs-stn-body');
+          if (!body || !Array.isArray(data.stations)) return;
+          var st = document.getElementById('aprs-stn-status');
+          if (st) st.textContent = (data.net ? 'APRS-IS: OK' : 'APRS-IS: --') +
+                                   '  GPS: ' + (data.gps ? 'FIX' :
+                                      (data.gps_info && data.gps_info.connected ? 'DATA' : '--')) +
+                                   '  RX: ' + data.rx + '  TX: ' + data.tx;
+          body.innerHTML = '';
+          if (!data.stations.length) {
+            var tr = document.createElement('tr');
+            var td = document.createElement('td');
+            td.colSpan = 9; td.className = 'hint';
+            td.textContent = 'No stations heard yet.';
+            tr.appendChild(td); body.appendChild(tr);
+            return;
+          }
+          data.stations.forEach(function(s){
+            var tr = document.createElement('tr');
+            function cell(text) { var td = document.createElement('td'); td.textContent = text; tr.appendChild(td); }
+            cell(s.name);
+            cell(fmt(s.lat, '', 4) + ', ' + fmt(s.lon, '', 4));
+            cell(fmt(s.alt, ' m'));
+            cell(fmt(s.dist, ' km', 1));
+            var spd = (s.spd !== null && s.spd !== undefined) ? fmt(s.spd, ' km/h')
+                    : ((s.dspd !== null && s.dspd !== undefined) ? '~' + fmt(s.dspd, ' km/h') : '-');
+            cell(spd);
+            cell(s.crs ? (s.crs % 360) + '°' : '-');
+            cell(s.rf ? 'RF' : 'IS');
+            cell(s.age < 60 ? s.age + 's' : Math.floor(s.age / 60) + 'm');
+            cell(s.cmt || '');
+            body.appendChild(tr);
+          });
+        }).catch(function(){});
+      }
+      refresh();
+      setInterval(refresh, 1000);
+    })();
+    </script>
+  </div>
+</section>
+<!-- @endtemplate -->

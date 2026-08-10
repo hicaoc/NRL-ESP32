@@ -47,9 +47,13 @@ struct OpusVoiceDec {
     void *handle;
 };
 
-extern "C" OpusVoiceEnc *OPUS_VOICE_EncOpen(const uint32_t frame_ms)
+extern "C" OpusVoiceEnc *OPUS_VOICE_EncOpenEx(const uint32_t sample_rate_hz,
+                                               const uint32_t frame_ms,
+                                               const uint32_t bitrate_bps)
 {
-    if (enc_duration(frame_ms) == ESP_OPUS_ENC_FRAME_DURATION_ARG) {
+    if ((sample_rate_hz != 8000u && sample_rate_hz != 16000u) ||
+        bitrate_bps == 0u ||
+        enc_duration(frame_ms) == ESP_OPUS_ENC_FRAME_DURATION_ARG) {
         return nullptr;
     }
     OpusVoiceEnc *enc = static_cast<OpusVoiceEnc *>(
@@ -59,10 +63,10 @@ extern "C" OpusVoiceEnc *OPUS_VOICE_EncOpen(const uint32_t frame_ms)
     }
 
     esp_opus_enc_config_t cfg = ESP_OPUS_ENC_CONFIG_DEFAULT();
-    cfg.sample_rate = OPUS_VOICE_SAMPLE_RATE;
+    cfg.sample_rate = sample_rate_hz;
     cfg.channel = ESP_AUDIO_MONO;
     cfg.bits_per_sample = ESP_AUDIO_BIT16;
-    cfg.bitrate = kBitrateBps;
+    cfg.bitrate = static_cast<int>(bitrate_bps);
     cfg.frame_duration = enc_duration(frame_ms);
     cfg.application_mode = ESP_OPUS_ENC_APPLICATION_VOIP;
     cfg.complexity = kComplexity;
@@ -75,10 +79,18 @@ extern "C" OpusVoiceEnc *OPUS_VOICE_EncOpen(const uint32_t frame_ms)
         heap_caps_free(enc);
         return nullptr;
     }
-    enc->frame_samples = (OPUS_VOICE_SAMPLE_RATE / 1000u) * frame_ms;
-    ESP_LOGI(TAG, "encoder up: 16k mono %lums VOIP c%d VBR %dbps",
-             static_cast<unsigned long>(frame_ms), kComplexity, kBitrateBps);
+    enc->frame_samples = (sample_rate_hz / 1000u) * frame_ms;
+    ESP_LOGI(TAG, "encoder up: %luk mono %lums VOIP c%d VBR %lubps",
+             static_cast<unsigned long>(sample_rate_hz / 1000u),
+             static_cast<unsigned long>(frame_ms), kComplexity,
+             static_cast<unsigned long>(bitrate_bps));
     return enc;
+}
+
+extern "C" OpusVoiceEnc *OPUS_VOICE_EncOpen(const uint32_t frame_ms)
+{
+    return OPUS_VOICE_EncOpenEx(OPUS_VOICE_SAMPLE_RATE, frame_ms,
+                                static_cast<uint32_t>(kBitrateBps));
 }
 
 extern "C" int OPUS_VOICE_EncProcess(OpusVoiceEnc *enc, const int16_t *pcm, const size_t samples,
@@ -111,9 +123,11 @@ extern "C" void OPUS_VOICE_EncClose(OpusVoiceEnc *enc)
     heap_caps_free(enc);
 }
 
-extern "C" OpusVoiceDec *OPUS_VOICE_DecOpen(const uint32_t frame_ms)
+extern "C" OpusVoiceDec *OPUS_VOICE_DecOpenEx(const uint32_t sample_rate_hz,
+                                               const uint32_t frame_ms)
 {
-    if (dec_duration(frame_ms) == ESP_OPUS_DEC_FRAME_DURATION_INVALID) {
+    if ((sample_rate_hz != 8000u && sample_rate_hz != 16000u) ||
+        dec_duration(frame_ms) == ESP_OPUS_DEC_FRAME_DURATION_INVALID) {
         return nullptr;
     }
     OpusVoiceDec *dec = static_cast<OpusVoiceDec *>(
@@ -122,7 +136,7 @@ extern "C" OpusVoiceDec *OPUS_VOICE_DecOpen(const uint32_t frame_ms)
         return nullptr;
     }
     esp_opus_dec_cfg_t cfg = ESP_OPUS_DEC_CONFIG_DEFAULT();
-    cfg.sample_rate = OPUS_VOICE_SAMPLE_RATE;
+    cfg.sample_rate = sample_rate_hz;
     cfg.channel = ESP_AUDIO_MONO;
     cfg.frame_duration = dec_duration(frame_ms);
     cfg.self_delimited = false;
@@ -132,6 +146,11 @@ extern "C" OpusVoiceDec *OPUS_VOICE_DecOpen(const uint32_t frame_ms)
         return nullptr;
     }
     return dec;
+}
+
+extern "C" OpusVoiceDec *OPUS_VOICE_DecOpen(const uint32_t frame_ms)
+{
+    return OPUS_VOICE_DecOpenEx(OPUS_VOICE_SAMPLE_RATE, frame_ms);
 }
 
 extern "C" int OPUS_VOICE_DecProcess(OpusVoiceDec *dec, const uint8_t *frame, const size_t frame_bytes,

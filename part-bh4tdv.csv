@@ -1,9 +1,0 @@
-# Partition table for BH4TDV 3188 NRL boards with 16 MB flash.
-# Large OTA app slots leave room for the shared codebase and future audio DSP.
-# Name,   Type, SubType, Offset,    Size,      Flags
-nvs,      data, nvs,     0x009000,  0x005000,
-otadata,  data, ota,     0x00E000,  0x002000,
-app0,     app,  ota_0,   0x010000,  0x500000,
-app1,     app,  ota_1,   0x510000,  0x500000,
-shared,   data, 0x40,    0xA10000,  0x0B0000,
-model,    data, spiffs,  0xAC0000,  0x500000,

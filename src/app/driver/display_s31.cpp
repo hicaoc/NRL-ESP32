@@ -18,17 +18,22 @@
 #include "../../services/cw_service.h"
 #include "../../services/display_notice.h"
 #include "../../services/espnow_link.h"
+#include "../../services/fmo_service.h"
+#include "../../services/fmo_cert_store.h"
 #include "../../services/map_tiles.h"
 #include "../../services/music_player.h"
 #include "../../services/music_playlist.h"
 #include "../../services/nanny.h"
 #include "../../services/ota_service.h"
 #include "../../services/radio_favorites.h"
+#include "../../services/server_list_store.h"
 #include "../../services/storage_service.h"
+#include "../../services/time_sync_service.h"
 #include "../../services/signaling_service.h"
 #include "../../services/sstv_service.h"
 #include "../../services/video_call.h"
 #include "external_radio.h"
+#include "fonts/lv_font_callsign.h"
 #include "fonts/lv_font_cjk.h"
 #include "game_tetris.h"
 #include "i2c1.h"
@@ -53,7 +58,6 @@
 #include <esp_lcd_touch.h>
 #include <esp_lcd_touch_gt1151.h>
 #include <esp_log.h>
-#include <esp_sntp.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
 #include <nvs.h>
@@ -87,6 +91,7 @@ constexpr uint32_t kColorWarn = 0xF5B453;
 constexpr uint32_t kColorBad = 0xF87171;
 constexpr uint32_t kColorTx = 0xFF6B6B;
 constexpr uint32_t kColorDuplex = 0xA78BFA;
+constexpr uint32_t kColorFmo = 0xF5B453;
 constexpr const char *kCallsignPlaceholder = "----------";
 constexpr size_t kStationFieldChars = 10u;
 constexpr size_t kWifiOptionCount = 12u;  // max scanned SSIDs listed in the dropdown
@@ -108,6 +113,8 @@ enum class Page : uint8_t {
     Nanny,
     Smb,
     EspNow,
+    NrlServers,
+    Fmo,
     Ctcss,
     Mdc,
     Dtmf,
@@ -153,6 +160,12 @@ enum class Action : intptr_t {
     Smb,
     Apps,
     EspNow,
+    NrlServers,
+    SaveNrlServer,
+    RefreshNrlServers,
+    Fmo,
+    SaveFmoServer,
+    RefreshFmoServers,
     SaveSmb,
     ClearSmb,
     SaveNanny,
@@ -228,6 +241,7 @@ enum class AudioControl : intptr_t {
     Noise,
     MicHpf,
     EspNow,
+    Fmo,
     EspNowRx,
     EspNowOpus,
     OpusCodec,
@@ -246,6 +260,7 @@ enum class AudioControl : intptr_t {
 bool s_ready = false;
 bool s_provisioning_mode = false;
 Page s_page = Page::Home;
+Page s_nrl_servers_return_page = Page::Home;
 uint32_t s_last_refresh_ms = 0u;
 uint32_t s_volume_change_ms = 0u;
 bool s_time_sync_started = false;
@@ -274,7 +289,9 @@ esp_lcd_panel_io_handle_t s_touch_io = nullptr;
 lv_indev_t *s_touch_indev = nullptr;
 
 lv_obj_t *s_lbl_caption = nullptr;
+lv_obj_t *s_lbl_rx_source = nullptr;
 lv_obj_t *s_lbl_rx_codec = nullptr;
+char s_shown_rx_source[12] = {};
 char s_shown_rx_codec[12] = {};
 lv_obj_t *s_lbl_dmrid = nullptr;
 char s_shown_dmrid[20] = {};
@@ -290,6 +307,7 @@ lv_obj_t *s_lbl_vol = nullptr;
 lv_obj_t *s_lbl_remote_station = nullptr;
 lv_obj_t *s_lbl_ip = nullptr;
 lv_obj_t *s_lbl_server = nullptr;
+lv_obj_t *s_lbl_fmo_server = nullptr;
 lv_obj_t *s_lbl_detail = nullptr;
 lv_obj_t *s_lbl_form_status = nullptr;
 lv_obj_t *s_lbl_provision_ip = nullptr;
@@ -368,7 +386,29 @@ lv_obj_t *s_ta_radio_name = nullptr;
 lv_obj_t *s_dd_radio_fav = nullptr;
 lv_obj_t *s_dd_music_target = nullptr;
 lv_obj_t *s_sw_espnow = nullptr;
+lv_obj_t *s_sw_fmo = nullptr;
 lv_obj_t *s_lbl_espnow_status = nullptr;
+lv_obj_t *s_dd_fmo_server = nullptr;
+lv_obj_t *s_lbl_fmo_link = nullptr;
+lv_obj_t *s_lbl_fmo_name = nullptr;
+lv_obj_t *s_lbl_fmo_address = nullptr;
+lv_obj_t *s_lbl_fmo_population = nullptr;
+size_t s_fmo_option_count = 0u;
+char *s_fmo_options = nullptr;
+char s_shown_fmo_link[96] = {};
+char s_shown_fmo_name[128] = {};
+char s_shown_fmo_address[96] = {};
+char s_shown_fmo_population[64] = {};
+lv_obj_t *s_dd_nrl_server = nullptr;
+lv_obj_t *s_lbl_nrl_name = nullptr;
+lv_obj_t *s_lbl_nrl_address = nullptr;
+lv_obj_t *s_lbl_nrl_population = nullptr;
+NrlServerInfo *s_nrl_servers = nullptr;
+size_t s_nrl_server_count = 0u;
+char *s_nrl_options = nullptr;
+char s_shown_nrl_name[128] = {};
+char s_shown_nrl_address[96] = {};
+char s_shown_nrl_population[64] = {};
 // TX-codec tags in the top-right corner of the Home PTT buttons.
 lv_obj_t *s_lbl_ptt_codec = nullptr;
 lv_obj_t *s_lbl_eptt_codec = nullptr;
@@ -386,9 +426,10 @@ uint32_t s_clr_cpu = 0xFFFFFFFFu;
 void *s_fb_bench = nullptr;                       // fb0, for the FB benchmark
 volatile bool s_force_invalidate = false;         // repaint after the benchmark
 char s_shown_espnow_status[128] = {};
-// Whether the Home page was built with the split (NRL + ESP-NOW) PTT; when
-// the ESP-NOW enable state changes, refreshHome rebuilds the page.
-bool s_home_espnow_split = false;
+// Auxiliary half of the split Home PTT: 0=none, 1=ESP-NOW, 2=FMO. FMO takes
+// precedence when both optional links are enabled, keeping the requested two
+// stacked buttons instead of shrinking the touch targets to three rows.
+uint8_t s_home_aux_ptt = 0u;
 // Config generation this UI last rendered/produced. When another config
 // writer (web portal, AT console) bumps CONFIG_NOTIFY past this, refresh()
 // rebuilds the visible form page so its widgets show the new values.
@@ -583,7 +624,8 @@ char s_shown_wifi[32] = {};
 char s_shown_vol[16] = {};
 char s_shown_remote_station[160] = {};
 char s_shown_ip[96] = {};
-char s_shown_server[96] = {};
+char s_shown_server[192] = {};
+char s_shown_fmo_server[192] = {};
 char s_shown_signaling[96] = {};
 char s_shown_detail[512] = {};
 char s_shown_bt_top[24] = {};
@@ -598,6 +640,7 @@ char s_wifi_option_ssids[kWifiOptionCount][33] = {};
 constexpr uint32_t kColorUnset = 0xFFFFFFFFu;
 uint32_t s_clr_callsign = kColorUnset;
 uint32_t s_clr_server = kColorUnset;
+uint32_t s_clr_fmo_server = kColorUnset;
 uint32_t s_clr_remote_station = kColorUnset;
 uint32_t s_clr_bt_top = kColorUnset;
 int s_ls_callsign = -1;  // callsign letter-spacing
@@ -960,6 +1003,8 @@ const TrEntry kTr[] = {
     // Station page
     {"Callsign", "呼号"},
     {"Server Host / IP", "服务器地址 / IP"},
+    {"NRL Server (tap to select)", "NRL 服务器（点击选择）"},
+    {"Manual Host / IP", "手动地址 / IP"},
     {"Port", "端口"},
     {"Edit station and server settings, then save.", "修改台站和服务器设置后保存。"},
     {"Callsign: %s\nSSID: %u\nServer: %s:%u\n\nEdit station and server settings on the Station page.",
@@ -1050,6 +1095,10 @@ const TrEntry kTr[] = {
     {"ESP-NOW receive muted.", "ESP-NOW 接收已静默。"},
     {"ESP-NOW TX: Opus 16k wideband.", "ESP-NOW 发射: Opus 16k 宽带。"},
     {"ESP-NOW TX: G.711 8k.", "ESP-NOW 发射: G.711 8k。"},
+    {"Configure FMO in Web first.", "请先通过 Web 配置 FMO。"},
+    {"FMO setting failed.", "FMO 设置失败。"},
+    {"FMO enabled.", "FMO 已开启。"},
+    {"FMO disabled.", "FMO 已关闭。"},
     {"Opus enable failed (out of memory); staying on G.711.",
      "Opus 开启失败 (内存不足), 保持 G.711。"},
     {"Off-grid intercom with nearby devices. When on, the home screen "
@@ -1184,11 +1233,14 @@ void action(lv_event_t *event);
 void volumeEvent(lv_event_t *event);
 void softPttEvent(lv_event_t *event);
 void espnowPttEvent(lv_event_t *event);
+void fmoPttEvent(lv_event_t *event);
 void wifiEnableEvent(lv_event_t *event);
 void textAreaEvent(lv_event_t *event);
 void wifiOptionEvent(lv_event_t *event);
 void audioSliderEvent(lv_event_t *event);
 void audioSwitchEvent(lv_event_t *event);
+void fmoServerEvent(lv_event_t *event);
+void nrlServerEvent(lv_event_t *event);
 void musicTargetEvent(lv_event_t *event);
 void musicOutputEvent(lv_event_t *event);
 void languageEvent(lv_event_t *event);
@@ -1200,6 +1252,9 @@ void buildAprs();
 void buildAprsGateway();
 void rebuildCurrentPage();
 void buildProvisioning();
+void buildFmo();
+void buildNrlServers();
+void refreshFmoPage();
 void refreshProvisioning();
 void stopVideoView();
 lv_obj_t *styledDropdown(lv_obj_t *parent, int x, int y, int w);
@@ -1393,12 +1448,24 @@ void formatStationBadge(char *out, size_t out_size, const char *call, unsigned s
 
 void clearScreen()
 {
+    NRLAudioBridge_SetPtt(false);
+    ESPNOW_LINK_SetPtt(false);
+    FMO_SetPtt(false);
     // A page (re)build renders current config; consume any pending change.
     s_cfg_gen_seen = CONFIG_NOTIFY_Generation();
     // Stop the game's lv_timer before its widgets are deleted below.
     GAME_TETRIS_Teardown();
     lv_obj_t *scr = lv_screen_active();
+    char *old_fmo_options = s_fmo_options;
+    s_fmo_options = nullptr;
+    char *old_nrl_options = s_nrl_options;
+    s_nrl_options = nullptr;
+    NrlServerInfo *old_nrl_servers = s_nrl_servers;
+    s_nrl_servers = nullptr;
     lv_obj_clean(scr);
+    free(old_fmo_options);
+    free(old_nrl_options);
+    free(old_nrl_servers);
     lv_obj_set_style_bg_color(scr, lv_color_hex(kColorBg), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
@@ -1413,16 +1480,20 @@ void clearScreen()
     memset(s_shown_remote_station, 0, sizeof(s_shown_remote_station));
     memset(s_shown_ip, 0, sizeof(s_shown_ip));
     memset(s_shown_server, 0, sizeof(s_shown_server));
+    memset(s_shown_fmo_server, 0, sizeof(s_shown_fmo_server));
     memset(s_shown_signaling, 0, sizeof(s_shown_signaling));
     memset(s_shown_detail, 0, sizeof(s_shown_detail));
     memset(s_shown_bt_top, 0, sizeof(s_shown_bt_top));
     // Labels are recreated on rebuild, so drop the colour/style caches too.
     s_clr_callsign = kColorUnset;
     s_clr_server = kColorUnset;
+    s_clr_fmo_server = kColorUnset;
     s_clr_remote_station = kColorUnset;
     s_clr_bt_top = kColorUnset;
     s_ls_callsign = -1;
     s_lbl_caption = nullptr;
+    s_lbl_rx_source = nullptr;
+    s_shown_rx_source[0] = '\0';
     s_lbl_rx_codec = nullptr;
     s_shown_rx_codec[0] = '\0';
     s_lbl_dmrid = nullptr;
@@ -1438,6 +1509,7 @@ void clearScreen()
     s_lbl_remote_station = nullptr;
     s_lbl_ip = nullptr;
     s_lbl_server = nullptr;
+    s_lbl_fmo_server = nullptr;
     s_lbl_detail = nullptr;
     s_lbl_form_status = nullptr;
     s_lbl_cw_rx = nullptr;
@@ -1520,8 +1592,27 @@ void clearScreen()
     s_dd_radio_fav = nullptr;
     s_dd_music_target = nullptr;
     s_sw_espnow = nullptr;
+    s_sw_fmo = nullptr;
     s_lbl_espnow_status = nullptr;
     memset(s_shown_espnow_status, 0, sizeof(s_shown_espnow_status));
+    s_dd_fmo_server = nullptr;
+    s_lbl_fmo_link = nullptr;
+    s_lbl_fmo_name = nullptr;
+    s_lbl_fmo_address = nullptr;
+    s_lbl_fmo_population = nullptr;
+    s_fmo_option_count = 0u;
+    s_shown_fmo_link[0] = '\0';
+    s_shown_fmo_name[0] = '\0';
+    s_shown_fmo_address[0] = '\0';
+    s_shown_fmo_population[0] = '\0';
+    s_dd_nrl_server = nullptr;
+    s_lbl_nrl_name = nullptr;
+    s_lbl_nrl_address = nullptr;
+    s_lbl_nrl_population = nullptr;
+    s_nrl_server_count = 0u;
+    s_shown_nrl_name[0] = '\0';
+    s_shown_nrl_address[0] = '\0';
+    s_shown_nrl_population[0] = '\0';
     s_lbl_ptt_codec = nullptr;
     s_lbl_eptt_codec = nullptr;
     s_shown_ptt_codec[0] = '\0';
@@ -1713,10 +1804,18 @@ void buildHome()
     topBar(scr);
 
     // Left: callsign / status, with the network IP underneath.
-    lv_obj_t *left = panel(scr, 22, 78, 458, 270);
+    lv_obj_t *left = panel(scr, 22, 78, 458, 284);
     s_lbl_caption = label(left, &lv_font_montserrat_20, kColorDim);
     lv_obj_align(s_lbl_caption, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_label_set_text(s_lbl_caption, tr("STANDBY"));
+
+    // Active voice source is centred above the callsign, between the state and
+    // codec tags, so NRL and FMO calls are unambiguous at a glance.
+    s_lbl_rx_source = label(left, &lv_font_montserrat_20, kColorDim);
+    lv_obj_set_width(s_lbl_rx_source, 150);
+    lv_obj_align(s_lbl_rx_source, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_text_align(s_lbl_rx_source, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_lbl_rx_source, "");
 
     // Incoming-stream codec tag (OPUS / G.711), top-right opposite the
     // caption; only shown while an NRL voice stream is being received.
@@ -1729,42 +1828,77 @@ void buildHome()
     // receive-state caption or the callsign.
     s_lbl_dmrid = label(left, &lv_font_montserrat_20, kColorSub);
     lv_obj_set_width(s_lbl_dmrid, 430);
-    lv_obj_align(s_lbl_dmrid, LV_ALIGN_LEFT_MID, 0, -58);
+    lv_obj_align(s_lbl_dmrid, LV_ALIGN_LEFT_MID, 0, -84);
     lv_label_set_text(s_lbl_dmrid, "");
 
-    // Incoming caller's callsign-SSID at the largest crisp built-in font (48px),
-    // centred in the freed space so it reads as the focal element.
-    s_lbl_callsign = label(left, &lv_font_montserrat_48, kColorText);
+    // Callsigns only need A-Z, 0-9 and '-'. A compact dedicated 72 px font is
+    // clearer and smaller than compiling another complete Montserrat font.
+    s_lbl_callsign = label(left, &lv_font_callsign_72, kColorText);
     lv_obj_set_width(s_lbl_callsign, 430);
-    lv_obj_align(s_lbl_callsign, LV_ALIGN_LEFT_MID, 0, -14);
+    lv_obj_align(s_lbl_callsign, LV_ALIGN_CENTER, 0, -40);
+    lv_obj_set_style_text_align(s_lbl_callsign, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_lbl_callsign, kCallsignPlaceholder);
 
     // Last decoded signaling (CW/MDC/CTCSS/DTMF) shown below the callsign.
     s_lbl_signaling = label(left, &lv_font_montserrat_16, kColorAccent);
     lv_obj_set_width(s_lbl_signaling, 430);
-    lv_obj_align(s_lbl_signaling, LV_ALIGN_LEFT_MID, 0, 30);
+    lv_obj_align(s_lbl_signaling, LV_ALIGN_LEFT_MID, 0, -1);
     lv_label_set_long_mode(s_lbl_signaling, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_label_set_text(s_lbl_signaling, "");
 
-    // Bottom row of the main panel: local IP on the left, server IP on the right.
+    // Bottom of the main panel: local IP stays on the left; the selected NRL
+    // and FMO endpoints are wide, visibly clickable scrolling buttons.
     s_lbl_ip = label(left, &lv_font_montserrat_20, kColorAccent);
     lv_obj_set_width(s_lbl_ip, 215);
     lv_obj_align(s_lbl_ip, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     lv_label_set_long_mode(s_lbl_ip, LV_LABEL_LONG_DOT);
     lv_label_set_text(s_lbl_ip, LV_SYMBOL_WIFI " ---");
 
-    s_lbl_server = label(left, &lv_font_montserrat_20, kColorSub);
-    lv_obj_set_width(s_lbl_server, 215);
-    lv_obj_align(s_lbl_server, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
-    lv_obj_set_style_text_align(s_lbl_server, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_label_set_long_mode(s_lbl_server, LV_LABEL_LONG_DOT);
-    lv_label_set_text(s_lbl_server, tr("---"));
+    auto make_server_button = [&left](int bottom_offset, uint32_t bg,
+                                      uint32_t border, uint32_t pressed_bg,
+                                      Action target) {
+        lv_obj_t *btn = lv_button_create(left);
+        lv_obj_set_size(btn, 430, 34);
+        lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, bottom_offset);
+        lv_obj_set_style_radius(btn, 7, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(bg), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(pressed_bg), LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(btn, lv_color_hex(border), 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_pad_all(btn, 0, 0);
+        lv_obj_add_event_cb(btn, action, LV_EVENT_CLICKED,
+                            reinterpret_cast<void *>(static_cast<intptr_t>(target)));
+        return btn;
+    };
 
-    // Right: hold-to-talk PTT. With ESP-NOW enabled the area splits into two
-    // stacked PTTs -- top keys the NRL network, bottom is the dedicated
-    // ESP-NOW intercom PTT (purple when pressed to tell them apart).
-    const bool espnow_split = ESPNOW_LINK_IsEnabled();
-    s_home_espnow_split = espnow_split;
+    lv_obj_t *nrl_server_btn = make_server_button(
+        -80, 0x102B3A, kColorAccent, 0x17475C, Action::NrlServers);
+    s_lbl_server = label(nrl_server_btn, &s_font_ui_20, kColorSub);
+    lv_obj_set_width(s_lbl_server, 380);
+    lv_obj_center(s_lbl_server);
+    lv_obj_set_style_text_align(s_lbl_server, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_transform_scale(s_lbl_server, 282, 0);
+    lv_label_set_long_mode(s_lbl_server, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_label_set_text(s_lbl_server, "NRL ---");
+
+    lv_obj_t *fmo_server_btn = make_server_button(
+        -40, 0x302719, kColorFmo, 0x58451E, Action::Fmo);
+    s_lbl_fmo_server = label(fmo_server_btn, &s_font_ui_20, kColorSub);
+    lv_obj_set_width(s_lbl_fmo_server, 380);
+    lv_obj_center(s_lbl_fmo_server);
+    lv_obj_set_style_text_align(s_lbl_fmo_server, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_transform_scale(s_lbl_fmo_server, 282, 0);
+    lv_label_set_long_mode(s_lbl_fmo_server, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_label_set_text(s_lbl_fmo_server, "FMO ---");
+
+    // Right: two large touch targets. FMO gets the auxiliary half whenever its
+    // uplink is armed; otherwise the established ESP-NOW split is retained.
+    FmoConfig fmo_config = {};
+    FMO_GetConfig(&fmo_config);
+    const uint8_t aux_ptt = (fmo_config.enabled && fmo_config.transmit) ? 2u :
+                            ESPNOW_LINK_IsEnabled() ? 1u : 0u;
+    s_home_aux_ptt = aux_ptt;
     auto make_ptt = [&scr](int y, int h, void (*cb)(lv_event_t *), uint32_t pressed_color) {
         lv_obj_t *ptt = lv_button_create(scr);
         lv_obj_set_pos(ptt, 502, y);
@@ -1787,27 +1921,31 @@ void buildHome()
         lv_label_set_text(tag, "");
         return tag;
     };
-    if (!espnow_split) {
+    if (aux_ptt == 0u) {
         lv_obj_t *ptt = make_ptt(78, 270, softPttEvent, 0x7A1F1F);
         lv_obj_t *ptt_lbl = label(ptt, &lv_font_montserrat_48, kColorText);
         lv_obj_center(ptt_lbl);
-        lv_label_set_text(ptt_lbl, tr("PTT"));
+        lv_label_set_text(ptt_lbl, tr("NRL PTT"));
         s_lbl_ptt_codec = make_codec_tag(ptt, kColorSub);
         s_btn_ptt = ptt;
     } else {
         lv_obj_t *ptt = make_ptt(78, 128, softPttEvent, 0x7A1F1F);
-        lv_obj_t *ptt_lbl = label(ptt, &lv_font_montserrat_48, kColorText);
+        lv_obj_t *ptt_lbl = label(ptt, &lv_font_montserrat_28, kColorText);
         lv_obj_center(ptt_lbl);
-        lv_label_set_text(ptt_lbl, tr("PTT"));
+        lv_label_set_text(ptt_lbl, tr("NRL PTT"));
         s_lbl_ptt_codec = make_codec_tag(ptt, kColorSub);
         s_btn_ptt = ptt;
 
-        lv_obj_t *eptt = make_ptt(220, 128, espnowPttEvent, 0x4C1D95);
-        lv_obj_t *eptt_lbl = label(eptt, &lv_font_montserrat_20, kColorDuplex);
+        const bool fmo_aux = aux_ptt == 2u;
+        lv_obj_t *eptt = make_ptt(220, 128,
+                                  fmo_aux ? fmoPttEvent : espnowPttEvent,
+                                  fmo_aux ? 0x7A4D12 : 0x4C1D95);
+        lv_obj_t *eptt_lbl = label(eptt, &lv_font_montserrat_28,
+                                   fmo_aux ? kColorFmo : kColorDuplex);
         lv_obj_center(eptt_lbl);
         lv_obj_set_style_text_align(eptt_lbl, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_text(eptt_lbl, tr("ESP-NOW\nPTT"));
-        s_lbl_eptt_codec = make_codec_tag(eptt, kColorDuplex);
+        lv_label_set_text(eptt_lbl, fmo_aux ? "FMO PTT" : tr("ESP-NOW PTT"));
+        s_lbl_eptt_codec = make_codec_tag(eptt, fmo_aux ? kColorFmo : kColorDuplex);
         s_btn_eptt = eptt;
     }
 
@@ -2080,6 +2218,7 @@ void buildConfig()
     button(scr, 24, 264, 180, 80, "Nanny", Action::Nanny);
     button(scr, 214, 264, 180, 80, "NAS", Action::Smb);
     button(scr, 404, 264, 180, 80, "About", Action::About);
+    button(scr, 594, 264, 180, 80, "FMO", Action::Fmo);
     button(scr, 24, 372, 230, 76, "Back", Action::Home);
 
     // Language selector: switching persists and rebuilds this page in place.
@@ -2218,7 +2357,7 @@ void buildWifi()
     if (!s_provisioning_mode) {
         topBar(scr);
     }
-    lv_obj_t *box = panel(scr, 24, 86, 750, 250);
+    lv_obj_t *box = panel(scr, 24, 86, 750, 276);
     const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
 
     fieldLabel(box, 0, 6, "Nearby WiFi");
@@ -2305,17 +2444,48 @@ void buildStation()
     switchControl(box, 470, 24, "Opus", NRLAudioBridge_GetVoiceCodec() == 1u,
                   AudioControl::OpusCodec);
 
-    fieldLabel(box, 0, 82, "Server Host / IP");
-    s_ta_server_host = textArea(box, 0, 106, 430, "server host", cfg ? cfg->server_host : "", 64, false,
+    // The normal path is a full-width current-server button. It opens exactly
+    // the same cached NRL list as the Home callsign panel, without invoking a
+    // keyboard. Manual host/port fields remain below for private/test servers.
+    fieldLabel(box, 0, 78, "NRL Server (tap to select)");
+    lv_obj_t *server_pick = button(box, 0, 100, 710, 44, "", Action::NrlServers);
+    lv_obj_t *server_pick_text = lv_obj_get_child(server_pick, 0);
+    if (server_pick_text != nullptr) {
+        lv_obj_set_width(server_pick_text, 680);
+        lv_obj_set_style_text_font(server_pick_text, &s_font_ui_20, 0);
+        lv_obj_set_style_text_color(server_pick_text, lv_color_hex(kColorAccent), 0);
+        lv_obj_set_style_text_align(server_pick_text, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(server_pick_text, LV_LABEL_LONG_SCROLL_CIRCULAR);
+
+        char friendly_name[96] = {};
+        if (cfg != nullptr && cfg->server_host[0] != '\0') {
+            (void)SERVER_LIST_STORE_FindNrlServerName(
+                cfg->server_host, cfg->server_port, friendly_name, sizeof(friendly_name));
+        }
+        char current_server[192] = {};
+        if (cfg != nullptr && cfg->server_host[0] != '\0' && cfg->server_port != 0u) {
+            snprintf(current_server, sizeof(current_server), "%s%s%s | %s:%u",
+                     friendly_name[0] != '\0' ? "NRL " : "",
+                     friendly_name[0] != '\0' ? friendly_name : "NRL",
+                     friendly_name[0] != '\0' ? "" : " Server",
+                     cfg->server_host, static_cast<unsigned>(cfg->server_port));
+        } else {
+            snprintf(current_server, sizeof(current_server), "NRL ---");
+        }
+        lv_label_set_text(server_pick_text, current_server);
+    }
+
+    fieldLabel(box, 0, 153, "Manual Host / IP");
+    s_ta_server_host = textArea(box, 0, 176, 430, "server host", cfg ? cfg->server_host : "", 64, false,
                                 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-_", false);
-    fieldLabel(box, 460, 82, "Port");
+    fieldLabel(box, 460, 153, "Port");
     char port[8] = {};
     snprintf(port, sizeof(port), "%u", cfg ? static_cast<unsigned>(cfg->server_port) : 0);
-    s_ta_server_port = textArea(box, 460, 106, 120, "0", port, 5, false, "0123456789", true);
+    s_ta_server_port = textArea(box, 460, 176, 120, "0", port, 5, false, "0123456789", true);
 
     s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
     lv_obj_set_width(s_lbl_form_status, 710);
-    lv_obj_set_pos(s_lbl_form_status, 0, 176);
+    lv_obj_set_pos(s_lbl_form_status, 0, 226);
     lv_label_set_text(s_lbl_form_status, tr("Edit station and server settings, then save."));
 
     button(scr, 24, 372, 230, 76, "Back", Action::Config);
@@ -2410,6 +2580,281 @@ lv_obj_t *styledDropdown(lv_obj_t *parent, int x, int y, int w)
         lv_obj_set_style_max_height(dd_list, 220, 0);
     }
     return dd;
+}
+
+void refreshNrlServerDetails()
+{
+    if (s_dd_nrl_server == nullptr || s_nrl_servers == nullptr) return;
+    const size_t index = static_cast<size_t>(lv_dropdown_get_selected(s_dd_nrl_server));
+    if (index >= s_nrl_server_count) return;
+    const NrlServerInfo &server = s_nrl_servers[index];
+    char text[128] = {};
+    snprintf(text, sizeof(text), "Name: %s", server.name);
+    setLabel(s_lbl_nrl_name, s_shown_nrl_name, sizeof(s_shown_nrl_name), text);
+    snprintf(text, sizeof(text), "Address: %s:%u", server.host,
+             static_cast<unsigned>(server.port));
+    setLabel(s_lbl_nrl_address, s_shown_nrl_address,
+             sizeof(s_shown_nrl_address), text);
+    snprintf(text, sizeof(text), "Online / Total: %lu / %lu",
+             static_cast<unsigned long>(server.online),
+             static_cast<unsigned long>(server.total));
+    setLabel(s_lbl_nrl_population, s_shown_nrl_population,
+             sizeof(s_shown_nrl_population), text);
+}
+
+void nrlServerEvent(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_VALUE_CHANGED) return;
+    refreshNrlServerDetails();
+    formStatus("Tap Apply Server to switch the NRL connection.", kColorWarn);
+}
+
+void buildNrlServers()
+{
+    clearScreen();
+    s_page = Page::NrlServers;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+    lv_obj_t *box = panel(scr, 24, 82, 750, 270);
+    const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
+
+    lv_obj_t *title = label(box, &lv_font_montserrat_20, kColorAccent);
+    lv_obj_set_pos(title, 0, 0);
+    lv_label_set_text(title, "NRL Server Quick Switch");
+    lv_obj_t *count_label = label(box, &s_font_ui_16, kColorSub);
+    lv_obj_set_pos(count_label, 500, 4);
+    lv_obj_set_width(count_label, 210);
+    lv_obj_set_style_text_align(count_label, LV_TEXT_ALIGN_RIGHT, 0);
+
+    (void)SERVER_LIST_STORE_LoadNrlServers(&s_nrl_servers, &s_nrl_server_count);
+    char count_text[32] = {};
+    snprintf(count_text, sizeof(count_text), "%u servers",
+             static_cast<unsigned>(s_nrl_server_count));
+    lv_label_set_text(count_label, count_text);
+
+    fieldLabel(box, 0, 52, "NRL Server (name | address | online/total)");
+    s_dd_nrl_server = styledDropdown(box, 0, 76, 710);
+    const size_t option_capacity = s_nrl_server_count > 0u
+                                       ? s_nrl_server_count * 220u + 1u
+                                       : 64u;
+    s_nrl_options = static_cast<char *>(heap_caps_calloc(
+        option_capacity, 1u, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    size_t selected = 0u;
+    bool matched = false;
+    if (s_nrl_options != nullptr && s_nrl_server_count > 0u) {
+        size_t used = 0u;
+        for (size_t i = 0u; i < s_nrl_server_count; ++i) {
+            NrlServerInfo &server = s_nrl_servers[i];
+            for (char *p = server.name; *p != '\0'; ++p) {
+                if (*p == '\r' || *p == '\n') *p = ' ';
+            }
+            const int written = snprintf(
+                s_nrl_options + used, option_capacity - used,
+                "%s%s | %s:%u | %lu/%lu", i == 0u ? "" : "\n",
+                server.name, server.host, static_cast<unsigned>(server.port),
+                static_cast<unsigned long>(server.online),
+                static_cast<unsigned long>(server.total));
+            if (written < 0 || static_cast<size_t>(written) >= option_capacity - used)
+                break;
+            used += static_cast<size_t>(written);
+            if (!matched && config != nullptr &&
+                server.port == config->server_port &&
+                strcasecmp(server.host, config->server_host) == 0) {
+                selected = i;
+                matched = true;
+            }
+        }
+        lv_dropdown_set_options_static(s_dd_nrl_server, s_nrl_options);
+        lv_dropdown_set_selected(s_dd_nrl_server, static_cast<uint32_t>(selected));
+    } else {
+        lv_dropdown_set_options(s_dd_nrl_server,
+                                s_nrl_options == nullptr && s_nrl_server_count > 0u
+                                    ? "PSRAM unavailable"
+                                    : "No cached NRL servers");
+        lv_obj_add_state(s_dd_nrl_server, LV_STATE_DISABLED);
+        s_nrl_server_count = 0u;
+    }
+    lv_obj_add_event_cb(s_dd_nrl_server, nrlServerEvent,
+                        LV_EVENT_VALUE_CHANGED, nullptr);
+
+    s_lbl_nrl_name = label(box, &s_font_ui_16, kColorText);
+    lv_obj_set_pos(s_lbl_nrl_name, 0, 132);
+    lv_obj_set_width(s_lbl_nrl_name, 710);
+    lv_label_set_long_mode(s_lbl_nrl_name, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    s_lbl_nrl_address = label(box, &s_font_ui_16, kColorAccent);
+    lv_obj_set_pos(s_lbl_nrl_address, 0, 158);
+    lv_obj_set_width(s_lbl_nrl_address, 470);
+    lv_label_set_long_mode(s_lbl_nrl_address, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    s_lbl_nrl_population = label(box, &s_font_ui_16, kColorGood);
+    lv_obj_set_pos(s_lbl_nrl_population, 480, 158);
+    lv_obj_set_width(s_lbl_nrl_population, 230);
+    lv_obj_set_style_text_align(s_lbl_nrl_population, LV_TEXT_ALIGN_RIGHT, 0);
+    s_lbl_form_status = label(box, &s_font_ui_16, kColorSub);
+    lv_obj_set_pos(s_lbl_form_status, 0, 202);
+    lv_obj_set_width(s_lbl_form_status, 710);
+    lv_label_set_text(s_lbl_form_status,
+                      matched ? "Current NRL server selected."
+                              : "Choose a server, then tap Apply Server.");
+    refreshNrlServerDetails();
+
+    button(scr, 24, 372, 200, 76, "Back",
+           s_nrl_servers_return_page == Page::Station ? Action::Station : Action::Home);
+    button(scr, 300, 372, 200, 76, "Reload List", Action::RefreshNrlServers);
+    button(scr, 574, 372, 200, 76, "Apply Server", Action::SaveNrlServer);
+}
+
+void refreshFmoServerDetails()
+{
+    if (s_dd_fmo_server == nullptr) return;
+    FmoServer server = {};
+    const size_t index = static_cast<size_t>(lv_dropdown_get_selected(s_dd_fmo_server));
+    if (index >= s_fmo_option_count || !FMO_GetServer(index, &server)) {
+        setLabel(s_lbl_fmo_name, s_shown_fmo_name,
+                 sizeof(s_shown_fmo_name), "Name: ---");
+        setLabel(s_lbl_fmo_address, s_shown_fmo_address,
+                 sizeof(s_shown_fmo_address), "Address: ---");
+        setLabel(s_lbl_fmo_population, s_shown_fmo_population,
+                 sizeof(s_shown_fmo_population), "Online / Total: 0 / 0");
+        return;
+    }
+    char text[128] = {};
+    snprintf(text, sizeof(text), "Name: %s",
+             server.name[0] != '\0' ? server.name : server.callsign);
+    setLabel(s_lbl_fmo_name, s_shown_fmo_name,
+             sizeof(s_shown_fmo_name), text);
+    snprintf(text, sizeof(text), "Address: %s:%u", server.host,
+             static_cast<unsigned>(server.port));
+    setLabel(s_lbl_fmo_address, s_shown_fmo_address,
+             sizeof(s_shown_fmo_address), text);
+    snprintf(text, sizeof(text), "Online / Total: %lu / %lu",
+             static_cast<unsigned long>(server.online),
+             static_cast<unsigned long>(server.total));
+    setLabel(s_lbl_fmo_population, s_shown_fmo_population,
+             sizeof(s_shown_fmo_population), text);
+}
+
+void fmoServerEvent(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_VALUE_CHANGED) return;
+    refreshFmoServerDetails();
+    formStatus("Tap Apply Server to save and reconnect.", kColorWarn);
+}
+
+void buildFmo()
+{
+    clearScreen();
+    s_page = Page::Fmo;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+    lv_obj_t *box = panel(scr, 24, 82, 750, 270);
+
+    FmoConfig config = {};
+    FMO_GetConfig(&config);
+    s_sw_fmo = switchControl(box, 0, 0, "Enable FMO", config.enabled,
+                             AudioControl::Fmo);
+    s_lbl_fmo_link = label(box, &s_font_ui_16, kColorSub);
+    lv_obj_set_pos(s_lbl_fmo_link, 280, 7);
+    lv_obj_set_width(s_lbl_fmo_link, 430);
+    lv_obj_set_style_text_align(s_lbl_fmo_link, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_label_set_long_mode(s_lbl_fmo_link, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_label_set_text(s_lbl_fmo_link, "FMO: ---");
+
+    fieldLabel(box, 0, 52, "FMO Server (name | address | online/total)");
+    s_dd_fmo_server = styledDropdown(box, 0, 76, 710);
+    s_fmo_option_count = FMO_ServerCount();
+    const size_t option_capacity = s_fmo_option_count > 0u
+                                       ? s_fmo_option_count * 220u + 1u
+                                       : 64u;
+    s_fmo_options = static_cast<char *>(heap_caps_calloc(
+        option_capacity, 1u, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    size_t selected = 0u;
+    bool matched = false;
+    if (s_fmo_options != nullptr && s_fmo_option_count > 0u) {
+        size_t used = 0u;
+        for (size_t i = 0u; i < s_fmo_option_count; ++i) {
+            FmoServer server = {};
+            if (!FMO_GetServer(i, &server)) continue;
+            for (char *p = server.name; *p != '\0'; ++p) {
+                if (*p == '\r' || *p == '\n') *p = ' ';
+            }
+            const int written = snprintf(
+                s_fmo_options + used, option_capacity - used,
+                "%s%s | %s:%u | %lu/%lu", i == 0u ? "" : "\n",
+                server.name[0] != '\0' ? server.name : server.callsign,
+                server.host, static_cast<unsigned>(server.port),
+                static_cast<unsigned long>(server.online),
+                static_cast<unsigned long>(server.total));
+            if (written < 0 || static_cast<size_t>(written) >= option_capacity - used) {
+                break;
+            }
+            used += static_cast<size_t>(written);
+            if (!matched && server.uid == config.server.uid &&
+                server.port == config.server.port &&
+                strcasecmp(server.host, config.server.host) == 0) {
+                selected = i;
+                matched = true;
+            }
+        }
+        lv_dropdown_set_options_static(s_dd_fmo_server, s_fmo_options);
+        lv_dropdown_set_selected(s_dd_fmo_server, static_cast<uint32_t>(selected));
+    } else {
+        lv_dropdown_set_options(s_dd_fmo_server,
+                                s_fmo_options == nullptr && s_fmo_option_count > 0u
+                                    ? "PSRAM unavailable"
+                                    : "No FMO servers discovered");
+        lv_obj_add_state(s_dd_fmo_server, LV_STATE_DISABLED);
+        s_fmo_option_count = 0u;
+    }
+    lv_obj_add_event_cb(s_dd_fmo_server, fmoServerEvent,
+                        LV_EVENT_VALUE_CHANGED, nullptr);
+
+    s_lbl_fmo_name = label(box, &s_font_ui_16, kColorText);
+    lv_obj_set_pos(s_lbl_fmo_name, 0, 132);
+    lv_obj_set_width(s_lbl_fmo_name, 710);
+    lv_label_set_long_mode(s_lbl_fmo_name, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    s_lbl_fmo_address = label(box, &s_font_ui_16, kColorAccent);
+    lv_obj_set_pos(s_lbl_fmo_address, 0, 158);
+    lv_obj_set_width(s_lbl_fmo_address, 470);
+    lv_label_set_long_mode(s_lbl_fmo_address, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    s_lbl_fmo_population = label(box, &s_font_ui_16, kColorGood);
+    lv_obj_set_pos(s_lbl_fmo_population, 480, 158);
+    lv_obj_set_width(s_lbl_fmo_population, 230);
+    lv_obj_set_style_text_align(s_lbl_fmo_population, LV_TEXT_ALIGN_RIGHT, 0);
+
+    s_lbl_form_status = label(box, &s_font_ui_16, kColorSub);
+    lv_obj_set_pos(s_lbl_form_status, 0, 202);
+    lv_obj_set_width(s_lbl_form_status, 710);
+    lv_label_set_long_mode(s_lbl_form_status, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_lbl_form_status,
+                      matched ? "Current server selected."
+                              : "Select a server, then tap Apply Server.");
+    refreshFmoServerDetails();
+    refreshFmoPage();
+
+    button(scr, 24, 372, 200, 76, "Back", Action::Config);
+    button(scr, 300, 372, 200, 76, "Reload List", Action::RefreshFmoServers);
+    button(scr, 574, 372, 200, 76, "Apply Server", Action::SaveFmoServer);
+}
+
+void refreshFmoPage()
+{
+    if (s_page != Page::Fmo || s_lbl_fmo_link == nullptr) return;
+    FmoConfig config = {};
+    FmoLinkStatus link = {};
+    FMO_GetConfig(&config);
+    FMO_GetLinkStatus(&link);
+    char text[sizeof(s_shown_fmo_link)] = {};
+    snprintf(text, sizeof(text), "%s | %u servers | %.48s",
+             link.connected ? "Connected" : config.enabled ? "Connecting" : "Disabled",
+             static_cast<unsigned>(FMO_ServerCount()),
+             config.server.name[0] != '\0' ? config.server.name : "No server");
+    if (setLabel(s_lbl_fmo_link, s_shown_fmo_link,
+                 sizeof(s_shown_fmo_link), text)) {
+        lv_obj_set_style_text_color(s_lbl_fmo_link,
+                                    lv_color_hex(link.connected ? kColorGood :
+                                                 config.enabled ? kColorWarn : kColorSub), 0);
+    }
+    refreshFmoServerDetails();
 }
 
 void buildSmb()
@@ -5720,6 +6165,65 @@ void action(lv_event_t *event)
         case Action::Smb: buildSmb(); break;
         case Action::Apps: buildApps(); break;
         case Action::EspNow: buildEspNow(); break;
+        case Action::NrlServers:
+            s_nrl_servers_return_page = (s_page == Page::Station) ? Page::Station : Page::Home;
+            buildNrlServers();
+            break;
+        case Action::SaveNrlServer: {
+            if (s_dd_nrl_server == nullptr || s_nrl_servers == nullptr ||
+                s_nrl_server_count == 0u) {
+                formStatus("No cached NRL server is available.", kColorBad);
+                break;
+            }
+            const size_t index =
+                static_cast<size_t>(lv_dropdown_get_selected(s_dd_nrl_server));
+            if (index >= s_nrl_server_count) {
+                formStatus("Invalid NRL server selection.", kColorBad);
+                break;
+            }
+            const NrlServerInfo selected = s_nrl_servers[index];
+            const bool ok = EXTERNAL_RADIO_SetServerHost(selected.host, false) &&
+                            EXTERNAL_RADIO_SetServerPort(selected.port, false) &&
+                            EXTERNAL_RADIO_SaveConfig();
+            if (!ok) {
+                formStatus("NRL server selection failed.", kColorBad);
+                break;
+            }
+            NRLAudioBridge_ApplyConfig(false, true);
+            s_cfg_gen_seen = CONFIG_NOTIFY_Generation();
+            if (s_nrl_servers_return_page == Page::Station) {
+                buildStation();
+            } else {
+                buildHome();
+            }
+            DISPLAY_NOTICE_Post("NRL server switched.", DISPLAY_NOTICE_SUCCESS, 2500u);
+            break;
+        }
+        case Action::RefreshNrlServers:
+            buildNrlServers();
+            formStatus("NRL server list reloaded from flash.", kColorGood);
+            break;
+        case Action::Fmo: buildFmo(); break;
+        case Action::SaveFmoServer: {
+            if (s_dd_fmo_server == nullptr || s_fmo_option_count == 0u) {
+                formStatus("No FMO server is available.", kColorBad);
+                break;
+            }
+            const size_t index =
+                static_cast<size_t>(lv_dropdown_get_selected(s_dd_fmo_server));
+            if (!FMO_SelectServer(index, true)) {
+                formStatus("FMO server selection failed.", kColorBad);
+                break;
+            }
+            s_cfg_gen_seen = CONFIG_NOTIFY_Generation();
+            buildFmo();
+            formStatus("FMO server saved; reconnecting.", kColorGood);
+            break;
+        }
+        case Action::RefreshFmoServers:
+            buildFmo();
+            formStatus("FMO server list reloaded.", kColorGood);
+            break;
         case Action::Ctcss: buildCtcss(); break;
         case Action::Mdc: buildMdc(); break;
         case Action::Dtmf: buildDtmf(); break;
@@ -6011,6 +6515,37 @@ void audioSwitchEvent(lv_event_t *event)
             }
             s_cfg_gen_seen = CONFIG_NOTIFY_Generation(); // own change
             return;
+        case AudioControl::Fmo: {
+            FmoConfig fmo = {};
+            FMO_GetConfig(&fmo);
+            bool ready = true;
+            if (checked) {
+                FmoIdentityStatus identity = {};
+                ready = FMO_CERT_GetStatus(&identity) == ESP_OK && identity.ready &&
+                        fmo.server.host[0] != '\0' && fmo.server.port != 0u &&
+                        fmo.server.uid != 0u && fmo.server.callsign[0] != '\0' &&
+                        fmo.server.has_fingerprint;
+            }
+            if (!ready) {
+                lv_obj_remove_state(obj, LV_STATE_CHECKED);
+                DISPLAY_NOTICE_Post("Configure FMO in Web first.",
+                                    DISPLAY_NOTICE_ERROR, 4000u);
+                return;
+            }
+            fmo.enabled = checked;
+            if (checked) fmo.transmit = true;
+            if (!FMO_SetConfig(&fmo, true)) {
+                if (checked) lv_obj_remove_state(obj, LV_STATE_CHECKED);
+                else lv_obj_add_state(obj, LV_STATE_CHECKED);
+                DISPLAY_NOTICE_Post("FMO setting failed.", DISPLAY_NOTICE_ERROR, 3000u);
+                return;
+            }
+            s_cfg_gen_seen = CONFIG_NOTIFY_Generation(); // own change
+            DISPLAY_NOTICE_Post(checked ? "FMO enabled." : "FMO disabled.",
+                                DISPLAY_NOTICE_SUCCESS, 2000u);
+            refreshFmoPage();
+            return;
+        }
         case AudioControl::EspNowRx:
             // Persists immediately; RX is independent of the TX enable.
             ESPNOW_LINK_SetRxEnabled(checked);
@@ -6118,17 +6653,16 @@ void languageEvent(lv_event_t *event)
     s_last_refresh_ms = 0;
 }
 
-// The Home "network" panel doubles as a hold-to-talk soft PTT: pressing anywhere
-// in it keys up; releasing (or sliding a finger off) stops transmit.
+// Dedicated NRL touch PTT: independent of the persisted physical-button target.
 void softPttEvent(lv_event_t *event)
 {
     switch (lv_event_get_code(event)) {
         case LV_EVENT_PRESSED:
-            STATUS_IO_SetSoftPtt(true);
+            NRLAudioBridge_SetPtt(true);
             break;
         case LV_EVENT_RELEASED:
         case LV_EVENT_PRESS_LOST:
-            STATUS_IO_SetSoftPtt(false);
+            NRLAudioBridge_SetPtt(false);
             break;
         default:
             return;
@@ -6153,16 +6687,26 @@ void espnowPttEvent(lv_event_t *event)
     s_last_refresh_ms = 0;
 }
 
+void fmoPttEvent(lv_event_t *event)
+{
+    switch (lv_event_get_code(event)) {
+        case LV_EVENT_PRESSED:
+            FMO_SetPtt(true);
+            break;
+        case LV_EVENT_RELEASED:
+        case LV_EVENT_PRESS_LOST:
+            FMO_SetPtt(false);
+            break;
+        default:
+            return;
+    }
+    s_last_refresh_ms = 0;
+}
+
 void refreshClock()
 {
     if (!s_time_sync_started && nrlWifiStaConnected()) {
-        setenv("TZ", "CST-8", 1);
-        tzset();
-        esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
-        esp_sntp_setservername(0, "ntp.aliyun.com");
-        esp_sntp_setservername(1, "ntp.ntsc.ac.cn");
-        esp_sntp_setservername(2, "pool.ntp.org");
-        esp_sntp_init();
+        (void)TIME_SYNC_StartIfNeeded();
         s_time_sync_started = true;
     }
 
@@ -6310,9 +6854,13 @@ void refreshStationBadges()
 
 void refreshHome()
 {
-    // ESP-NOW got toggled while sitting on Home (config page, web, AT, or the
-    // deferred boot restore): rebuild so the PTT area matches (single/split).
-    if (ESPNOW_LINK_IsEnabled() != s_home_espnow_split) {
+    FmoConfig fmo_config = {};
+    FMO_GetConfig(&fmo_config);
+    const uint8_t wanted_aux = (fmo_config.enabled && fmo_config.transmit) ? 2u :
+                               ESPNOW_LINK_IsEnabled() ? 1u : 0u;
+    // Optional-link config changed through LCD, Web or AT: rebuild the split
+    // control so the auxiliary button changes between FMO and ESP-NOW.
+    if (wanted_aux != s_home_aux_ptt) {
         buildHome();
         return;
     }
@@ -6320,9 +6868,13 @@ void refreshHome()
     char voice_call[8] = {};
     unsigned voice_ssid = 0;
     const bool rx = NRLAudioBridge_GetRemoteCaller(voice_call, sizeof(voice_call), &voice_ssid);
-    const bool tx = STATUS_IO_IsSqlActive();
+    const bool tx = NRLAudioBridge_PttActive();
     const bool espnow_tx = ESPNOW_LINK_PttActive();
     const bool espnow_rx = ESPNOW_LINK_IsReceiving();
+    FmoLinkStatus fmo = {};
+    FMO_GetLinkStatus(&fmo);
+    const bool fmo_tx = FMO_PttActive();
+    const bool fmo_rx = fmo.receiving && fmo.voice_callsign[0] != '\0';
 
     // Mirror the physical PTT / ESP-NOW PTT state onto the on-screen buttons so
     // the user sees the same pressed highlight regardless of input source.
@@ -6331,9 +6883,10 @@ void refreshHome()
         if (tx) lv_obj_add_state(s_btn_ptt, LV_STATE_PRESSED);
         else    lv_obj_remove_state(s_btn_ptt, LV_STATE_PRESSED);
     }
-    if (s_btn_eptt != nullptr && espnow_tx != s_eptt_shown_pressed) {
-        s_eptt_shown_pressed = espnow_tx;
-        if (espnow_tx) lv_obj_add_state(s_btn_eptt, LV_STATE_PRESSED);
+    const bool aux_tx = s_home_aux_ptt == 2u ? fmo_tx : espnow_tx;
+    if (s_btn_eptt != nullptr && aux_tx != s_eptt_shown_pressed) {
+        s_eptt_shown_pressed = aux_tx;
+        if (aux_tx) lv_obj_add_state(s_btn_eptt, LV_STATE_PRESSED);
         else           lv_obj_remove_state(s_btn_eptt, LV_STATE_PRESSED);
     }
     char espnow_peer[16] = {};
@@ -6345,15 +6898,20 @@ void refreshHome()
     setLabel(s_lbl_ptt_codec, s_shown_ptt_codec, sizeof(s_shown_ptt_codec),
              (NRLAudioBridge_GetVoiceCodec() == 1u) ? "OPUS" : "G711");
     setLabel(s_lbl_eptt_codec, s_shown_eptt_codec, sizeof(s_shown_eptt_codec),
+             s_home_aux_ptt == 2u ? "OPUS" :
              (ESPNOW_LINK_GetTxCodec() == 1u) ? "OPUS" : "G711");
 
     const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
-    // Main panel shows only the remote caller (NRL stream first, else the
-    // ESP-NOW peer). Local station lives in the top bar.
-    const bool has_caller = (rx && voice_call[0] != '\0');
-    const bool has_espnow_caller = (!has_caller && espnow_rx && espnow_peer[0] != '\0');
+    // FMO is given display priority when two network streams overlap; its
+    // callsign uses a distinct amber palette. Local station stays in top bar.
+    const bool has_fmo_caller = fmo_rx;
+    const bool has_caller = (!has_fmo_caller && rx && voice_call[0] != '\0');
+    const bool has_espnow_caller = (!has_fmo_caller && !has_caller &&
+                                    espnow_rx && espnow_peer[0] != '\0');
     char call[24] = {};
-    if (has_espnow_caller) {
+    if (has_fmo_caller) {
+        snprintf(call, sizeof(call), "%s", fmo.voice_callsign);
+    } else if (has_espnow_caller) {
         snprintf(call, sizeof(call), "%s", espnow_peer);
     } else {
         formatStationBadge(call, sizeof(call), has_caller ? voice_call : nullptr, voice_ssid);
@@ -6362,7 +6920,7 @@ void refreshHome()
 
     char dmrid[sizeof(s_shown_dmrid)] = {};
     const uint32_t remote_dmr_id = NRLAudioBridge_GetRemoteDmrId();
-    if (rx && remote_dmr_id != 0u) {
+    if (has_caller && remote_dmr_id != 0u) {
         snprintf(dmrid, sizeof(dmrid), "DMRID %lu",
                  static_cast<unsigned long>(remote_dmr_id));
     }
@@ -6371,7 +6929,7 @@ void refreshHome()
         // Spread only the placeholder dashes so they read bigger; keep a real
         // callsign at normal spacing. Only re-apply on change (avoids a full
         // re-render every tick).
-        const int letter_space = (has_caller || has_espnow_caller) ? 0 : 12;
+        const int letter_space = (has_fmo_caller || has_caller || has_espnow_caller) ? 0 : 12;
         if (letter_space != s_ls_callsign) {
             s_ls_callsign = letter_space;
             lv_obj_set_style_text_letter_space(s_lbl_callsign, letter_space, 0);
@@ -6381,7 +6939,18 @@ void refreshHome()
     const char *caption = "STANDBY";
     uint32_t color = kColorDim;
     uint32_t call_color = kColorText;
-    if (tx && rx) {
+    if (fmo_tx && fmo_rx) {
+        caption = "FMO FULL DUPLEX";
+        color = kColorFmo;
+        call_color = kColorFmo;
+    } else if (fmo_tx) {
+        caption = "FMO TX";
+        color = kColorFmo;
+    } else if (fmo_rx) {
+        caption = "FMO RX";
+        color = kColorFmo;
+        call_color = kColorFmo;
+    } else if (tx && rx) {
         caption = "FULL DUPLEX";
         color = kColorDuplex;
         call_color = kColorAccent;
@@ -6409,6 +6978,16 @@ void refreshHome()
     }
     setLabelColor(s_lbl_callsign, s_clr_callsign, call_color);
 
+    const char *rx_source = has_fmo_caller ? "FMO" :
+                            has_caller ? "NRL" :
+                            has_espnow_caller ? "ESP-NOW" : "";
+    if (setLabel(s_lbl_rx_source, s_shown_rx_source,
+                 sizeof(s_shown_rx_source), rx_source)) {
+        const uint32_t source_color = has_fmo_caller ? kColorFmo :
+                                      has_espnow_caller ? kColorDuplex : kColorAccent;
+        lv_obj_set_style_text_color(s_lbl_rx_source, lv_color_hex(source_color), 0);
+    }
+
     // Last decoded signaling ticker (MDC/CTCSS/DTMF) below the callsign.
     {
         char sig[sizeof(s_shown_signaling)] = {};
@@ -6416,15 +6995,20 @@ void refreshHome()
         setLabel(s_lbl_signaling, s_shown_signaling, sizeof(s_shown_signaling), sig);
     }
 
-    // Source audio codec of the incoming stream (blank unless receiving): the
-    // NRL network caller takes precedence, else the off-grid ESP-NOW peer.
+    // Source audio codec of the incoming stream (blank unless receiving).
     const char *rx_codec = "";
-    if (has_caller) {
+    if (has_fmo_caller) {
+        rx_codec = fmo.voice_codec;
+    } else if (has_caller) {
         rx_codec = (NRLAudioBridge_GetRxCodec() == 1u) ? "OPUS" : "G.711";
     } else if (has_espnow_caller) {
         rx_codec = (ESPNOW_LINK_GetRxCodec() == 1u) ? "OPUS" : "G.711";
     }
-    setLabel(s_lbl_rx_codec, s_shown_rx_codec, sizeof(s_shown_rx_codec), rx_codec);
+    if (setLabel(s_lbl_rx_codec, s_shown_rx_codec, sizeof(s_shown_rx_codec), rx_codec)) {
+        lv_obj_set_style_text_color(s_lbl_rx_codec,
+                                    lv_color_hex(has_fmo_caller ? kColorFmo :
+                                                 has_espnow_caller ? kColorDuplex : kColorAccent), 0);
+    }
 
     char ip[96];
     uint32_t ip_color = kColorAccent;
@@ -6442,12 +7026,56 @@ void refreshHome()
         lv_obj_set_style_text_color(s_lbl_ip, lv_color_hex(ip_color), 0);
     }
 
-    char server[96];
-    const char *host = (cfg && cfg->server_host[0]) ? cfg->server_host : "---";
-    snprintf(server, sizeof(server), "%s", host);
-    const uint32_t server_color = tx ? kColorTx : (rx ? kColorAccent : kColorSub);
-    setLabel(s_lbl_server, s_shown_server, sizeof(s_shown_server), server);
-    setLabelColor(s_lbl_server, s_clr_server, server_color);
+    // Resolve the NRL friendly name only when its endpoint or cached list
+    // changes. The lookup reads the JSON into PSRAM, so the 500 ms refresh
+    // path does not repeatedly touch flash or allocate a large parse tree.
+    static char nrl_lookup_host[65] = {};
+    static uint16_t nrl_lookup_port = 0u;
+    static uint32_t nrl_lookup_generation = UINT32_MAX;
+    static char nrl_lookup_name[96] = {};
+    const char *nrl_host = (cfg && cfg->server_host[0]) ? cfg->server_host : "---";
+    const uint16_t nrl_port = cfg ? cfg->server_port : 0u;
+    const uint32_t nrl_generation =
+        SERVER_LIST_STORE_Generation(SERVER_LIST_NRL);
+    if (strcmp(nrl_lookup_host, nrl_host) != 0 ||
+        nrl_lookup_port != nrl_port ||
+        nrl_lookup_generation != nrl_generation) {
+        snprintf(nrl_lookup_host, sizeof(nrl_lookup_host), "%s", nrl_host);
+        nrl_lookup_port = nrl_port;
+        nrl_lookup_generation = nrl_generation;
+        nrl_lookup_name[0] = '\0';
+        (void)SERVER_LIST_STORE_FindNrlServerName(
+            nrl_host, nrl_port, nrl_lookup_name, sizeof(nrl_lookup_name));
+    }
+    char nrl_server[sizeof(s_shown_server)] = {};
+    if (nrl_port != 0u) {
+        snprintf(nrl_server, sizeof(nrl_server), "NRL %.80s | %.64s:%u",
+                 nrl_lookup_name[0] != '\0' ? nrl_lookup_name : "SERVER",
+                 nrl_host, static_cast<unsigned>(nrl_port));
+    } else {
+        snprintf(nrl_server, sizeof(nrl_server), "NRL ---");
+    }
+    setLabel(s_lbl_server, s_shown_server, sizeof(s_shown_server), nrl_server);
+    setLabelColor(s_lbl_server, s_clr_server,
+                  nrlNetworkConnected() ? kColorAccent : kColorDim);
+
+    char fmo_server[sizeof(s_shown_fmo_server)] = {};
+    if (fmo_config.server.host[0] != '\0' && fmo_config.server.port != 0u) {
+        const char *name = fmo_config.server.name[0] != '\0'
+                               ? fmo_config.server.name
+                               : fmo_config.server.callsign[0] != '\0'
+                                     ? fmo_config.server.callsign
+                                     : "SERVER";
+        snprintf(fmo_server, sizeof(fmo_server), "FMO %.80s | %.64s:%u", name,
+                 fmo_config.server.host,
+                 static_cast<unsigned>(fmo_config.server.port));
+    } else {
+        snprintf(fmo_server, sizeof(fmo_server), "FMO ---");
+    }
+    setLabel(s_lbl_fmo_server, s_shown_fmo_server,
+             sizeof(s_shown_fmo_server), fmo_server);
+    setLabelColor(s_lbl_fmo_server, s_clr_fmo_server,
+                  fmo_config.enabled && fmo.connected ? kColorFmo : kColorDim);
 }
 
 // Per-core CPU load from the FreeRTOS idle-task runtime counters (delta over
@@ -6723,6 +7351,8 @@ void refresh()
                                s_page == Page::Audio || s_page == Page::Apps ||
                                s_page == Page::Nanny || s_page == Page::Smb ||
                                s_page == Page::Radio || s_page == Page::EspNow ||
+                               s_page == Page::NrlServers ||
+                               s_page == Page::Fmo ||
                                s_page == Page::Ctcss || s_page == Page::Mdc || s_page == Page::Dtmf ||
                                s_page == Page::Ai || s_page == Page::About;
         const bool keyboard_open =
@@ -6754,6 +7384,9 @@ void refresh()
     }
     if (s_page == Page::EspNow) {
         refreshEspNowPage();
+    }
+    if (s_page == Page::Fmo) {
+        refreshFmoPage();
     }
     if (s_page == Page::Video) {
         refreshVideo();
@@ -6796,6 +7429,8 @@ void rebuildCurrentPage()
         case Page::Smb: buildSmb(); break;
         case Page::Apps: buildApps(); break;
         case Page::EspNow: buildEspNow(); break;
+        case Page::NrlServers: buildNrlServers(); break;
+        case Page::Fmo: buildFmo(); break;
         case Page::Ctcss: buildCtcss(); break;
         case Page::Mdc: buildMdc(); break;
         case Page::Dtmf: buildDtmf(); break;

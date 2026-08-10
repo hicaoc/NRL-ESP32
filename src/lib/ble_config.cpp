@@ -834,6 +834,11 @@ bool BLEConfig_IsControllerUp(void) { return false; } // NimBLE owns no shared c
 namespace {
 
 constexpr uint8_t kAppId = 0x4E; // "N"
+// The S31 controller's ESP_ERR_NO_MEM cleanup path dereferences a partially
+// initialized HCI transport. Avoid entering the controller when the full app
+// has already fragmented internal RAM; Wi-Fi/AP provisioning remains active.
+constexpr size_t kBluedroidMinFreeInternal = 96u * 1024u;
+constexpr size_t kBluedroidMinLargestInternalBlock = 48u * 1024u;
 
 // 128-bit NUS UUIDs (little-endian byte order for esp_bt_uuid_t).
 const uint8_t kNusServiceUuid128[16] = {
@@ -1063,6 +1068,20 @@ bool BLEConfig_Init(void)
 
     // Bring up the BT controller in dual mode if not already running.
     if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE) {
+        const size_t free_internal =
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        const size_t largest_internal =
+            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (free_internal < kBluedroidMinFreeInternal ||
+            largest_internal < kBluedroidMinLargestInternalBlock) {
+            ESP_LOGW(TAG,
+                     "BLE skipped: internal free=%u largest=%u, need free>=%u largest>=%u",
+                     static_cast<unsigned>(free_internal),
+                     static_cast<unsigned>(largest_internal),
+                     static_cast<unsigned>(kBluedroidMinFreeInternal),
+                     static_cast<unsigned>(kBluedroidMinLargestInternalBlock));
+            return false;
+        }
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
         esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();

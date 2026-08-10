@@ -1,0 +1,39 @@
+<!-- @template SIGNALING_SECTIONS -->
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="ctcssRoutes">CTCSS / PL Receive</h2></div>
+  <div class="grid">
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="decodeMic">Decode from MIC</label><input type="hidden" name="ctcss_rx_mic_present" value="1"><label class="hint"><input type="checkbox" name="ctcss_rx_mic" value="1" onchange="submitSwitch(this)" {{CTCSS_RX_MIC_CHECKED}}><span data-i18n="ctcssDecodeMicText">Detect the standard CTCSS frequency from microphone/radio audio</span></label></form>
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="decodeNrl">Decode from NRL</label><input type="hidden" name="ctcss_rx_nrl_present" value="1"><label class="hint"><input type="checkbox" name="ctcss_rx_nrl" value="1" onchange="submitSwitch(this)" {{CTCSS_RX_NRL_CHECKED}}><span data-i18n="ctcssDecodeNrlText">Detect the standard CTCSS frequency from NRL downlink audio</span></label></form>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="cwRoutes">CW / Morse Decode</h2></div>
+  <div class="grid">
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="decodeMic">Decode from MIC</label><input type="hidden" name="cw_rx_mic_present" value="1"><label class="hint"><input type="checkbox" name="cw_rx_mic" value="1" onchange="submitSwitch(this)" {{CW_RX_MIC_CHECKED}}><span data-i18n="cwDecodeMicText">Decode Morse audio received from microphone/radio</span></label></form>
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="decodeNrl">Decode from NRL</label><input type="hidden" name="cw_rx_nrl_present" value="1"><label class="hint"><input type="checkbox" name="cw_rx_nrl" value="1" onchange="submitSwitch(this)" {{CW_RX_NRL_CHECKED}}><span data-i18n="cwDecodeNrlText">Decode Morse audio in NRL downlink voice</span></label></form>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="mdcRoutes">MDC1200 Routes</h2><span class="hint mono">{{SIGNALING_STATUS}}</span></div>
+  <div class="grid">
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="decodeMic">Decode from MIC</label><input type="hidden" name="mdc_rx_mic_present" value="1"><label class="hint"><input type="checkbox" name="mdc_rx_mic" value="1" onchange="submitSwitch(this)" {{MDC_RX_MIC_CHECKED}}><span data-i18n="mdcDecodeMicText">Decode MDC1200 received from microphone/radio</span></label></form>
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="decodeNrl">Decode from NRL</label><input type="hidden" name="mdc_rx_nrl_present" value="1"><label class="hint"><input type="checkbox" name="mdc_rx_nrl" value="1" onchange="submitSwitch(this)" {{MDC_RX_NRL_CHECKED}}><span data-i18n="mdcDecodeNrlText">Decode MDC1200 in network downlink audio</span></label></form>
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="encodeNrl">Send to NRL</label><input type="hidden" name="mdc_tx_nrl_present" value="1"><label class="hint"><input type="checkbox" name="mdc_tx_nrl" value="1" onchange="submitSwitch(this)" {{MDC_TX_NRL_CHECKED}}><span data-i18n="mdcEncodeNrlText">Append MDC1200 after local PTT release</span></label></form>
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="encodeSpeaker">Send to speaker</label><input type="hidden" name="mdc_tx_speaker_present" value="1"><label class="hint"><input type="checkbox" name="mdc_tx_speaker" value="1" onchange="submitSwitch(this)" {{MDC_TX_SPEAKER_CHECKED}}><span data-i18n="mdcEncodeSpeakerText">Append MDC1200 after NRL voice ends</span></label></form>
+    <form class="item-form span-2" method="post" action="/save_signaling">
+      <div class="grid compact-grid"><div><label data-i18n="mdcOpcode">Opcode (hex)</label><input class="mono" name="mdc_opcode" value="{{MDC_OPCODE}}" maxlength="4"></div><div><label data-i18n="mdcArgument">Argument (hex)</label><input class="mono" name="mdc_argument" value="{{MDC_ARGUMENT}}" maxlength="4"></div><div><label data-i18n="mdcUnitId">MDC ID (4 hex digits)</label><input class="mono" name="mdc_unit_id" value="{{MDC_UNIT_ID}}" maxlength="6"></div></div>
+      <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div>
+    </form>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="dtmfRoutes">DTMF Routes</h2></div>
+  <div class="grid">
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="decodeMic">Decode from MIC</label><input type="hidden" name="dtmf_rx_mic_present" value="1"><label class="hint"><input type="checkbox" name="dtmf_rx_mic" value="1" onchange="submitSwitch(this)" {{DTMF_RX_MIC_CHECKED}}><span data-i18n="dtmfDecodeMicText">Decode DTMF received from microphone/radio</span></label></form>
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="decodeNrl">Decode from NRL</label><input type="hidden" name="dtmf_rx_nrl_present" value="1"><label class="hint"><input type="checkbox" name="dtmf_rx_nrl" value="1" onchange="submitSwitch(this)" {{DTMF_RX_NRL_CHECKED}}><span data-i18n="dtmfDecodeNrlText">Decode DTMF in network downlink audio</span></label></form>
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="encodeNrl">Send to NRL</label><input type="hidden" name="dtmf_tx_nrl_present" value="1"><label class="hint"><input type="checkbox" name="dtmf_tx_nrl" value="1" onchange="submitSwitch(this)" {{DTMF_TX_NRL_CHECKED}}><span data-i18n="dtmfEncodeNrlText">Append DTMF after local PTT release</span></label></form>
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="encodeSpeaker">Send to speaker</label><input type="hidden" name="dtmf_tx_speaker_present" value="1"><label class="hint"><input type="checkbox" name="dtmf_tx_speaker" value="1" onchange="submitSwitch(this)" {{DTMF_TX_SPEAKER_CHECKED}}><span data-i18n="dtmfEncodeSpeakerText">Append DTMF after NRL voice ends</span></label></form>
+    <form class="item-form span-2" method="post" action="/save_signaling"><label data-i18n="dtmfId">DTMF ID</label><input class="mono" name="dtmf_digits" value="{{DTMF_DIGITS}}" maxlength="16" placeholder="123#"><div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div></form>
+  </div>
+</section>
+<!-- @endtemplate -->

@@ -1,13 +1,14 @@
 # Partition table for the ESP32-S31-Korvo board (16 MB flash).
 # The media stack (MP3/AAC/FLAC decoders + esp-sr + LVGL + FreeType) outgrew
-# the 5 MB app slots of part-gezipai.csv, so the S31 gets 7 MB app slots.
-# srmodels.bin is only ~330 KB, so the model partition shrinks to 1.25 MB.
-# NVS/otadata stay at the gezipai offsets, so device config survives the
-# repartition; anything in shared/model is re-flashed anyway.
+# the 5 MB app slots of part-s3.csv, so the S31 gets 7 MB app slots.
+# "spiffs" is the subtype expected by ESP-SR; model contains a raw srmodels.bin
+# image and is not a mounted SPIFFS filesystem. The image is only ~330 KB, so
+# a 1 MB model partition remains ample and
+# the remaining 896 KB is LittleFS for server lists and FMO identity files.
 # Name,   Type, SubType, Offset,    Size,      Flags
-nvs,      data, nvs,     0x009000,  0x005000,
-otadata,  data, ota,     0x00E000,  0x002000,
-app0,     app,  ota_0,   0x010000,  0x700000,
-app1,     app,  ota_1,   0x710000,  0x700000,
-shared,   data, 0x40,    0xE10000,  0x0B0000,
-model,    data, spiffs,  0xEC0000,  0x140000,
+nvs,      data, nvs,     0x009000,  0x010000,
+otadata,  data, ota,     0x019000,  0x002000,
+app0,     app,  ota_0,   0x020000,  0x700000,
+app1,     app,  ota_1,   0x720000,  0x700000,
+model,    data, spiffs,  0xE20000,  0x100000,
+serverfs, data, littlefs,0xF20000,  0x0E0000,

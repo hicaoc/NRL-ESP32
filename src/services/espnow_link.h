@@ -46,7 +46,9 @@ bool ESPNOW_LINK_IsRxEnabled(void);
 bool ESPNOW_LINK_SetTxCodec(uint8_t codec);
 uint8_t ESPNOW_LINK_GetTxCodec(void);
 
-// Physical/user PTT target. 0 = normal NRL uplink, 1 = ESP-NOW uplink.
+// Physical/user PTT target. 0 = normal NRL uplink, 1 = ESP-NOW uplink,
+// 2 = FMO uplink. Kept here for compatibility with the existing configuration
+// surfaces; all three voice links consult this shared persisted selector.
 // Persisted in NVS. RX still works for both links regardless of this mode.
 void ESPNOW_LINK_SetPttMode(uint8_t mode);
 uint8_t ESPNOW_LINK_GetPttMode(void);

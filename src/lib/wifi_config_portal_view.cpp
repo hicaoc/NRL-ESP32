@@ -172,6 +172,22 @@ static std::string buildPageWithFormSections(const std::string &form_sections)
     return html;
 }
 
+// One link back to the simple navigation home shown on every sub-page.
+static const char kBackHomeLink[] =
+    "<a href=\"/\" data-i18n=\"backHome\">&larr; Back to home</a>";
+
+static std::string navCard(const char *href, const char *i18n_key, const char *label)
+{
+    std::string html = "<a class=\"nav-card\" href=\"";
+    html += href;
+    html += "\"><span class=\"nav-card-label\" data-i18n=\"";
+    html += i18n_key;
+    html += "\">";
+    html += label;
+    html += "</span></a>";
+    return html;
+}
+
 static std::string checkedAttr(const bool checked)
 {
     return checked ? std::string("checked") : std::string("");
@@ -517,6 +533,7 @@ std::string WifiConfigPortalView_BuildMediaSections(void)
     const uint8_t ptt_mode = ESPNOW_LINK_GetPttMode();
     replaceToken(html, "{{PTT_MODE_NRL_SELECTED}}", ptt_mode == 0u ? " selected" : "");
     replaceToken(html, "{{PTT_MODE_ESPNOW_SELECTED}}", ptt_mode == 1u ? " selected" : "");
+    replaceToken(html, "{{PTT_MODE_FMO_SELECTED}}", ptt_mode == 2u ? " selected" : "");
 
     char ai_url[160] = {};
     char ai_token[96] = {};
@@ -588,7 +605,7 @@ std::string WifiConfigPortalView_BuildMediaSections(void)
         </section>
         <section class="panel">
           <div class="section-head"><h2 data-i18n="voiceLink">Voice Link</h2></div>
-          <div class="grid"><form class="item-form" method="post" action="/save_media"><label data-i18n="pttMode">PTT Mode</label><select name="ptt_mode" onchange="submitSwitch(this)"><option value="0"{{PTT_MODE_NRL_SELECTED}} data-i18n="pttModeNrl">NRL network PTT</option><option value="1"{{PTT_MODE_ESPNOW_SELECTED}} data-i18n="pttModeEspnow">ESP-NOW PTT</option></select></form></div>
+          <div class="grid"><form class="item-form" method="post" action="/save_media"><label data-i18n="pttMode">PTT Mode</label><select name="ptt_mode" onchange="submitSwitch(this)"><option value="0"{{PTT_MODE_NRL_SELECTED}} data-i18n="pttModeNrl">NRL network PTT</option><option value="1"{{PTT_MODE_ESPNOW_SELECTED}} data-i18n="pttModeEspnow">ESP-NOW PTT</option><option value="2"{{PTT_MODE_FMO_SELECTED}} data-i18n="pttModeFmo">FMO PTT</option></select></form></div>
         </section>
         <section class="panel">
           <div class="section-head"><h2 data-i18n="espnowLabel">ESP-NOW Intercom</h2></div>
@@ -639,6 +656,7 @@ std::string WifiConfigPortalView_BuildMediaSections(void)
     const uint8_t ptt_mode = ESPNOW_LINK_GetPttMode();
     replaceToken(html, "{{PTT_MODE_NRL_SELECTED}}", ptt_mode == 0u ? " selected" : "");
     replaceToken(html, "{{PTT_MODE_ESPNOW_SELECTED}}", ptt_mode == 1u ? " selected" : "");
+    replaceToken(html, "{{PTT_MODE_FMO_SELECTED}}", ptt_mode == 2u ? " selected" : "");
 
     char radio_url[256] = {};
     MUSIC_GetRadioUrl(radio_url, sizeof(radio_url));
@@ -757,11 +775,31 @@ std::string WifiConfigPortalView_BuildSignalingSections(void)
     return html;
 }
 
+std::string WifiConfigPortalView_BuildHomeCards(void)
+{
+    std::string html = "<div class=\"nav-cards\">";
+    html += navCard("/wifi", "wifiConfig", "WiFi Config");
+    html += navCard("/nrl", "nrlConfig", "NRL Config");
+    html += navCard("/audio", "audioSettings", "Audio Settings");
+    html += navCard("/media", "mediaConfig", "Media / Nanny");
+    html += navCard("/aprs", "aprsConfig", "APRS");
+    html += navCard("/signaling", "signalingConfig", "Signaling / CTCSS");
+    html += navCard("/fmo", "fmoConfig", "FMO");
+    html += navCard("/update", "firmwareUpdate", "Firmware Update");
+    html += "</div>";
+    return html;
+}
+
 std::string WifiConfigPortalView_BuildConfigPage(const ExternalRadioConfig *config,
                                                  const WifiConfigPortalPageState &state,
                                                  const std::string &form_sections)
 {
-    std::string html = buildPageWithFormSections(form_sections);
+    std::string html = state.home_page
+                           ? buildPageWithFormSections(std::string(""))
+                           : buildPageWithFormSections(form_sections);
+    replaceToken(html, "{{HOME_CARDS}}",
+                 state.home_page ? WifiConfigPortalView_BuildHomeCards() : std::string(""));
+    replaceToken(html, "{{BACK_HOME}}", state.home_page ? std::string("") : std::string(kBackHomeLink));
     replaceToken(html, "{{TITLE}}", state.title);
     replaceToken(html, "{{HEADLINE}}", state.headline);
     replaceToken(html, "{{HEADLINE_KEY}}", state.headline_key);
@@ -770,21 +808,6 @@ std::string WifiConfigPortalView_BuildConfigPage(const ExternalRadioConfig *conf
     replaceToken(html, "{{NETWORK_ACTIVE}}", state.network_active ? "active" : "");
     replaceToken(html, "{{DEVICE_ACTIVE}}", state.device_active ? "active" : "");
     replaceToken(html, "{{AUDIO_ACTIVE}}", state.audio_active ? "active" : "");
-    {
-        std::string media_tab = std::string(kWifiConfigPortalMediaTabTemplate);
-        replaceToken(media_tab, "{{MEDIA_ACTIVE}}", state.media_active ? "active" : "");
-        replaceToken(html, "{{MEDIA_TAB}}", media_tab);
-    }
-    {
-        std::string aprs_tab = std::string(kWifiConfigPortalAprsTabTemplate);
-        replaceToken(aprs_tab, "{{APRS_ACTIVE}}", state.aprs_active ? "active" : "");
-        replaceToken(html, "{{APRS_TAB}}", aprs_tab);
-    }
-    {
-        std::string signaling_tab = std::string(kWifiConfigPortalSignalingTabTemplate);
-        replaceToken(signaling_tab, "{{SIGNALING_ACTIVE}}", state.signaling_active ? "active" : "");
-        replaceToken(html, "{{SIGNALING_TAB}}", signaling_tab);
-    }
     replaceToken(html, "{{AP_IP}}", ipToString(nrlWifiApIp()));
     replaceToken(html, "{{STA_IP}}", staIpOrNotConnected(nrlNetworkIp()));
     replaceToken(html, "{{SSID_OPTIONS}}", "");

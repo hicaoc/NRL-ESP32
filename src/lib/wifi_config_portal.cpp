@@ -22,13 +22,18 @@
 #include "../services/signaling_service.h"
 #include "../services/display_notice.h"
 #include "../services/espnow_link.h"
+#include "../services/fmo_cert_store.h"
+#include "../services/fmo_service.h"
 #include "../services/music_player.h"
 #include "../services/music_playlist.h"
 #include "../services/nanny.h"
 #include "../services/radio_favorites.h"
+#include "../services/server_list_store.h"
 #include "../services/storage_service.h"
 
+#include <cJSON.h>
 #include <driver/gpio.h>
+#include <esp_heap_caps.h>
 #include <esp_http_server.h>
 #include <math.h>
 #include <esp_log.h>
@@ -1109,7 +1114,8 @@ static void sendConfigPage(const char *title,
                            const std::string &footer,
                            const bool media_active = false,
                            const bool aprs_active = false,
-                           const bool signaling_active = false)
+                           const bool signaling_active = false,
+                           const bool home_page = false)
 {
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
     const WifiConfigPortalPageState state = {
@@ -1125,6 +1131,7 @@ static void sendConfigPage(const char *title,
         .media_active = media_active,
         .aprs_active = aprs_active,
         .signaling_active = signaling_active,
+        .home_page = home_page,
         .footer = footer,
     };
     sendChunkedHtml(200, WifiConfigPortalView_BuildConfigPage(config, state, form_sections));
@@ -1139,6 +1146,27 @@ static std::string buildUpdatePageI18n(const char *headline,
 }
 
 static esp_err_t handleRoot(httpd_req_t *req)
+{
+    s_server.bind(req);
+    sendConfigPage((std::string(NRL_FIRMWARE_NAME) + " Config").c_str(),
+                   "Configuration",
+                   "homeTitle",
+                   "Choose the settings page to open.",
+                   "homeIntro",
+                   "",
+                   "",
+                   false,
+                   false,
+                   false,
+                   "",
+                   false,
+                   false,
+                   false,
+                   true);
+    return ESP_OK;
+}
+
+static esp_err_t handleWifiPage(httpd_req_t *req)
 {
     s_server.bind(req);
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
@@ -1190,6 +1218,269 @@ static esp_err_t handleAudioPage(httpd_req_t *req)
                    true,
                    "");
     return ESP_OK;
+}
+
+static const char kFmoPage[] = R"FMO(<!doctype html><html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FMO 配置</title><style>
+body{font:16px system-ui,sans-serif;max-width:900px;margin:auto;padding:16px;background:#f4f6f8;color:#18222c}
+a{color:#1769aa}section{background:#fff;border:1px solid #d8dee4;border-radius:10px;padding:16px;margin:14px 0;box-shadow:0 2px 8px #0001}
+h1,h2{margin:.2em 0 .7em}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+label{display:block}select,input,button{box-sizing:border-box;font:inherit;padding:9px;margin-top:5px;width:100%}
+button{background:#1769aa;color:white;border:0;border-radius:6px;font-weight:650;cursor:pointer}.row{display:flex;gap:8px;align-items:center}.row input{width:auto}
+.hint{color:#65717d;font-size:14px}.ok{color:#087d37}.bad{color:#b42318}.mono{font-family:ui-monospace,monospace;word-break:break-all}
+@media(max-width:650px){.grid{grid-template-columns:1fr}}
+</style></head><body><p><a href="/">&larr; 返回导航首页</a></p><h1>FMO‑V4 通联</h1>
+<p class="hint">服务器通过 APRS‑IS 自动发现（通常数分钟内出现）。FMO 身份证书不是 TLS 证书，三份 JSON 必须来自同一身份。</p>
+<section><h2>连接与发射</h2><form id="cfg"><div class="grid"><label>FMO 服务器<select name="server_index" id="servers"><option value="">等待发现…</option></select></label>
+<div><label class="row"><input type="checkbox" name="enabled" value="1" id="enabled">连接所选 FMO 服务器</label>
+<label class="row"><input type="checkbox" name="transmit" value="1" id="transmit">将 PTT/SQL 麦克风上行切换到 FMO</label></div></div>
+<input type="hidden" name="enabled_present" value="1"><button type="submit">保存并应用</button></form><p id="link" class="mono hint">加载中…</p></section>
+<section><h2>FMO 身份证书</h2><p id="cert" class="mono hint">加载中…</p><div class="grid">
+<label>userCert JSON<input type="file" accept="application/json,.json" data-kind="user"></label>
+<label>intermediateCert JSON<input type="file" accept="application/json,.json" data-kind="intermediate"></label>
+<label>deviceKey JSON（含私钥种子）<input type="file" accept="application/json,.json" data-kind="devicekey"></label></div>
+<p class="hint">deviceKey 会写入板载 LittleFS，不会从网页读回。请妥善保管原始文件，不要上传到公共服务。</p></section>
+<section><h2>当前服务器</h2><div id="current" class="mono hint">未选择</div></section>
+<script>
+const esc=s=>String(s??'');let loaded=false;
+async function refresh(){try{const r=await fetch('/fmo/status',{cache:'no-store'}),j=await r.json();
+enabled.checked=j.config.enabled;transmit.checked=j.config.transmit;
+link.className='mono '+(j.link.connected?'ok':'hint');link.textContent=`${j.link.connected?'已连接':'未连接'} / ${j.link.receiving?'接收 '+j.link.voice_callsign+' '+j.link.voice_codec:'空闲'} / RX ${j.link.rx_frames} / 解析错误 ${j.link.parse_errors} / last_error ${j.link.last_error}`;
+cert.className='mono '+(j.identity.ready?'ok':'bad');cert.textContent=j.identity.ready?`可用：${j.identity.callsign}，UID ${j.identity.uid}，有效期至 ${new Date(j.identity.expires_at*1000).toLocaleString()}，指纹 ${j.identity.fingerprint}`:`未就绪：user=${j.identity.user_present} intermediate=${j.identity.intermediate_present} deviceKey=${j.identity.device_key_present} error=${j.identity.error}`;
+current.textContent=j.config.server.host?`${j.config.server.name} / ${j.config.server.callsign} / UID ${j.config.server.uid} / ${j.config.server.host}:${j.config.server.port}`:'未选择服务器';
+const old=servers.value;servers.innerHTML='<option value="">保留当前服务器</option>';j.servers.forEach((s,i)=>{const o=document.createElement('option');o.value=i;o.textContent=`${s.name} (${s.callsign}) ${s.host}:${s.port} 在线 ${s.online}/${s.total}`;servers.appendChild(o)});if(old&&servers.querySelector(`option[value="${old}"]`))servers.value=old;loaded=true;
+}catch(e){link.className='mono bad';link.textContent='状态读取失败：'+e}}
+cfg.onsubmit=async e=>{e.preventDefault();const body=new URLSearchParams(new FormData(cfg));try{const r=await fetch('/fmo/config',{method:'POST',body});const t=await r.text();if(!r.ok)throw Error(t);alert('FMO 配置已保存');refresh()}catch(e){alert('保存失败：'+e)}};
+servers.onchange=()=>cfg.requestSubmit();
+current.onclick=()=>{if(typeof servers.showPicker==='function')servers.showPicker();else servers.focus()};
+document.querySelectorAll('input[type=file]').forEach(el=>el.onchange=async()=>{if(!el.files[0])return;try{const text=await el.files[0].text();const r=await fetch('/fmo/cert/'+el.dataset.kind,{method:'POST',headers:{'Content-Type':'application/json'},body:text});const t=await r.text();if(!r.ok)throw Error(t);alert('证书已验证并写入');el.value='';refresh()}catch(e){alert('证书写入失败：'+e)}});
+refresh();setInterval(refresh,3000);
+</script></body></html>)FMO";
+
+static esp_err_t handleFmoPage(httpd_req_t *req)
+{
+    s_server.bind(req);
+    s_server.send(200, "text/html; charset=utf-8", kFmoPage);
+    return ESP_OK;
+}
+
+static std::string fingerprintHex(const uint8_t fingerprint[32])
+{
+    static const char digits[] = "0123456789abcdef";
+    std::string result(64u, '0');
+    for (size_t i = 0; i < 32u; ++i) {
+        result[i * 2u] = digits[fingerprint[i] >> 4u];
+        result[i * 2u + 1u] = digits[fingerprint[i] & 0x0fu];
+    }
+    return result;
+}
+
+static esp_err_t handleFmoStatus(httpd_req_t *req)
+{
+    s_server.bind(req);
+    FmoConfig config = {};
+    FmoLinkStatus link = {};
+    FmoIdentityStatus identity = {};
+    FMO_GetConfig(&config);
+    FMO_GetLinkStatus(&link);
+    const esp_err_t identity_error = FMO_CERT_GetStatus(&identity);
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    std::string head = "{\"config\":{\"enabled\":";
+    head += config.enabled ? "true" : "false";
+    head += ",\"transmit\":";
+    head += config.transmit ? "true" : "false";
+    head += ",\"server\":{\"name\":\"" + jsonEscape(config.server.name) +
+            "\",\"host\":\"" + jsonEscape(config.server.host) +
+            "\",\"callsign\":\"" + jsonEscape(config.server.callsign) +
+            "\",\"port\":" + std::to_string(config.server.port) +
+            ",\"uid\":" + std::to_string(config.server.uid) + "}},";
+    head += "\"link\":{\"connected\":";
+    head += link.connected ? "true" : "false";
+    head += ",\"receiving\":";
+    head += link.receiving ? "true" : "false";
+    head += ",\"transmitting\":";
+    head += link.transmitting ? "true" : "false";
+    head += ",\"voice_callsign\":\"" + jsonEscape(link.voice_callsign) +
+            "\",\"voice_codec\":\"" + jsonEscape(link.voice_codec) +
+            "\",\"rx_frames\":" + std::to_string(link.rx_frames) +
+            ",\"parse_errors\":" + std::to_string(link.parse_errors) +
+            ",\"last_error\":" + std::to_string(link.last_error) + "},";
+    head += "\"identity\":{\"ready\":";
+    head += identity.ready ? "true" : "false";
+    head += ",\"user_present\":";
+    head += identity.user_present ? "true" : "false";
+    head += ",\"intermediate_present\":";
+    head += identity.intermediate_present ? "true" : "false";
+    head += ",\"device_key_present\":";
+    head += identity.device_key_present ? "true" : "false";
+    head += ",\"callsign\":\"" + jsonEscape(identity.callsign) +
+            "\",\"uid\":" + std::to_string(identity.uid) +
+            ",\"expires_at\":" + std::to_string(identity.expires_at) +
+            ",\"fingerprint\":\"" + (identity.ready ? fingerprintHex(identity.fingerprint) : "") +
+            "\",\"error\":\"" + jsonEscape(esp_err_to_name(identity_error)) +
+            "\"},\"servers\":[";
+    httpd_resp_send_chunk(req, head.c_str(), head.size());
+    const size_t count = FMO_ServerCount();
+    for (size_t i = 0; i < count; ++i) {
+        FmoServer server = {};
+        if (!FMO_GetServer(i, &server)) continue;
+        std::string item = i == 0u ? "{" : ",{";
+        item += "\"name\":\"" + jsonEscape(server.name) +
+                "\",\"host\":\"" + jsonEscape(server.host) +
+                "\",\"callsign\":\"" + jsonEscape(server.callsign) +
+                "\",\"port\":" + std::to_string(server.port) +
+                ",\"uid\":" + std::to_string(server.uid) +
+                ",\"online\":" + std::to_string(server.online) +
+                ",\"total\":" + std::to_string(server.total) + "}";
+        httpd_resp_send_chunk(req, item.c_str(), item.size());
+    }
+    httpd_resp_send_chunk(req, "]}", 2u);
+    httpd_resp_send_chunk(req, nullptr, 0u);
+    return ESP_OK;
+}
+
+static esp_err_t handleFmoConfig(httpd_req_t *req)
+{
+    if (!s_server.bindPost(req)) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "form parse failed");
+    }
+    FmoConfig config = {};
+    FMO_GetConfig(&config);
+    config.enabled = s_server.hasArg("enabled");
+    config.transmit = s_server.hasArg("transmit");
+    if (s_server.hasArg("server_index") && !s_server.arg("server_index").empty()) {
+        char *end = nullptr;
+        const unsigned long index = strtoul(s_server.arg("server_index").c_str(), &end, 10);
+        FmoServer selected = {};
+        if (end == nullptr || *end != '\0' || !FMO_GetServer(index, &selected)) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid server selection");
+        }
+        config.server = selected;
+    }
+    if (!FMO_SetConfig(&config, true)) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "select a valid FMO server before enabling");
+    }
+    return httpd_resp_sendstr(req, "OK");
+}
+
+static bool receiveRawBodyLimit(httpd_req_t *req, const size_t limit,
+                                char **body, size_t *size)
+{
+    if (req->content_len == 0u || req->content_len > limit) return false;
+    // NRL server JSON can be tens of KiB. Keep request/list payloads out of the
+    // latency-sensitive internal SRAM and fail cleanly if PSRAM is unavailable.
+    char *buffer = static_cast<char *>(heap_caps_malloc(
+        req->content_len + 1u, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (buffer == nullptr) {
+        ESP_LOGW(TAG, "PSRAM allocation failed for %u-byte request",
+                 static_cast<unsigned>(req->content_len));
+        return false;
+    }
+    size_t received = 0u;
+    while (received < req->content_len) {
+        const int got = httpd_req_recv(req, buffer + received,
+                                       req->content_len - received);
+        if (got <= 0) {
+            free(buffer);
+            return false;
+        }
+        received += static_cast<size_t>(got);
+    }
+    buffer[received] = '\0';
+    *body = buffer;
+    *size = received;
+    return true;
+}
+
+static esp_err_t handleNrlServersGet(httpd_req_t *req)
+{
+    uint8_t *payload = nullptr;
+    size_t payload_size = 0u;
+    if (!SERVER_LIST_STORE_Read(SERVER_LIST_NRL, &payload, &payload_size)) {
+        return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND,
+                                   "NRL server cache is empty");
+    }
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    const esp_err_t result = httpd_resp_send(
+        req, reinterpret_cast<const char *>(payload), payload_size);
+    free(payload);
+    return result;
+}
+
+static esp_err_t handleNrlServersPut(httpd_req_t *req)
+{
+    char *body = nullptr;
+    size_t size = 0u;
+    if (!receiveRawBodyLimit(req, 64u * 1024u, &body, &size)) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "empty or oversized server list");
+    }
+    const size_t count = SERVER_LIST_STORE_ValidateNrlJson(body, size);
+    if (count == 0u || count > 512u) {
+        free(body);
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "invalid NRL server JSON");
+    }
+    const bool saved = SERVER_LIST_STORE_Write(SERVER_LIST_NRL, body, size);
+    free(body);
+    if (!saved) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "server-list filesystem write failed");
+    }
+    return httpd_resp_sendstr(req, "OK");
+}
+
+static esp_err_t handleNrlServersRefresh(httpd_req_t *req)
+{
+    const ExternalRadioConfig *radio = EXTERNAL_RADIO_GetConfig();
+    if (radio == nullptr || radio->server_host[0] == '\0') {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "NRL server host is empty");
+    }
+    size_t count = 0u;
+    if (!SERVER_LIST_STORE_RefreshNrlHttps(radio->server_host,
+                                           radio->server_port, &count)) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "NRL HTTPS directory refresh failed");
+    }
+    ESP_LOGI(TAG, "NRL Web directory refreshed: %u servers",
+             static_cast<unsigned>(count));
+    return handleNrlServersGet(req);
+}
+
+static bool receiveRawBody(httpd_req_t *req, char **body, size_t *size)
+{
+    return receiveRawBodyLimit(req, 24u * 1024u, body, size);
+}
+
+static esp_err_t handleFmoCertificate(httpd_req_t *req)
+{
+    FmoCertificateKind kind = FMO_CERT_USER;
+    if (strcmp(req->uri, "/fmo/cert/intermediate") == 0) {
+        kind = FMO_CERT_INTERMEDIATE;
+    } else if (strcmp(req->uri, "/fmo/cert/devicekey") == 0) {
+        kind = FMO_CERT_DEVICE_KEY;
+    }
+    char *body = nullptr;
+    size_t size = 0u;
+    if (!receiveRawBody(req, &body, &size)) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "empty or oversized JSON");
+    }
+    char error[128] = {};
+    const esp_err_t result = FMO_CERT_Put(kind, body, size, error, sizeof(error));
+    free(body);
+    if (result != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   error[0] != '\0' ? error : esp_err_to_name(result));
+    }
+    FmoConfig config = {};
+    FMO_GetConfig(&config);
+    (void)FMO_SetConfig(&config, false); // reconnect with the new identity
+    return httpd_resp_sendstr(req, "OK");
 }
 
 static esp_err_t handleMediaPage(httpd_req_t *req)
@@ -2455,15 +2746,25 @@ static esp_err_t handleSaveMedia(httpd_req_t *req)
     }
     if (ok && s_server.hasArg("ptt_mode")) {
         unsigned long value = 0UL;
-        ok = parseUIntArg(s_server.arg("ptt_mode"), &value) && value <= 1UL;
+        ok = parseUIntArg(s_server.arg("ptt_mode"), &value) && value <= 2UL;
         if (ok) {
             if (value == 1UL && !ESPNOW_LINK_IsEnabled()) {
                 ok = ESPNOW_LINK_SetEnabled(true);
             }
+            if (ok && value == 2UL) {
+                FmoConfig fmo = {};
+                FMO_GetConfig(&fmo);
+                ok = fmo.enabled;
+                if (ok && !fmo.transmit) {
+                    fmo.transmit = true;
+                    ok = FMO_SetConfig(&fmo, true);
+                }
+            }
             if (ok) {
                 ESPNOW_LINK_SetPttMode(static_cast<uint8_t>(value));
             }
-            ESP_LOGI(TAG, "media: ptt mode=%s", value == 1UL ? "espnow" : "nrl");
+            ESP_LOGI(TAG, "media: ptt mode=%s",
+                     value == 2UL ? "fmo" : value == 1UL ? "espnow" : "nrl");
         }
     }
     if (ok && s_server.hasArg("espnow_present")) {
@@ -3017,7 +3318,7 @@ static void ensureServerRunning()
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = 80;
-    cfg.max_uri_handlers = 32;
+    cfg.max_uri_handlers = 48;
     // The IDF default allows seven HTTP clients and uses another three
     // sockets internally. With the default LWIP socket pool that can consume
     // every descriptor before APRS, NRL, SMB playback or OTA opens one.
@@ -3045,8 +3346,18 @@ static void ensureServerRunning()
     };
     static const UriEntry kRoutes[] = {
         { "/",                     HTTP_GET,  handleRoot },
+        { "/wifi",                 HTTP_GET,  handleWifiPage },
         { "/nrl",                  HTTP_GET,  handleNrlPage },
+        { "/nrl/servers",          HTTP_GET,  handleNrlServersGet },
+        { "/nrl/servers",          HTTP_POST, handleNrlServersPut },
+        { "/nrl/servers/refresh",  HTTP_GET,  handleNrlServersRefresh },
         { "/audio",                HTTP_GET,  handleAudioPage },
+        { "/fmo",                  HTTP_GET,  handleFmoPage },
+        { "/fmo/status",           HTTP_GET,  handleFmoStatus },
+        { "/fmo/config",           HTTP_POST, handleFmoConfig },
+        { "/fmo/cert/user",        HTTP_POST, handleFmoCertificate },
+        { "/fmo/cert/intermediate",HTTP_POST, handleFmoCertificate },
+        { "/fmo/cert/devicekey",   HTTP_POST, handleFmoCertificate },
         { "/scan",                 HTTP_GET,  handleScan },
         { "/save_wifi",            HTTP_POST, handleSaveWifi },
         { "/save_nrl",             HTTP_POST, handleSaveNrl },

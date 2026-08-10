@@ -35,6 +35,8 @@
 #include "../lib/nrl_version.h"
 #include "../lib/nrl_wifi.h"
 #include "../lib/wifi_config_portal.h"
+#include "../services/fmo_service.h"
+#include "../services/server_list_store.h"
 #include "driver/board_pins.h"
 #include "driver/display.h"
 #include "driver/es7210.h"
@@ -193,6 +195,10 @@ static void initSystem()
     }
     esp_netif_init();
     esp_event_loop_create_default();
+
+    // Persistent NRL/FMO discovery cache in the final LittleFS partition.
+    // Older app-only OTA layouts do not have it; discovery still works in RAM.
+    (void)SERVER_LIST_STORE_Init();
 
     NRL_USB_Console_Init();
 
@@ -390,6 +396,13 @@ static bool initFullApp()
     // internal RAM required to bring up speaker playback.
     SIGNALING_Init();
     logDramMark("signaling");
+
+    // FMO-V4 MQTT/SAS link. It reuses the board-neutral audio router and
+    // starts disabled until certificates and a server are selected in /fmo.
+    if (!FMO_Init()) {
+        ESP_LOGE(TAG, "FMO service initialization failed.");
+    }
+    logDramMark("fmo");
 
     s_full_app_started = true;
     s_waiting_for_provisioning = false;

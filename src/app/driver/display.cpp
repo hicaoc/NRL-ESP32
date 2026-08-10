@@ -45,6 +45,8 @@
 #include "../../lib/wifi_config_portal.h"
 #include "../../services/aprs_service.h"
 #include "../../services/espnow_link.h"
+#include "../../services/fmo_service.h"
+#include "../../services/fmo_cert_store.h"
 #include "../../services/display_notice.h"
 #include "../../services/cw_service.h"
 #include "../../services/map_tiles.h"
@@ -53,6 +55,7 @@
 #include "../../services/ota_service.h"
 #include "../../services/radio_favorites.h"
 #include "../../services/storage_service.h"
+#include "../../services/time_sync_service.h"
 #include "../../services/sstv_service.h"
 #include "../../services/signaling_service.h"
 #include "../../lib/nrl_version.h"
@@ -74,7 +77,6 @@
 #include <driver/gpio.h>
 #include <driver/spi_master.h>
 #include <esp_log.h>
-#include <esp_sntp.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
 #include <esp_heap_caps.h>
@@ -130,6 +132,7 @@ constexpr uint32_t kColorGood     = 0x4ADE80;  // strong signal
 constexpr uint32_t kColorWeak     = 0xF87171;  // weak signal / low battery
 constexpr uint32_t kColorTx       = 0xFF6B6B;  // transmitting (PTT held)
 constexpr uint32_t kColorDuplex   = 0xA78BFA;  // transmitting + receiving
+constexpr uint32_t kColorFmo      = 0xF5B453;  // FMO caller / link
 
 // APRS packets may contain Chinese comments. Keep the normal Latin UI font,
 // but fall back to the bundled 16px GB2312 font for the ticker only.
@@ -305,6 +308,7 @@ enum class MenuPage : uint8_t {
 enum class MainMenuAction : uint8_t {
     Back,
     PttMode,
+    Fmo,
     NrlCodec,
     NowCodec,
     Cw,
@@ -328,6 +332,7 @@ constexpr MainMenuAction kMainMenuActions[] = {
     MainMenuAction::Cw,
     MainMenuAction::Signaling,
     MainMenuAction::PttMode,
+    MainMenuAction::Fmo,
     MainMenuAction::NrlCodec,
     MainMenuAction::NowCodec,
     MainMenuAction::Ota,
@@ -335,6 +340,7 @@ constexpr MainMenuAction kMainMenuActions[] = {
     MainMenuAction::About,
 #else
     MainMenuAction::PttMode,
+    MainMenuAction::Fmo,
     MainMenuAction::NrlCodec,
     MainMenuAction::NowCodec,
     MainMenuAction::Cw,
@@ -466,6 +472,8 @@ char s_shown_gps[16] = {};
 char s_shown_ota[160] = {}; // sized for a scrolling APRS monitor line
 char s_shown_signaling[160] = {};
 int s_shown_state = -1;  // caption: -1 unset, 0 standby, 1 last heard, 2 rx, 3 tx
+char s_shown_caption[32] = {};
+uint32_t s_shown_caption_color = UINT32_MAX;
 bool s_shown_media = false;
 char s_cached_radio_path[256] = {};
 char s_cached_radio_name[RADIO_FAV_NAME_SIZE] = {};
@@ -1262,6 +1270,8 @@ void resetCenterWidgets()
     s_shown_time[0] = '\0';
     s_shown_ota[0] = '\0';
     s_shown_state = -1;
+    s_shown_caption[0] = '\0';
+    s_shown_caption_color = UINT32_MAX;
     s_shown_media = false;
     s_lbl_signaling = nullptr;
     s_shown_signaling[0] = '\0';
@@ -1546,10 +1556,15 @@ void buildMainMenu()
 {
     lv_obj_t *scr = prepareContent();
     char ptt[32] = {};
+    char fmo_item[24] = {};
     char nrl_codec[32] = {};
     char now_codec[32] = {};
+    const uint8_t ptt_mode = ESPNOW_LINK_GetPttMode();
     snprintf(ptt, sizeof(ptt), menuText("PTT: %s", "PTT模式: %s"),
-             ESPNOW_LINK_GetPttMode() == 1u ? "ESP-NOW" : "NRL");
+             ptt_mode == 2u ? "FMO" : ptt_mode == 1u ? "ESP-NOW" : "NRL");
+    FmoConfig fmo_config = {};
+    FMO_GetConfig(&fmo_config);
+    snprintf(fmo_item, sizeof(fmo_item), "FMO: %s", fmo_config.enabled ? "ON" : "OFF");
     snprintf(nrl_codec, sizeof(nrl_codec), menuText("NRL CODEC: %s", "NRL编码: %s"),
              NRLAudioBridge_GetVoiceCodec() == 1u ? "OPUS" : "G711");
     snprintf(now_codec, sizeof(now_codec), menuText("NOW CODEC: %s", "NOW编码: %s"),
@@ -1559,6 +1574,7 @@ void buildMainMenu()
         switch (kMainMenuActions[i]) {
             case MainMenuAction::Back: items[i] = menuText("< BACK", "< 返回"); break;
             case MainMenuAction::PttMode: items[i] = ptt; break;
+            case MainMenuAction::Fmo: items[i] = fmo_item; break;
             case MainMenuAction::NrlCodec: items[i] = nrl_codec; break;
             case MainMenuAction::NowCodec: items[i] = now_codec; break;
             case MainMenuAction::Cw: items[i] = "CW MORSE"; break;
@@ -3864,10 +3880,13 @@ void refreshCaller()
     char voice_call[8] = {};
     unsigned voice_ssid = 0u;
     const bool rx = NRLAudioBridge_GetRemoteCaller(voice_call, sizeof(voice_call), &voice_ssid);
-    const bool tx = STATUS_IO_IsSqlActive();
-    const bool espnow_mode = ESPNOW_LINK_GetPttMode() == 1u;
-    const bool espnow_tx = espnow_mode && tx && ESPNOW_LINK_IsEnabled();
+    const bool nrl_tx = NRLAudioBridge_PttActive();
+    const bool espnow_tx = ESPNOW_LINK_PttActive();
     const bool espnow_rx = ESPNOW_LINK_IsReceiving();
+    FmoLinkStatus fmo = {};
+    FMO_GetLinkStatus(&fmo);
+    const bool fmo_rx = fmo.receiving && fmo.voice_callsign[0] != '\0';
+    const bool fmo_tx = FMO_PttActive();
     char espnow_peer[16] = {};
     if (espnow_rx) {
         ESPNOW_LINK_GetLastPeer(espnow_peer, sizeof(espnow_peer));
@@ -3882,9 +3901,11 @@ void refreshCaller()
     // Voice/PTT and ESP-NOW remain above music in the display priority, just
     // as they are in the audio path. When idle, show the configured favorite
     // name; a URL played directly from AT/Web has no friendly metadata yet.
-    const bool show_radio = radio_playing && !rx && !tx && !espnow_rx && !espnow_tx;
+    const bool show_radio = radio_playing && !rx && !nrl_tx && !espnow_rx &&
+                            !espnow_tx && !fmo_rx && !fmo_tx;
     const bool show_music = media_playing && !radio_playing &&
-                            !rx && !tx && !espnow_rx && !espnow_tx;
+                            !rx && !nrl_tx && !espnow_rx && !espnow_tx &&
+                            !fmo_rx && !fmo_tx;
     if (show_radio) {
         const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
         if (strcmp(s_cached_radio_path, playing_path) != 0 ||
@@ -3924,9 +3945,14 @@ void refreshCaller()
     // straight from the local config -- heartbeats never feed this.
     char call_text[16];
     char ssid_text[160];
-    if (rx && voice_call[0] != '\0') {
+    if (fmo_rx) {
+        snprintf(call_text, sizeof(call_text), "%s", fmo.voice_callsign);
+        snprintf(ssid_text, sizeof(ssid_text), "FMO %s",
+                 fmo.voice_codec[0] != '\0' ? fmo.voice_codec : "VOICE");
+    } else if (rx && voice_call[0] != '\0') {
         snprintf(call_text, sizeof(call_text), "%s", voice_call);
-        snprintf(ssid_text, sizeof(ssid_text), "SSID %u", voice_ssid);
+        snprintf(ssid_text, sizeof(ssid_text), "NRL %s | SSID %u",
+                 NRLAudioBridge_GetRxCodec() == 1u ? "OPUS" : "G711", voice_ssid);
     } else if (espnow_rx && espnow_peer[0] != '\0') {
         // espnow_peer arrives as "CALLSIGN-N". This layout has a dedicated
         // SSID line below the callsign, so split the pair: the "-N" suffix in
@@ -3934,9 +3960,11 @@ void refreshCaller()
         char *dash = strrchr(espnow_peer, '-');
         if (dash != nullptr) {
             *dash = '\0';
-            snprintf(ssid_text, sizeof(ssid_text), "SSID %s", dash + 1);
+            snprintf(ssid_text, sizeof(ssid_text), "ESP-NOW %s | SSID %s",
+                     ESPNOW_LINK_GetRxCodec() == 1u ? "OPUS" : "G711", dash + 1);
         } else {
-            snprintf(ssid_text, sizeof(ssid_text), "SSID -");
+            snprintf(ssid_text, sizeof(ssid_text), "ESP-NOW %s",
+                     ESPNOW_LINK_GetRxCodec() == 1u ? "OPUS" : "G711");
         }
         snprintf(call_text, sizeof(call_text), "%s", espnow_peer);
     } else if (show_radio) {
@@ -3969,104 +3997,55 @@ void refreshCaller()
                                    0);
     }
 
-    // Status caption above the callsign. Transmitting while also receiving is
-    // shown as full duplex; otherwise TX wins over RX wins over standby.
-    int state;
-    if (espnow_tx && espnow_rx) {
-        state = 6;  // ESP-NOW full duplex
-    } else if (espnow_tx) {
-        state = 5;  // ESP-NOW transmit
-    } else if (espnow_rx) {
-        state = 7;  // ESP-NOW receive
-    } else if (tx && rx) {
-        state = 4;  // full duplex
-    } else if (tx) {
-        state = 3;  // transmitting
-    } else if (rx) {
-        state = 2;  // receiving
+    // Source and actual receive codec share the caption row, which remains
+    // readable on both the 240x240 Gezipai and the 320x320 BI4UMD.
+    char caption[32] = {};
+    uint32_t caption_color = kColorCaption;
+    uint32_t call_color = kColorCallIdle;
+    if (fmo_tx || fmo_rx) {
+        snprintf(caption, sizeof(caption), "FMO %s %s",
+                 fmo_tx && fmo_rx ? "FDX" : fmo_tx ? "TX" : "RX",
+                 fmo_rx && fmo.voice_codec[0] != '\0' ? fmo.voice_codec : "OPUS");
+        caption_color = kColorFmo;
+        call_color = fmo_rx ? kColorFmo : kColorCallIdle;
+    } else if (espnow_tx || espnow_rx) {
+        snprintf(caption, sizeof(caption), "ESP-NOW %s %s",
+                 espnow_tx && espnow_rx ? "FDX" : espnow_tx ? "TX" : "RX",
+                 (espnow_rx ? ESPNOW_LINK_GetRxCodec() : ESPNOW_LINK_GetTxCodec()) == 1u
+                     ? "OPUS" : "G711");
+        caption_color = kColorDuplex;
+        call_color = espnow_rx ? kColorDuplex : kColorCallIdle;
+    } else if (nrl_tx || rx) {
+        snprintf(caption, sizeof(caption), "NRL %s %s",
+                 nrl_tx && rx ? "FDX" : nrl_tx ? "TX" : "RX",
+                 (rx ? NRLAudioBridge_GetRxCodec() : NRLAudioBridge_GetVoiceCodec()) == 1u
+                     ? "OPUS" : "G711");
+        caption_color = nrl_tx ? kColorTx : kColorAccent;
+        call_color = rx ? kColorCallLive : kColorCallIdle;
     } else if (show_media) {
-        state = 11;  // network radio or music file
-    } else if (ESPNOW_LINK_IsEnabled()) {
-        // Standby captions carry the PTT target (NRL / ESP-NOW) and that
-        // link's own TX codec. Both are folded into the state value so
-        // flipping either switch while idle re-renders the caption.
-        state = (ESPNOW_LINK_GetTxCodec() == 1u) ? 9 : 8;
+        snprintf(caption, sizeof(caption), "%s", menuText("NOW PLAYING", "正在播放"));
+        caption_color = kColorGood;
+        call_color = kColorGood;
     } else {
-        state = (NRLAudioBridge_GetVoiceCodec() == 1u) ? 10 : 0;
+        const uint8_t mode = ESPNOW_LINK_GetPttMode();
+        snprintf(caption, sizeof(caption), "STANDBY %s %s",
+                 mode == 2u ? "FMO" : mode == 1u ? "ESP-NOW" : "NRL",
+                 mode == 2u ? "OPUS" :
+                 ((mode == 1u ? ESPNOW_LINK_GetTxCodec()
+                              : NRLAudioBridge_GetVoiceCodec()) == 1u ? "OPUS" : "G711"));
     }
-
-    if (state != s_shown_state) {
-        s_shown_state = state;
-        const char *caption;
-        uint32_t caption_color;
-        uint32_t call_color;
-        switch (state) {
-            case 11:
-                caption = menuText("NOW PLAYING", "正在播放"); caption_color = kColorGood;
-                call_color = kColorGood;
-                break;
-            case 7:
-                caption = menuText("ESP-NOW RX", "ESP-NOW 接收"); caption_color = kColorDuplex;
-                call_color = kColorCallLive;
-                break;
-            case 6:
-                caption = menuText("ESP-NOW FDX", "ESP-NOW 全双工"); caption_color = kColorDuplex;
-                call_color = kColorCallLive;
-                break;
-            case 5:
-                caption = menuText("ESP-NOW TX", "ESP-NOW 发送"); caption_color = kColorDuplex;
-                call_color = kColorCallIdle;
-                break;
-            case 4:
-                caption = menuText("FULL DUPLEX", "全双工"); caption_color = kColorDuplex;
-                call_color = kColorCallLive;
-                break;
-            case 3:
-                caption = menuText("TRANSMITTING", "正在发送"); caption_color = kColorTx;
-                call_color = kColorCallIdle;
-                break;
-            case 2:
-                caption = menuText("RECEIVING", "正在接收"); caption_color = kColorAccent;
-                call_color = kColorCallLive;
-                break;
-            case 9:
-                caption = menuText("STANDBY ESP-NOW OPUS", "待机 ESP-NOW OPUS");
-                caption_color = kColorCaption;
-                call_color = kColorCallIdle;
-                break;
-            case 8:
-                caption = menuText("STANDBY ESP-NOW G711", "待机 ESP-NOW G711");
-                caption_color = kColorCaption;
-                call_color = kColorCallIdle;
-                break;
-            case 10:
-                caption = menuText("STANDBY NRL OPUS", "待机 NRL OPUS");
-                caption_color = kColorCaption;
-                call_color = kColorCallIdle;
-                break;
-            default:
-                caption = menuText("STANDBY NRL G711", "待机 NRL G711");
-                caption_color = kColorCaption;
-                call_color = kColorCallIdle;
-                break;
-        }
-        lv_label_set_text(s_lbl_caption, caption);
+    setLabel(s_lbl_caption, s_shown_caption, sizeof(s_shown_caption), caption);
+    if (caption_color != s_shown_caption_color) {
+        s_shown_caption_color = caption_color;
         lv_obj_set_style_text_color(s_lbl_caption, lv_color_hex(caption_color), 0);
-        lv_obj_set_style_text_color(s_lbl_callsign, lv_color_hex(call_color), 0);
     }
+    lv_obj_set_style_text_color(s_lbl_callsign, lv_color_hex(call_color), 0);
 }
 
 void refreshClock()
 {
     if (!s_time_sync_started && nrlWifiStaConnected()) {
-        // CST-8 == UTC+8 (China). NTP servers are tried in order.
-        setenv("TZ", "CST-8", 1);
-        tzset();
-        esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
-        esp_sntp_setservername(0, "ntp.aliyun.com");
-        esp_sntp_setservername(1, "ntp.ntsc.ac.cn");
-        esp_sntp_setservername(2, "pool.ntp.org");
-        esp_sntp_init();
+        (void)TIME_SYNC_StartIfNeeded();
         s_time_sync_started = true;
     }
 
@@ -4326,11 +4305,17 @@ void refreshIp()
     char rx_call[8];
     unsigned rx_ssid = 0u;
     const bool rx = NRLAudioBridge_GetRemoteCaller(rx_call, sizeof(rx_call), &rx_ssid);
-    const bool tx = STATUS_IO_IsSqlActive();
-    const bool espnow_mode = ESPNOW_LINK_GetPttMode() == 1u;
-    const bool espnow_tx = espnow_mode && tx && ESPNOW_LINK_IsEnabled();
+    const bool nrl_tx = NRLAudioBridge_PttActive();
+    const bool espnow_tx = ESPNOW_LINK_PttActive();
     const bool espnow_rx = ESPNOW_LINK_IsReceiving();
-    if (espnow_tx || espnow_rx) {
+    FmoLinkStatus fmo = {};
+    FMO_GetLinkStatus(&fmo);
+    const bool fmo_tx = FMO_PttActive();
+    if (fmo_tx || fmo.receiving) {
+        snprintf(ip_text, sizeof(ip_text), "FMO %s",
+                 fmo.receiving && fmo.voice_codec[0] != '\0' ? fmo.voice_codec : "OPUS");
+        color = kColorFmo;
+    } else if (espnow_tx || espnow_rx) {
         // TX shows the intercom's own TX codec; RX adapts to what the peer is
         // actually sending (per-packet auto-detect) -- the two ends may be
         // configured differently.
@@ -4339,7 +4324,7 @@ void refreshIp()
         snprintf(ip_text, sizeof(ip_text), "ESP-NOW %s",
                  (codec == 1u) ? "OPUS" : "G711");
         color = kColorDuplex;
-    } else if (tx || rx) {
+    } else if (nrl_tx || rx) {
         // Transmitting or receiving voice -> show the configured NRL server
         // host (the host string as configured, not a resolved IP address).
         const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
@@ -4347,7 +4332,7 @@ void refreshIp()
                                ? cfg->server_host
                                : "---";
         snprintf(ip_text, sizeof(ip_text), "%s", host);
-        color = tx ? kColorTx : kColorAccent;
+        color = nrl_tx ? kColorTx : kColorAccent;
     } else if (nrlWifiStaConnected()) {
         // No idle "PTT ESP-NOW" takeover here: the standby caption already
         // reads "STANDBY ESP-NOW" while the intercom is armed, so the address
@@ -4446,15 +4431,37 @@ void refreshOtaNotice()
                  menuText("NEW FW %.20s VOL+/-", "新固件 %.20s 音量+/-"),
                  status->latest_version);
         color = kColorGood;
-    } else if (APRS_SERVICE_IsEnabled()) {
-        // Every parsed APRS packet gets a compact summary. Unlike the station
-        // list, this also covers text/status packets that have no position.
-        char summary[sizeof(text)] = {};
-        if (APRS_SERVICE_GetLastSummary(summary, sizeof(summary)) != 0u &&
-            summary[0] != '\0') {
-            snprintf(text, sizeof(text), "APRS %.*s",
-                     static_cast<int>(sizeof(text) - 6u), summary);
-            color = kColorAccent;
+    } else {
+        // Keep the selected FMO relay visible whenever FMO is enabled. This
+        // full-width scrolling row fits both its friendly name and host:port
+        // on the Gezipai and BI4UMD screens. Transient notices and OTA
+        // progress above deliberately take priority, then the relay returns.
+        FmoConfig fmo_config = {};
+        FmoLinkStatus fmo_link = {};
+        FMO_GetConfig(&fmo_config);
+        FMO_GetLinkStatus(&fmo_link);
+        if (fmo_config.enabled) {
+            const char *name = fmo_config.server.name[0] != '\0'
+                                   ? fmo_config.server.name
+                                   : fmo_config.server.callsign[0] != '\0'
+                                         ? fmo_config.server.callsign
+                                         : "SERVER";
+            const char *host = fmo_config.server.host[0] != '\0'
+                                   ? fmo_config.server.host : "---";
+            snprintf(text, sizeof(text), "FMO %.64s | %.64s:%u", name, host,
+                     static_cast<unsigned>(fmo_config.server.port));
+            color = fmo_link.connected ? kColorFmo : kColorSub;
+        } else if (APRS_SERVICE_IsEnabled()) {
+            // Every parsed APRS packet gets a compact summary. Unlike the
+            // station list, this also covers text/status packets that have no
+            // position.
+            char summary[sizeof(text)] = {};
+            if (APRS_SERVICE_GetLastSummary(summary, sizeof(summary)) != 0u &&
+                summary[0] != '\0') {
+                snprintf(text, sizeof(text), "APRS %.*s",
+                         static_cast<int>(sizeof(text) - 6u), summary);
+                color = kColorAccent;
+            }
         }
     }
     if (setLabel(s_lbl_ota, s_shown_ota, sizeof(s_shown_ota), text)) {
@@ -4516,11 +4523,54 @@ void confirmMainMenu()
             buildHomeContent();
             break;
         case MainMenuAction::PttMode: {
-            const bool select_espnow = ESPNOW_LINK_GetPttMode() == 0u;
-            if (ESPNOW_LINK_SetEnabled(select_espnow)) {
-                setMenuMessage(select_espnow ? "PTT -> ESP-NOW" : "PTT -> NRL");
+            uint8_t mode = static_cast<uint8_t>((ESPNOW_LINK_GetPttMode() + 1u) % 3u);
+            bool ok = true;
+            if (mode == 1u && !ESPNOW_LINK_IsEnabled()) {
+                ok = ESPNOW_LINK_SetEnabled(true);
+            } else if (mode == 2u) {
+                FmoConfig fmo = {};
+                FMO_GetConfig(&fmo);
+                if (!fmo.enabled) {
+                    // Skip an unconfigured FMO target so the next press still
+                    // returns the physical button to NRL.
+                    mode = 0u;
+                } else if (!fmo.transmit) {
+                    fmo.transmit = true;
+                    ok = FMO_SetConfig(&fmo, true);
+                }
+            }
+            if (ok) {
+                ESPNOW_LINK_SetPttMode(mode);
+                setMenuMessage(mode == 2u ? "PTT -> FMO" :
+                               mode == 1u ? "PTT -> ESP-NOW" : "PTT -> NRL");
             } else {
-                setMenuMessage("ESP-NOW ENABLE FAILED");
+                setMenuMessage("PTT MODE CHANGE FAILED");
+            }
+            buildMenuUi();
+            break;
+        }
+        case MainMenuAction::Fmo: {
+            FmoConfig fmo = {};
+            FMO_GetConfig(&fmo);
+            const bool enabling = !fmo.enabled;
+            bool ready = true;
+            if (enabling) {
+                FmoIdentityStatus identity = {};
+                ready = FMO_CERT_GetStatus(&identity) == ESP_OK && identity.ready &&
+                        fmo.server.host[0] != '\0' && fmo.server.port != 0u &&
+                        fmo.server.uid != 0u && fmo.server.callsign[0] != '\0' &&
+                        fmo.server.has_fingerprint;
+            }
+            if (!ready) {
+                setMenuMessage("FMO: CONFIGURE IN WEB");
+            } else {
+                fmo.enabled = enabling;
+                if (enabling) fmo.transmit = true;
+                if (FMO_SetConfig(&fmo, true)) {
+                    setMenuMessage(enabling ? "FMO -> ON" : "FMO -> OFF");
+                } else {
+                    setMenuMessage("FMO SETTING FAILED");
+                }
             }
             buildMenuUi();
             break;

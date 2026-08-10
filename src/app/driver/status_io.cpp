@@ -110,6 +110,8 @@ namespace {
 constexpr unsigned long kDefaultPttTimeoutMs = 300000UL;
 
 bool s_net_audio_active = false;
+bool s_nrl_audio_active = false;
+bool s_fmo_audio_active = false;
 unsigned long s_last_heartbeat_rx_ms = 0UL;
 #if NRL_BOARD == NRL_BOARD_S31_KORVO
 bool s_ws2812_ready = false;
@@ -694,8 +696,16 @@ extern "C" void STATUS_IO_Init(void)
 extern "C" void STATUS_IO_SetPttActive(const bool active)
 {
     // On Gezipai, "PTT active" means inbound network voice is being played out.
-    s_net_audio_active = active;
-    writeLed(NRL_PIN_LED_AUDIO, active);
+    s_nrl_audio_active = active;
+    s_net_audio_active = s_nrl_audio_active || s_fmo_audio_active;
+    writeLed(NRL_PIN_LED_AUDIO, s_net_audio_active);
+}
+
+extern "C" void STATUS_IO_SetFmoPttActive(const bool active)
+{
+    s_fmo_audio_active = active;
+    s_net_audio_active = s_nrl_audio_active || s_fmo_audio_active;
+    writeLed(NRL_PIN_LED_AUDIO, s_net_audio_active);
 }
 
 extern "C" void STATUS_IO_NotifyHeartbeatReceived(void)
@@ -813,6 +823,8 @@ extern "C" void STATUS_IO_Poll(void)
 namespace {
 
 bool s_ptt_active = false;
+bool s_nrl_ptt_active = false;
+bool s_fmo_ptt_active = false;
 unsigned long s_last_heartbeat_rx_ms = 0UL;
 int s_last_sql1_level = -1;
 int s_last_sql2_level = -1;
@@ -865,12 +877,27 @@ extern "C" void STATUS_IO_Init(void)
 
 extern "C" void STATUS_IO_SetPttActive(const bool active)
 {
-    if (s_ptt_active != active) {
-        ESP_LOGI(TAG, "ptt_out=%u", active ? 1u : 0u);
+    s_nrl_ptt_active = active;
+    const bool combined = s_nrl_ptt_active || s_fmo_ptt_active;
+    if (s_ptt_active != combined) {
+        ESP_LOGI(TAG, "ptt_out=%u", combined ? 1u : 0u);
     }
-    s_ptt_active = active;
-    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, active ? 1 : 0);
-    writeLed(NRL_PIN_STATUS_PTT_LED, active);
+    s_ptt_active = combined;
+    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, combined ? 1 : 0);
+    writeLed(NRL_PIN_STATUS_PTT_LED, combined);
+}
+
+extern "C" void STATUS_IO_SetFmoPttActive(const bool active)
+{
+    s_fmo_ptt_active = active;
+    const bool combined = s_nrl_ptt_active || s_fmo_ptt_active;
+    if (s_ptt_active != combined) {
+        ESP_LOGI(TAG, "ptt_out=%u (FMO=%u)", combined ? 1u : 0u,
+                 active ? 1u : 0u);
+    }
+    s_ptt_active = combined;
+    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, combined ? 1 : 0);
+    writeLed(NRL_PIN_STATUS_PTT_LED, combined);
 }
 
 extern "C" void STATUS_IO_NotifyHeartbeatReceived(void)

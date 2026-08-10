@@ -5,7 +5,8 @@ dependencies:
   # board. On S31 the korvo BSP also pulls it (^1.5.9); declare it here too so
   # gezipai/bh4tdv (no BSP) resolve it as well.
   espressif/esp_codec_dev:
-    version: "^1.5.9"
+    # 2.0.0-beta removes the legacy work-mode types used by the S31 BSP.
+    version: "~1.5.9"
   # Audio decoders (MP3/FLAC/AAC...) for the media player
   # (docs/architecture.md 3.3). The simple-decoder API also parses the
   # container/frame sync, so the player streams raw file bytes in and gets
@@ -61,6 +62,16 @@ dependencies:
     version: "^1.5.0"
     rules:
       - if: "target == esp32s31"
+  # FMO-V4 uses MQTT with SAS credentials signed by the user's Ed25519 key.
+  espressif/cjson:
+    version: "^1.7.19"
+  espressif/libsodium:
+    version: "^1.0.22"
+  espressif/mqtt:
+    version: "^1.0.0"
+  # Small power-loss-safe server-list cache in the final 256 KiB of NOR flash.
+  joltwallet/littlefs:
+    version: "~1.22.3"
   # esp-nimble-cpp: pure-IDF C++ wrapper around the NimBLE host stack used by
   # src/lib/ble_config.cpp. Requires CONFIG_BT_NIMBLE_ENABLED=y in the S3 board
   # defaults; Bluedroid must be off (mutually exclusive stacks).

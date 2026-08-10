@@ -29,6 +29,11 @@ uint32_t NRLAudioBridge_GetRemoteDmrId(void);
 // active caller; the LCD reads it to show the incoming stream's format.
 uint8_t NRLAudioBridge_GetRxCodec(void);
 
+// Dedicated touch PTT used by the S31 split home control. It keys only NRL and
+// does not alter the persisted target of the physical PTT button.
+void NRLAudioBridge_SetPtt(bool held);
+bool NRLAudioBridge_PttActive(void);
+
 void NRLAudioBridge_ApplyConfig(bool restart_wifi, bool restart_udp);
 
 // Feed externally-captured microphone audio (PCM16 mono 8 kHz) into the network
