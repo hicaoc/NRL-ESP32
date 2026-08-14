@@ -38,6 +38,7 @@ typedef struct {
     bool receiving;
     bool transmitting;
     int last_error;
+    char client_id[48];
     char voice_callsign[8];
     char voice_codec[8];
     uint32_t rx_frames;

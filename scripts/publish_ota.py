@@ -137,13 +137,13 @@ def publish_package(base: str, token: str, meta: dict, files: list[tuple[str, Pa
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Publish complete flash packages and OTA releases for all four boards."
+        description="Publish complete flash packages and OTA releases for all six boards."
     )
     parser.add_argument(
         "boards",
         nargs="*",
         metavar="BOARD",
-        help="board(s) to publish; omitted means all four boards",
+        help="board(s) to publish; omitted means all six boards",
     )
     parser.add_argument("--version")
     parser.add_argument("--channel", default=os.environ.get("OTA_CHANNEL", "stable"))

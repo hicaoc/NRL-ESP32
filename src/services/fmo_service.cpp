@@ -19,7 +19,6 @@
 
 #include <esp_log.h>
 #include <esp_heap_caps.h>
-#include <esp_mac.h>
 #include <esp_random.h>
 #include <esp_rom_crc.h>
 #include <esp_timer.h>
@@ -93,6 +92,7 @@ static int64_t s_retry_at_us = 0;
 static bool s_recreate_client = false;
 static bool s_initialized = false;
 static bool s_config_loaded = false;
+static uint16_t s_client_suffix = 0u;
 
 static SemaphoreHandle_t s_client_mutex = nullptr;
 static SemaphoreHandle_t s_server_mutex = nullptr;
@@ -522,10 +522,12 @@ static esp_err_t startClient(const FmoConfig &config,
     esp_err_t error = FMO_CERT_BuildCredentials(&config.server, "user", username,
                                                 sizeof(username), &password);
     if (error != ESP_OK) return error;
-    uint8_t mac[6] = {};
-    (void)esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    snprintf(client_id, sizeof(client_id), "FMO-%s-%lu-%02X%02X", username,
-             static_cast<unsigned long>(config.server.uid), mac[4], mac[5]);
+    snprintf(client_id, sizeof(client_id), "FMO-%s-%lu-%04X", username,
+             static_cast<unsigned long>(config.server.uid),
+             static_cast<unsigned>(s_client_suffix));
+    portENTER_CRITICAL(&s_lock);
+    snprintf(s_status.client_id, sizeof(s_status.client_id), "%s", client_id);
+    portEXIT_CRITICAL(&s_lock);
 
     esp_mqtt_client_config_t mqtt_config = {};
     mqtt_config.broker.address.hostname = config.server.host;
@@ -568,9 +570,9 @@ static esp_err_t startClient(const FmoConfig &config,
     s_status.last_error = ESP_OK;
     s_active_generation = generation;
     portEXIT_CRITICAL(&s_lock);
-    ESP_LOGI(TAG, "connecting %s (%s:%u, uid=%lu)", config.server.name,
+    ESP_LOGI(TAG, "connecting %s (%s:%u, uid=%lu, client id=%s)", config.server.name,
              config.server.host, static_cast<unsigned>(config.server.port),
-             static_cast<unsigned long>(config.server.uid));
+             static_cast<unsigned long>(config.server.uid), client_id);
     return ESP_OK;
 }
 
@@ -1008,6 +1010,7 @@ static void discoveryTask(void *)
 extern "C" bool FMO_Init(void)
 {
     if (s_initialized) return true;
+    s_client_suffix = static_cast<uint16_t>(esp_random());
     ensureConfigLoaded();
     s_client_mutex = xSemaphoreCreateMutex();
     s_server_mutex = xSemaphoreCreateMutex();

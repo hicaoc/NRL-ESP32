@@ -1246,7 +1246,7 @@ button{background:#1769aa;color:white;border:0;border-radius:6px;font-weight:650
 const esc=s=>String(s??'');let loaded=false;
 async function refresh(){try{const r=await fetch('/fmo/status',{cache:'no-store'}),j=await r.json();
 enabled.checked=j.config.enabled;transmit.checked=j.config.transmit;
-link.className='mono '+(j.link.connected?'ok':'hint');link.textContent=`${j.link.connected?'已连接':'未连接'} / ${j.link.receiving?'接收 '+j.link.voice_callsign+' '+j.link.voice_codec:'空闲'} / RX ${j.link.rx_frames} / 解析错误 ${j.link.parse_errors} / last_error ${j.link.last_error}`;
+link.className='mono '+(j.link.connected?'ok':'hint');link.textContent=`${j.link.connected?'已连接':'未连接'} / MQTT Client ID ${j.link.client_id||'---'} / ${j.link.receiving?'接收 '+j.link.voice_callsign+' '+j.link.voice_codec:'空闲'} / RX ${j.link.rx_frames} / 解析错误 ${j.link.parse_errors} / last_error ${j.link.last_error}`;
 cert.className='mono '+(j.identity.ready?'ok':'bad');cert.textContent=j.identity.ready?`可用：${j.identity.callsign}，UID ${j.identity.uid}，有效期至 ${new Date(j.identity.expires_at*1000).toLocaleString()}，指纹 ${j.identity.fingerprint}`:`未就绪：user=${j.identity.user_present} intermediate=${j.identity.intermediate_present} deviceKey=${j.identity.device_key_present} error=${j.identity.error}`;
 current.textContent=j.config.server.host?`${j.config.server.name} / ${j.config.server.callsign} / UID ${j.config.server.uid} / ${j.config.server.host}:${j.config.server.port}`:'未选择服务器';
 const old=servers.value;servers.innerHTML='<option value="">保留当前服务器</option>';j.servers.forEach((s,i)=>{const o=document.createElement('option');o.value=i;o.textContent=`${s.name} (${s.callsign}) ${s.host}:${s.port} 在线 ${s.online}/${s.total}`;servers.appendChild(o)});if(old&&servers.querySelector(`option[value="${old}"]`))servers.value=old;loaded=true;
@@ -1301,7 +1301,8 @@ static esp_err_t handleFmoStatus(httpd_req_t *req)
     head += link.receiving ? "true" : "false";
     head += ",\"transmitting\":";
     head += link.transmitting ? "true" : "false";
-    head += ",\"voice_callsign\":\"" + jsonEscape(link.voice_callsign) +
+    head += ",\"client_id\":\"" + jsonEscape(link.client_id) +
+            "\",\"voice_callsign\":\"" + jsonEscape(link.voice_callsign) +
             "\",\"voice_codec\":\"" + jsonEscape(link.voice_codec) +
             "\",\"rx_frames\":" + std::to_string(link.rx_frames) +
             ",\"parse_errors\":" + std::to_string(link.parse_errors) +

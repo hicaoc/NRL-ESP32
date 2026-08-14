@@ -4,7 +4,7 @@
 
 HTML 阅读版：[中文](README.html) / [English](README.en.html)
 
-当前固件版本：`0.8.33`
+当前固件版本：`0.8.56`
 
 完整构建矩阵包含 `gezipai`、`gezipai_4g`、`bi4umd`、`bh4tdv`、`s31_korvo` 和 `s31_function_coreboard`。其中 `gezipai_4g` 在保留格子派音频与屏幕功能的基础上增加 ML307R 硬件映射；`bi4umd` 保留其触摸屏和 TF 卡扩展。
 
@@ -88,9 +88,9 @@ HTML 阅读版：[中文](README.html) / [English](README.en.html)
 ```powershell
 $env:OTA_SERVER_URL = 'https://ota.nrlptt.com/nrlota/api'
 $env:OTA_ADMIN_TOKEN = '<管理员令牌>'
-python scripts/publish_ota_mcp.py --version 0.8.33 --notes 'release notes'
-# 仅核验服务器上的四板发布包：
-python scripts/publish_ota_mcp.py --version 0.8.33 --verify-only
+python scripts/publish_ota_mcp.py --version 0.8.56 --notes 'release notes'
+# 仅核验服务器上的六板发布包：
+python scripts/publish_ota_mcp.py --version 0.8.56 --verify-only
 ```
 
 ## 支持功能
