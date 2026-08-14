@@ -29,6 +29,7 @@ typedef struct {
 typedef struct {
     bool enabled;
     bool transmit;
+    bool mqtt_no_local;
     FmoServer server;
 } FmoConfig;
 

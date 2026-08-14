@@ -1234,7 +1234,8 @@ button{background:#1769aa;color:white;border:0;border-radius:6px;font-weight:650
 <p class="hint">服务器通过 APRS‑IS 自动发现（通常数分钟内出现）。FMO 身份证书不是 TLS 证书，三份 JSON 必须来自同一身份。</p>
 <section><h2>连接与发射</h2><form id="cfg"><div class="grid"><label>FMO 服务器<select name="server_index" id="servers"><option value="">等待发现…</option></select></label>
 <div><label class="row"><input type="checkbox" name="enabled" value="1" id="enabled">连接所选 FMO 服务器</label>
-<label class="row"><input type="checkbox" name="transmit" value="1" id="transmit">将 PTT/SQL 麦克风上行切换到 FMO</label></div></div>
+<label class="row"><input type="checkbox" name="transmit" value="1" id="transmit">将 PTT/SQL 麦克风上行切换到 FMO</label>
+<label class="row" title="关闭后服务器会返回本客户端发布的消息，用于调试"><input type="checkbox" name="mqtt_no_local" value="1" id="mqtt_no_local">MQTT 5 No Local</label></div></div>
 <input type="hidden" name="enabled_present" value="1"><button type="submit">保存并应用</button></form><p id="link" class="mono hint">加载中…</p></section>
 <section><h2>FMO 身份证书</h2><p id="cert" class="mono hint">加载中…</p><div class="grid">
 <label>userCert JSON<input type="file" accept="application/json,.json" data-kind="user"></label>
@@ -1245,7 +1246,7 @@ button{background:#1769aa;color:white;border:0;border-radius:6px;font-weight:650
 <script>
 const esc=s=>String(s??'');let loaded=false;
 async function refresh(){try{const r=await fetch('/fmo/status',{cache:'no-store'}),j=await r.json();
-enabled.checked=j.config.enabled;transmit.checked=j.config.transmit;
+enabled.checked=j.config.enabled;transmit.checked=j.config.transmit;mqtt_no_local.checked=j.config.mqtt_no_local;
 link.className='mono '+(j.link.connected?'ok':'hint');link.textContent=`${j.link.connected?'已连接':'未连接'} / MQTT Client ID ${j.link.client_id||'---'} / ${j.link.receiving?'接收 '+j.link.voice_callsign+' '+j.link.voice_codec:'空闲'} / RX ${j.link.rx_frames} / 解析错误 ${j.link.parse_errors} / last_error ${j.link.last_error}`;
 cert.className='mono '+(j.identity.ready?'ok':'bad');cert.textContent=j.identity.ready?`可用：${j.identity.callsign}，UID ${j.identity.uid}，有效期至 ${new Date(j.identity.expires_at*1000).toLocaleString()}，指纹 ${j.identity.fingerprint}`:`未就绪：user=${j.identity.user_present} intermediate=${j.identity.intermediate_present} deviceKey=${j.identity.device_key_present} error=${j.identity.error}`;
 current.textContent=j.config.server.host?`${j.config.server.name} / ${j.config.server.callsign} / UID ${j.config.server.uid} / ${j.config.server.host}:${j.config.server.port}`:'未选择服务器';
@@ -1290,6 +1291,8 @@ static esp_err_t handleFmoStatus(httpd_req_t *req)
     head += config.enabled ? "true" : "false";
     head += ",\"transmit\":";
     head += config.transmit ? "true" : "false";
+    head += ",\"mqtt_no_local\":";
+    head += config.mqtt_no_local ? "true" : "false";
     head += ",\"server\":{\"name\":\"" + jsonEscape(config.server.name) +
             "\",\"host\":\"" + jsonEscape(config.server.host) +
             "\",\"callsign\":\"" + jsonEscape(config.server.callsign) +
@@ -1350,6 +1353,7 @@ static esp_err_t handleFmoConfig(httpd_req_t *req)
     FMO_GetConfig(&config);
     config.enabled = s_server.hasArg("enabled");
     config.transmit = s_server.hasArg("transmit");
+    config.mqtt_no_local = s_server.hasArg("mqtt_no_local");
     if (s_server.hasArg("server_index") && !s_server.arg("server_index").empty()) {
         char *end = nullptr;
         const unsigned long index = strtoul(s_server.arg("server_index").c_str(), &end, 10);

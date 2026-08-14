@@ -195,3 +195,4 @@ CONFIG_LWIP_TCP_WND_DEFAULT=8192
 # Per-task heap census (AT+MEM): tags every allocation with its owning
 # task so 'who ate the internal DRAM' is answerable without a debug build.
 CONFIG_HEAP_TASK_TRACKING=y
+CONFIG_MQTT_PROTOCOL_5=y

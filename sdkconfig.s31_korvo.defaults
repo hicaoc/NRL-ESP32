@@ -346,3 +346,4 @@ CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
 # tracking releases its lazily-created mutex. Keep the aggregate heap stats
 # used by AT+MEM, but disable the optional per-task allocation census.
 # CONFIG_HEAP_TASK_TRACKING is not set
+CONFIG_MQTT_PROTOCOL_5=y

@@ -28,6 +28,7 @@
 #include <lwip/netdb.h>
 #include <lwip/sockets.h>
 #include <mqtt_client.h>
+#include <mqtt5_client.h>
 #include <nvs.h>
 #include <sodium.h>
 
@@ -47,7 +48,7 @@ constexpr const char *TAG = "FMO";
 constexpr const char *kNvsNamespace = "fmo";
 constexpr const char *kNvsConfigKey = "config";
 constexpr uint32_t kConfigMagic = 0x344f4d46u;
-constexpr uint16_t kConfigVersion = 1u;
+constexpr uint16_t kConfigVersion = 2u;
 constexpr size_t kRawMaxSize = 8192u;
 constexpr size_t kServerMax = 256u;
 constexpr uint32_t kServerCacheMagic = 0x43534d46u; // "FMSC"
@@ -61,11 +62,22 @@ constexpr uint32_t kReconnectMs = 10000u;
 constexpr const char *kDiscoveryHost = "rotate.aprs2.net";
 constexpr const char *kDiscoveryPort = "10152";
 
+struct PersistedConfigV1 {
+    uint32_t magic;
+    uint16_t version;
+    uint8_t enabled;
+    uint8_t transmit;
+    FmoServer server;
+    uint32_t crc32;
+};
+
 struct PersistedConfig {
     uint32_t magic;
     uint16_t version;
     uint8_t enabled;
     uint8_t transmit;
+    uint8_t mqtt_no_local;
+    uint8_t reserved[3];
     FmoServer server;
     uint32_t crc32;
 };
@@ -133,6 +145,12 @@ static uint32_t crcConfig(const PersistedConfig *config)
                             offsetof(PersistedConfig, crc32));
 }
 
+static uint32_t crcConfigV1(const PersistedConfigV1 *config)
+{
+    return esp_rom_crc32_le(0, reinterpret_cast<const uint8_t *>(config),
+                            offsetof(PersistedConfigV1, crc32));
+}
+
 static void normalizeServer(FmoServer *server)
 {
     server->name[sizeof(server->name) - 1u] = '\0';
@@ -171,13 +189,29 @@ static bool loadConfig(void)
     size_t size = sizeof(stored);
     const esp_err_t error = nvs_get_blob(nvs, kNvsConfigKey, &stored, &size);
     nvs_close(nvs);
-    if (error != ESP_OK || size != sizeof(stored) ||
-        stored.magic != kConfigMagic || stored.version != kConfigVersion ||
-        stored.crc32 != crcConfig(&stored)) {
+    if (error != ESP_OK) {
+        return false;
+    }
+    if (size == sizeof(PersistedConfigV1)) {
+        const auto *legacy = reinterpret_cast<const PersistedConfigV1 *>(&stored);
+        if (legacy->magic != kConfigMagic || legacy->version != 1u ||
+            legacy->crc32 != crcConfigV1(legacy)) {
+            return false;
+        }
+        s_config.enabled = legacy->enabled != 0u;
+        s_config.transmit = legacy->transmit != 0u;
+        s_config.mqtt_no_local = true;
+        s_config.server = legacy->server;
+        normalizeServer(&s_config.server);
+        return true;
+    }
+    if (size != sizeof(stored) || stored.magic != kConfigMagic ||
+        stored.version != kConfigVersion || stored.crc32 != crcConfig(&stored)) {
         return false;
     }
     s_config.enabled = stored.enabled != 0u;
     s_config.transmit = stored.transmit != 0u;
+    s_config.mqtt_no_local = stored.mqtt_no_local != 0u;
     s_config.server = stored.server;
     normalizeServer(&s_config.server);
     return true;
@@ -186,6 +220,7 @@ static bool loadConfig(void)
 static void ensureConfigLoaded(void)
 {
     if (s_config_loaded) return;
+    s_config.mqtt_no_local = true;
     (void)loadConfig();
     s_config_loaded = true;
 }
@@ -197,6 +232,7 @@ static bool saveConfig(const FmoConfig &config)
     stored.version = kConfigVersion;
     stored.enabled = config.enabled ? 1u : 0u;
     stored.transmit = config.transmit ? 1u : 0u;
+    stored.mqtt_no_local = config.mqtt_no_local ? 1u : 0u;
     stored.server = config.server;
     stored.crc32 = crcConfig(&stored);
     nvs_handle_t nvs = 0;
@@ -445,13 +481,26 @@ static void mqttEvent(void *, esp_event_base_t, const int32_t event_id,
 {
     auto *event = static_cast<esp_mqtt_event_t *>(event_data);
     if (event_id == MQTT_EVENT_CONNECTED) {
+        bool no_local = true;
+        portENTER_CRITICAL(&s_lock);
+        no_local = s_config.mqtt_no_local;
+        portEXIT_CRITICAL(&s_lock);
+        esp_mqtt5_subscribe_property_config_t property = {};
+        property.no_local_flag = no_local;
+        const esp_err_t property_error =
+            esp_mqtt5_client_set_subscribe_property(event->client, &property);
+        if (property_error != ESP_OK) {
+            ESP_LOGW(TAG, "failed to set MQTT 5 No Local: %s",
+                     esp_err_to_name(property_error));
+        }
         (void)esp_mqtt_client_subscribe(event->client, "FMO/RAW", 0);
         portENTER_CRITICAL(&s_lock);
         s_status.connected = true;
         s_status.last_error = ESP_OK;
         s_recreate_client = false;
         portEXIT_CRITICAL(&s_lock);
-        ESP_LOGI(TAG, "connected and subscribed to FMO/RAW");
+        ESP_LOGI(TAG, "connected and subscribed to FMO/RAW (No Local=%u)",
+                 no_local ? 1u : 0u);
     } else if (event_id == MQTT_EVENT_DISCONNECTED) {
         portENTER_CRITICAL(&s_lock);
         s_status.connected = false;
@@ -537,7 +586,7 @@ static esp_err_t startClient(const FmoConfig &config,
     mqtt_config.credentials.client_id = client_id;
     mqtt_config.credentials.authentication.password = password;
     mqtt_config.session.keepalive = 60;
-    mqtt_config.session.protocol_ver = MQTT_PROTOCOL_V_3_1_1;
+    mqtt_config.session.protocol_ver = MQTT_PROTOCOL_V_5;
     mqtt_config.network.reconnect_timeout_ms = kReconnectMs;
     mqtt_config.network.timeout_ms = 10000;
     mqtt_config.network.disable_auto_reconnect = true;
