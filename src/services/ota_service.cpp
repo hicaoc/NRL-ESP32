@@ -54,6 +54,12 @@ constexpr uint32_t kOtaBlockPaceMs = 3u;
 // HTTP and scheduler overhead enough to approach local Wi-Fi upload speed
 // while keeping the same per-block CPU pacing.
 constexpr int kOtaHttpBufferBytes = 4096;
+// HTTPS OTA reaches through HTTP, TLS, image validation and flash-writing
+// frames from this task. 9 KB was enough for ordinary release checks but left
+// no margin on ESP32-S3 once an install started, and FreeRTOS reported a
+// corrupted nrl_ota stack. Keep this stack in internal RAM: flash writes can
+// disable the cache, so a PSRAM-backed task stack is not safe here.
+constexpr uint32_t kOtaTaskStackBytes = 16u * 1024u;
 
 struct OtaState {
     NrlOtaStatus status = {};
@@ -66,6 +72,13 @@ struct OtaState {
 };
 
 NRL_PSRAM_BSS OtaState s_ota;
+// Parsing eight releases needs roughly 3.3 KB. It used to be a local array in
+// parseManifest(), consuming over a third of the OTA task's old 9 KB stack
+// before any HTTP/TLS frames were counted. The OTA task is the sole writer, so
+// a PSRAM scratch buffer is safe and keeps that cost off the task stack.
+NRL_PSRAM_BSS NrlOtaRelease s_manifest_releases[NRL_OTA_RELEASE_MAX];
+StaticTask_t s_ota_task_tcb;
+StackType_t s_ota_task_stack[kOtaTaskStackBytes / sizeof(StackType_t)];
 
 uint32_t nowMs()
 {
@@ -76,6 +89,33 @@ void copyText(char *out, size_t out_size, const char *value)
 {
     if (out == nullptr || out_size == 0u) return;
     snprintf(out, out_size, "%s", value != nullptr ? value : "");
+}
+
+bool parseReleaseVersion(const char *version, unsigned long (&parts)[3])
+{
+    if (version == nullptr) return false;
+    if (*version == 'v' || *version == 'V') ++version;
+    char trailing = '\0';
+    return sscanf(version, "%lu.%lu.%lu%c", &parts[0], &parts[1], &parts[2],
+                  &trailing) == 3;
+}
+
+bool isNewerFirmwareVersion(const char *candidate, const char *current)
+{
+    unsigned long candidate_parts[3] = {};
+    unsigned long current_parts[3] = {};
+    if (!parseReleaseVersion(candidate, candidate_parts) ||
+        !parseReleaseVersion(current, current_parts)) {
+        // Unknown version formats remain available for an explicit install,
+        // but must never trigger an unattended upgrade or downgrade.
+        return false;
+    }
+    for (size_t i = 0; i < 3u; ++i) {
+        if (candidate_parts[i] != current_parts[i]) {
+            return candidate_parts[i] > current_parts[i];
+        }
+    }
+    return false;
 }
 
 const char *boardType()
@@ -123,7 +163,7 @@ bool jsonStringAt(const char *begin, const char *end, const char *key,
 bool parseManifest(const char *json)
 {
     if (json == nullptr) return false;
-    NrlOtaRelease parsed[NRL_OTA_RELEASE_MAX] = {};
+    memset(s_manifest_releases, 0, sizeof(s_manifest_releases));
     size_t count = 0;
     const char *cursor = json;
     while (count < NRL_OTA_RELEASE_MAX) {
@@ -131,9 +171,12 @@ bool parseManifest(const char *json)
         if (entry == nullptr) break;
         const char *end = strchr(entry, '}');
         if (end == nullptr) break;
-        if (jsonStringAt(entry, end, "version", parsed[count].version, sizeof(parsed[count].version)) &&
-            jsonStringAt(entry, end, "url", parsed[count].url, sizeof(parsed[count].url))) {
-            (void)jsonStringAt(entry, end, "notes", parsed[count].notes, sizeof(parsed[count].notes));
+        if (jsonStringAt(entry, end, "version", s_manifest_releases[count].version,
+                         sizeof(s_manifest_releases[count].version)) &&
+            jsonStringAt(entry, end, "url", s_manifest_releases[count].url,
+                         sizeof(s_manifest_releases[count].url))) {
+            (void)jsonStringAt(entry, end, "notes", s_manifest_releases[count].notes,
+                               sizeof(s_manifest_releases[count].notes));
             ++count;
         }
         cursor = end + 1;
@@ -142,7 +185,7 @@ bool parseManifest(const char *json)
     (void)jsonStringAt(json, json + strlen(json), "latest_version", latest, sizeof(latest));
     xSemaphoreTake(s_ota.lock, portMAX_DELAY);
     s_ota.status.release_count = count;
-    memcpy(s_ota.status.releases, parsed, sizeof(parsed));
+    memcpy(s_ota.status.releases, s_manifest_releases, sizeof(s_manifest_releases));
     copyText(s_ota.status.latest_version, sizeof(s_ota.status.latest_version), latest);
     xSemaphoreGive(s_ota.lock);
     // A latest version without a matching release URL would notify the user
@@ -307,7 +350,7 @@ bool checkForReleases()
         xSemaphoreTake(s_ota.lock, portMAX_DELAY);
         copyText(latest, sizeof(latest), s_ota.status.latest_version);
         xSemaphoreGive(s_ota.lock);
-        if (latest[0] != '\0' && strcmp(latest, NRL_FIRMWARE_VERSION) != 0) {
+        if (isNewerFirmwareVersion(latest, NRL_FIRMWARE_VERSION)) {
             char notice[96] = {};
             snprintf(notice, sizeof(notice), "NEW FIRMWARE %.64s", latest);
             DISPLAY_NOTICE_Post(notice, DISPLAY_NOTICE_SUCCESS, 10000u);
@@ -322,6 +365,8 @@ bool checkForReleases()
 
 bool installVersion(const char *version)
 {
+    ESP_LOGI(TAG, "install start: OTA stack minimum free=%u bytes",
+             static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
     NrlOtaRelease release = {};
     xSemaphoreTake(s_ota.lock, portMAX_DELAY);
     for (size_t i = 0; i < s_ota.status.release_count; ++i) {
@@ -357,6 +402,9 @@ bool installVersion(const char *version)
     ota.bulk_flash_erase = false;
     esp_https_ota_handle_t ota_handle = nullptr;
     esp_err_t err = esp_https_ota_begin(&ota, &ota_handle);
+    ESP_LOGI(TAG, "HTTPS OTA begin: %s, stack minimum free=%u bytes",
+             esp_err_to_name(err),
+             static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
     uint32_t image_size = 0u;
     if (err == ESP_OK) {
         const int reported_size = esp_https_ota_get_image_size(ota_handle);
@@ -375,6 +423,10 @@ bool installVersion(const char *version)
                 vTaskDelay(pdMS_TO_TICKS(kOtaBlockPaceMs));
             }
         } while (err == ESP_ERR_HTTPS_OTA_IN_PROGRESS);
+
+        ESP_LOGI(TAG, "HTTPS OTA perform: %s, stack minimum free=%u bytes",
+                 esp_err_to_name(err),
+                 static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
 
         if (err == ESP_OK && !esp_https_ota_is_complete_data_received(ota_handle)) {
             err = ESP_FAIL;
@@ -469,7 +521,7 @@ void otaTask(void *)
             xSemaphoreTake(s_ota.lock, portMAX_DELAY);
             copyText(latest, sizeof(latest), s_ota.status.latest_version);
             xSemaphoreGive(s_ota.lock);
-            if (latest[0] == '\0' || strcmp(latest, NRL_FIRMWARE_VERSION) == 0) {
+            if (!isNewerFirmwareVersion(latest, NRL_FIRMWARE_VERSION)) {
                 setError("no newer OTA release available");
             } else {
                 (void)installVersion(latest);
@@ -507,7 +559,8 @@ bool OtaService_Init()
     s_ota.status.configured = s_ota.status.server_url[0] != '\0';
     ESP_LOGI(TAG, "OTA config loaded: configured=%d server=%s",
              s_ota.status.configured, s_ota.status.server_url);
-    return xTaskCreate(otaTask, "nrl_ota", 9216, nullptr, 3, nullptr) == pdPASS;
+    return xTaskCreateStatic(otaTask, "nrl_ota", kOtaTaskStackBytes, nullptr, 3,
+                             s_ota_task_stack, &s_ota_task_tcb) != nullptr;
 }
 
 bool OtaService_SetConfig(const char *server_url, const char *device_token)
