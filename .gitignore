@@ -26,3 +26,4 @@ __pycache__/
 .claude/settings.json
 scripts/cache/
 /sdkconfig.old
+dist/

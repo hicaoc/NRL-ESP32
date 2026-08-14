@@ -72,6 +72,16 @@ endif()
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(nrl-esp32)
 
+# GCC 16 diagnoses anonymous typedef structs with C++ default member
+# initializers in esp-dl 3.3.9. Keep the workaround scoped to that component.
+idf_component_get_property(esp_dl_lib espressif__esp-dl COMPONENT_LIB)
+if(esp_dl_lib AND
+   CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+   CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 16)
+    target_compile_options(${esp_dl_lib} PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-Wno-non-c-typedef-for-linkage>)
+endif()
+
 # S31 Bluetooth (Bluedroid HFP AG): the default Bluedroid security-service-record
 # table holds only 3 entries (SDP + AG + device). When the AG *initiates* a
 # headset connection it also needs records for SDP discovery + the RFCOMM

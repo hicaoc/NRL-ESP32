@@ -33,7 +33,6 @@
 #include "../../services/sstv_service.h"
 #include "../../services/video_call.h"
 #include "external_radio.h"
-#include "fonts/lv_font_callsign.h"
 #include "fonts/lv_font_cjk.h"
 #include "game_tetris.h"
 #include "i2c1.h"
@@ -1831,10 +1830,13 @@ void buildHome()
     lv_obj_align(s_lbl_dmrid, LV_ALIGN_LEFT_MID, 0, -84);
     lv_label_set_text(s_lbl_dmrid, "");
 
-    // Callsigns only need A-Z, 0-9 and '-'. A compact dedicated 72 px font is
-    // clearer and smaller than compiling another complete Montserrat font.
-    s_lbl_callsign = label(left, &lv_font_callsign_72, kColorText);
-    lv_obj_set_width(s_lbl_callsign, 430);
+    // Keep the station badge on one line. The old 72 px subset font omitted
+    // spaces used to pad the badge, rendering them as boxes; Montserrat 48 is
+    // already used elsewhere on this screen and contains the full ASCII set.
+    s_lbl_callsign = label(left, &lv_font_montserrat_48, kColorText);
+    lv_obj_set_size(s_lbl_callsign, 430,
+                    lv_font_get_line_height(&lv_font_montserrat_48));
+    lv_label_set_long_mode(s_lbl_callsign, LV_LABEL_LONG_CLIP);
     lv_obj_align(s_lbl_callsign, LV_ALIGN_CENTER, 0, -40);
     lv_obj_set_style_text_align(s_lbl_callsign, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_lbl_callsign, kCallsignPlaceholder);
@@ -7032,7 +7034,7 @@ void refreshHome()
     static char nrl_lookup_host[65] = {};
     static uint16_t nrl_lookup_port = 0u;
     static uint32_t nrl_lookup_generation = UINT32_MAX;
-    static char nrl_lookup_name[96] = {};
+    static NrlServerInfo nrl_lookup = {};
     const char *nrl_host = (cfg && cfg->server_host[0]) ? cfg->server_host : "---";
     const uint16_t nrl_port = cfg ? cfg->server_port : 0u;
     const uint32_t nrl_generation =
@@ -7043,15 +7045,16 @@ void refreshHome()
         snprintf(nrl_lookup_host, sizeof(nrl_lookup_host), "%s", nrl_host);
         nrl_lookup_port = nrl_port;
         nrl_lookup_generation = nrl_generation;
-        nrl_lookup_name[0] = '\0';
-        (void)SERVER_LIST_STORE_FindNrlServerName(
-            nrl_host, nrl_port, nrl_lookup_name, sizeof(nrl_lookup_name));
+        nrl_lookup = {};
+        (void)SERVER_LIST_STORE_FindNrlServer(nrl_host, nrl_port,
+                                               &nrl_lookup);
     }
     char nrl_server[sizeof(s_shown_server)] = {};
     if (nrl_port != 0u) {
-        snprintf(nrl_server, sizeof(nrl_server), "NRL %.80s | %.64s:%u",
-                 nrl_lookup_name[0] != '\0' ? nrl_lookup_name : "SERVER",
-                 nrl_host, static_cast<unsigned>(nrl_port));
+        snprintf(nrl_server, sizeof(nrl_server), "NRL %.80s | %lu/%lu",
+                 nrl_lookup.name[0] != '\0' ? nrl_lookup.name : "SERVER",
+                 static_cast<unsigned long>(nrl_lookup.online),
+                 static_cast<unsigned long>(nrl_lookup.total));
     } else {
         snprintf(nrl_server, sizeof(nrl_server), "NRL ---");
     }
@@ -7066,9 +7069,9 @@ void refreshHome()
                                : fmo_config.server.callsign[0] != '\0'
                                      ? fmo_config.server.callsign
                                      : "SERVER";
-        snprintf(fmo_server, sizeof(fmo_server), "FMO %.80s | %.64s:%u", name,
-                 fmo_config.server.host,
-                 static_cast<unsigned>(fmo_config.server.port));
+        snprintf(fmo_server, sizeof(fmo_server), "FMO %.80s | %lu/%lu", name,
+                 static_cast<unsigned long>(fmo_config.server.online),
+                 static_cast<unsigned long>(fmo_config.server.total));
     } else {
         snprintf(fmo_server, sizeof(fmo_server), "FMO ---");
     }

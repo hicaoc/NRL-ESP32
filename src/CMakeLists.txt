@@ -2,6 +2,7 @@ set(app_sources
     app/main.cpp
     app/aec/aec_processor.cpp
     app/aec/esp_sr_probe.cpp
+    app/aec/esp_sr_wakenet10_stub.c
     app/lv_mem_psram.cpp
     audio/audio_focus.cpp
     audio/audio_router.cpp
@@ -43,7 +44,6 @@ set(app_sources
     app/driver/game_tetris.cpp
     app/driver/fonts/lv_font_cjk_16.c
     app/driver/fonts/lv_font_cjk_20.c
-    app/driver/fonts/lv_font_callsign_72.c
     app/driver/display.cpp
     app/driver/display_bi4umd.cpp
     app/driver/touch_bi4umd.cpp

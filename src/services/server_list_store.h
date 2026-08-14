@@ -46,6 +46,11 @@ bool SERVER_LIST_STORE_Write(ServerListKind kind, const void *payload,
 bool SERVER_LIST_STORE_FindNrlServerName(const char *host, uint16_t port,
                                          char *name, size_t name_size);
 
+// Looks up the complete cached record for the configured NRL endpoint,
+// including the current online/total population counters.
+bool SERVER_LIST_STORE_FindNrlServer(const char *host, uint16_t port,
+                                     NrlServerInfo *server);
+
 // Loads the cached NRL server records into a PSRAM-owned array. The caller
 // owns the result and releases it with free().
 bool SERVER_LIST_STORE_LoadNrlServers(NrlServerInfo **servers, size_t *count);

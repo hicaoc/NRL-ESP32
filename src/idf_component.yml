@@ -1,6 +1,6 @@
 dependencies:
   espressif/esp-sr:
-    version: ">=2.0.0"
+    version: "2.5.0"
   # Audio codec HAL used directly by the ES7210/ES8311/ES8389 drivers on every
   # board. On S31 the korvo BSP also pulls it (^1.5.9); declare it here too so
   # gezipai/bh4tdv (no BSP) resolve it as well.

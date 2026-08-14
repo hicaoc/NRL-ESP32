@@ -582,6 +582,32 @@ extern "C" bool SERVER_LIST_STORE_LoadNrlServers(NrlServerInfo **servers,
     return true;
 }
 
+extern "C" bool SERVER_LIST_STORE_FindNrlServer(
+    const char *host, const uint16_t port, NrlServerInfo *server)
+{
+    if (server == nullptr) return false;
+    *server = {};
+    if (host == nullptr || host[0] == '\0' || port == 0u) return false;
+
+    char wanted_host[96] = {};
+    normalizeNrlHost(host, wanted_host, sizeof(wanted_host));
+    NrlServerInfo *servers = nullptr;
+    size_t count = 0u;
+    if (!SERVER_LIST_STORE_LoadNrlServers(&servers, &count)) return false;
+
+    bool found = false;
+    for (size_t i = 0u; i < count; ++i) {
+        if (servers[i].port == port &&
+            strcasecmp(servers[i].host, wanted_host) == 0) {
+            *server = servers[i];
+            found = true;
+            break;
+        }
+    }
+    free(servers);
+    return found;
+}
+
 extern "C" size_t SERVER_LIST_STORE_ValidateNrlJson(const char *json,
                                                        const size_t size)
 {
