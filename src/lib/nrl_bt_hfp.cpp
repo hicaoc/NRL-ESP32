@@ -173,7 +173,9 @@ bool s_stack_up = false;       // Bluedroid + controller actually running
 volatile bool s_request_pending = false;   // a SetEnabled request is queued
 volatile bool s_request_enabled = false;   // its desired state
 volatile bool s_transitioning = false;     // Poll is mid stack up/down
+#if !defined(CONFIG_BTDM_CTRL_MODE_BTDM)
 bool s_ble_mem_released = false;
+#endif
 bool s_connected = false;      // service-level connection to a headset
 bool s_audio_active = false;   // SCO/voice link up
 esp_bd_addr_t s_peer_bda = {};

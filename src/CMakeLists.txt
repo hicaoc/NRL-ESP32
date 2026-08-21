@@ -41,13 +41,7 @@ set(app_sources
     services/time_sync_service.cpp
     services/video_call.cpp
     app/driver/audio_passthrough.cpp
-    app/driver/game_tetris.cpp
-    app/driver/fonts/lv_font_cjk_16.c
-    app/driver/fonts/lv_font_cjk_20.c
     app/driver/display.cpp
-    app/driver/display_bi4umd.cpp
-    app/driver/touch_bi4umd.cpp
-    app/driver/display_s31.cpp
     app/driver/es7210.cpp
     app/driver/es8311.cpp
     app/driver/es8389.cpp
@@ -82,6 +76,34 @@ set(app_sources
     lib/wifi_config_portal.cpp
     lib/wifi_config_portal_view.cpp
 )
+
+# Board-specific display sources. Headless boards still compile
+# display.cpp for the Display_* stubs, but skip the LVGL pages, touch
+# driver, and bitmap fonts that those stubs never reference.
+if(NRL_BOARD_ID STREQUAL "NRL_BOARD_BI4UMD")
+    list(APPEND app_sources
+        app/driver/display_bi4umd.cpp
+        app/driver/touch_bi4umd.cpp)
+endif()
+if(NRL_BOARD_ID STREQUAL "NRL_BOARD_S31_KORVO")
+    list(APPEND app_sources
+        app/driver/display_s31.cpp
+        app/driver/game_tetris.cpp)
+endif()
+
+# Bitmap CJK fonts are several megabytes each. Compile them only for boards
+# that actually consume the corresponding size: 16 px on gezipai-family
+# panels, both 16 px and 20 px on S31 Korvo. Function CoreBoard and BH4TDV
+# have no display, so they skip the font translation units entirely.
+if(NRL_BOARD_ID STREQUAL "NRL_BOARD_GEZIPAI" OR
+   NRL_BOARD_ID STREQUAL "NRL_BOARD_GEZIPAI_4G" OR
+   NRL_BOARD_ID STREQUAL "NRL_BOARD_BI4UMD" OR
+   NRL_BOARD_ID STREQUAL "NRL_BOARD_S31_KORVO")
+    list(APPEND app_sources app/driver/fonts/lv_font_cjk_16.c)
+endif()
+if(NRL_BOARD_ID STREQUAL "NRL_BOARD_S31_KORVO")
+    list(APPEND app_sources app/driver/fonts/lv_font_cjk_20.c)
+endif()
 
 # LVGL is vendored under components/lvgl/ only for display-equipped boards.
 # On bh4tdv and the S31 Function CoreBoard, display sources compile their LVGL
