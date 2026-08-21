@@ -33,29 +33,57 @@ namespace {
 constexpr const char *kConfigNvsNamespace = "device_config";
 constexpr const char *kConfigNvsKey = "config";
 constexpr uint32_t kConfigMagic = 0x58455655U;
+// BI4UMD needs the tuned speaker/mic defaults; bump the stored config version
+// so older 7.x configs get re-seeded once on first boot.
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+constexpr uint8_t kConfigVersion = 8U;
+constexpr uint8_t kDefaultMicVolume = 0xFFU;
+constexpr uint8_t kDefaultLineOutVolume = 0xBFU;
+constexpr uint8_t kDefaultDrcWinsize = 2U;
+constexpr uint8_t kDefaultDrcMaxlevel = 12U;
+constexpr uint8_t kDefaultDrcMinlevel = 4U;
+constexpr uint8_t kDefaultDacRamprate = 4U;
+constexpr uint8_t kDefaultAdcPgaGain = 4U;
+constexpr uint8_t kDefaultAdcScale = 0U;
+constexpr bool kDefaultAlcEnabled = true;
+constexpr uint8_t kDefaultAlcWinsize = 2U;
+constexpr uint8_t kDefaultAlcMaxlevel = 12U;
+constexpr uint8_t kDefaultAlcMinlevel = 4U;
+constexpr bool kDefaultAdcHpf = true;
+#else
 constexpr uint8_t kConfigVersion = 7U;
+constexpr uint8_t kDefaultMicVolume = 180U;
+constexpr uint8_t kDefaultLineOutVolume = 180U;
+constexpr uint8_t kDefaultDrcWinsize = 0U;
+constexpr uint8_t kDefaultDrcMaxlevel = 0U;
+constexpr uint8_t kDefaultDrcMinlevel = 0U;
+constexpr uint8_t kDefaultDacRamprate = 0U;
+constexpr uint8_t kDefaultAdcPgaGain = 10U;
+constexpr uint8_t kDefaultAdcScale = 4U;
+constexpr bool kDefaultAlcEnabled = false;
+constexpr uint8_t kDefaultAlcWinsize = 0U;
+constexpr uint8_t kDefaultAlcMaxlevel = 0U;
+constexpr uint8_t kDefaultAlcMinlevel = 0U;
+constexpr bool kDefaultAdcHpf = false;
+#endif
 constexpr uint8_t kLegacyConfigVersion1 = 1U;
 constexpr uint8_t kLegacyConfigVersion2 = 2U;
 constexpr uint8_t kLegacyConfigVersion3 = 3U;
 constexpr uint8_t kLegacyConfigVersion4 = 4U;
 constexpr uint8_t kLegacyConfigVersion5 = 5U;
+constexpr uint8_t kLegacyConfigVersion6 = 6U;
+constexpr uint8_t kLegacyConfigVersion7 = 7U;
 constexpr uint8_t kMinChannel = 0U;
 constexpr uint8_t kMaxChannel = 7U;
-constexpr uint8_t kDefaultMicVolume = 180U;
 constexpr uint16_t kDefaultMicPcmGainMilli = 1000U;
 constexpr uint16_t kMinMicPcmGainMilli = 100U;
 constexpr uint16_t kMaxMicPcmGainMilli = 5000U;
-constexpr uint8_t kDefaultLineOutVolume = 180U;
 constexpr uint8_t kPersistedHpDriveOff = 1U;
 constexpr uint8_t kPersistedHpDriveOn = 2U;
 constexpr uint8_t kPersistedFlagOff = 1U;
 constexpr uint8_t kPersistedFlagOn = 2U;
 constexpr uint8_t kPersistedAecRefNetwork = 1U;
 constexpr uint8_t kPersistedAecRefMic = 2U;
-constexpr uint8_t kDefaultDrcWinsize = 0U;
-constexpr uint8_t kDefaultDrcMaxlevel = 0U;
-constexpr uint8_t kDefaultDrcMinlevel = 0U;
-constexpr uint8_t kDefaultDacRamprate = 0U;
 constexpr uint32_t kDacEqCoefficientMask = 0x3FFFFFFFUL;
 constexpr uint32_t kAdcEqCoefficientMask = 0x3FFFFFFFUL;
 constexpr uint32_t kDefaultSciBaud = 9600U;
@@ -128,6 +156,7 @@ static_assert(sizeof(PersistedExternalRadioConfig) <= 1024U,
 
 ExternalRadioConfig s_config = {};
 bool s_loaded = false;
+bool s_audio_config_migrated = false;
 #if NRL_BOARD == NRL_BOARD_BH4TDV
 uint8_t s_last_channel_encoded = 0xFFu;
 #endif
@@ -339,24 +368,26 @@ static void applyDefaultAdcConfig(void)
 {
     s_config.adc_dmic_enabled = false;
     s_config.adc_linsel = true;
-    s_config.adc_pga_gain = 10U;
+    s_config.adc_pga_gain = kDefaultAdcPgaGain;
     s_config.adc_ramprate = 4U;
     s_config.adc_dmic_sense = false;
     s_config.adc_sync = true;
     s_config.adc_inv = false;
     s_config.adc_ramclr = false;
-    s_config.adc_scale = 4U;
-    s_config.alc_enabled = false;
+    s_config.adc_scale = kDefaultAdcScale;
+    s_config.alc_enabled = kDefaultAlcEnabled;
     s_config.adc_automute_enabled = false;
-    s_config.alc_winsize = 0U;
-    s_config.alc_maxlevel = 0U;
-    s_config.alc_minlevel = 0U;
+    s_config.alc_winsize = kDefaultAlcWinsize;
+    s_config.alc_maxlevel = kDefaultAlcMaxlevel;
+    s_config.alc_minlevel = kDefaultAlcMinlevel;
     s_config.adc_automute_winsize = 0U;
     s_config.adc_automute_noise_gate = 0U;
     s_config.adc_automute_volume = 0U;
     s_config.adc_hpfs1 = 10U;
     s_config.adc_eq_bypass = true;
-    s_config.adc_hpf = false;
+    // Enable the codec-side dynamic HPF (DC blocker) on BI4UMD. Older
+    // defaults left it off, which let mic DC offset eat into ALC headroom.
+    s_config.adc_hpf = kDefaultAdcHpf;
     s_config.adc_hpfs2 = 10U;
     s_config.adceq_b0 = 0U;
     s_config.adceq_a1 = 0U;
@@ -649,10 +680,22 @@ static bool loadPersistedConfig(void)
         0u, reinterpret_cast<const uint8_t *>(&persisted),
         offsetof(PersistedExternalRadioConfig, crc32));
     if (read_error != ESP_OK || size != sizeof(persisted) ||
-        persisted.magic != kConfigMagic ||
-        persisted.version != kConfigVersion || persisted.crc32 != expected_crc) {
+        persisted.magic != kConfigMagic || persisted.crc32 != expected_crc) {
         return false;
     }
+    const bool version_ok =
+        persisted.version == kConfigVersion ||
+        persisted.version == kLegacyConfigVersion1 ||
+        persisted.version == kLegacyConfigVersion2 ||
+        persisted.version == kLegacyConfigVersion3 ||
+        persisted.version == kLegacyConfigVersion4 ||
+        persisted.version == kLegacyConfigVersion5 ||
+        persisted.version == kLegacyConfigVersion6 ||
+        persisted.version == kLegacyConfigVersion7;
+    if (!version_ok) {
+        return false;
+    }
+    const bool current_version = persisted.version == kConfigVersion;
 
     s_config.channel = persisted.channel;
     s_config.server_port = persisted.server_port;
@@ -661,6 +704,15 @@ static bool loadPersistedConfig(void)
     s_config.device_mode = persisted.device_mode;
     s_config.mic_volume = persisted.mic_volume;
     s_config.line_out_volume = persisted.line_out_volume;
+    // BI4UMD v8 reseeds the speaker/mic defaults from the desktop speaker-fix
+    // path. Older layouts kept a quieter DAC volume and the old 30 dB PGA +
+    // 24 dB scale chain that clipped loud talkers. Override those two volumes
+    // here so users get the fix without wiping Wi-Fi / callsign settings.
+    if (!current_version) {
+        s_config.mic_volume = kDefaultMicVolume;
+        s_config.line_out_volume = kDefaultLineOutVolume;
+        s_audio_config_migrated = true;
+    }
     s_config.hp_drive_enabled = persisted.reserved[0] == kPersistedHpDriveOn;
     s_config.sci.data_bits = persisted.reserved[1];
     s_config.sci.parity = static_cast<char>(persisted.reserved[2]);
@@ -675,7 +727,7 @@ static bool loadPersistedConfig(void)
                 persisted.wifi_ssid);
     copyBounded(s_config.wifi_profiles[0].password, sizeof(s_config.wifi_profiles[0].password),
                 persisted.wifi_password);
-    if (persisted.version == kConfigVersion) {
+    if (persisted.version >= kLegacyConfigVersion6) {
         for (size_t i = 1; i < EXTERNAL_RADIO_MAX_WIFI_PROFILES; ++i) {
             copyBounded(s_config.wifi_profiles[i].ssid,
                         sizeof(s_config.wifi_profiles[i].ssid), persisted.wifi_extra[i - 1U].ssid);
@@ -685,7 +737,7 @@ static bool loadPersistedConfig(void)
     }
     copyBounded(s_config.server_host, sizeof(s_config.server_host), persisted.server_host);
     copyBounded(s_config.callsign, sizeof(s_config.callsign), persisted.callsign);
-    if (persisted.version >= kLegacyConfigVersion2) {
+    if (current_version) {
         s_config.drc_enabled = persisted.drc_enabled == kPersistedFlagOn;
         s_config.drc_winsize = persisted.drc_winsize;
         s_config.drc_maxlevel = persisted.drc_maxlevel;
@@ -694,6 +746,7 @@ static bool loadPersistedConfig(void)
         s_config.dac_eq_bypass = persisted.dac_eq_bypass != kPersistedFlagOff;
     } else {
         applyDefaultDrcConfig();
+        s_audio_config_migrated = true;
     }
     if (persisted.version >= kLegacyConfigVersion5) {
         s_config.daceq_b0 = persisted.daceq_b0;
@@ -752,7 +805,7 @@ static bool loadPersistedConfig(void)
         s_config.mic_hpf_enabled = true;
         s_config.bt_enabled = false;
     }
-    if (persisted.version >= kLegacyConfigVersion5) {
+    if (current_version) {
         loadAdcRegisters(persisted.adc_reg14,
                          persisted.adc_reg15,
                          persisted.adc_reg16,
@@ -768,6 +821,7 @@ static bool loadPersistedConfig(void)
         s_config.adceq_b2 = persisted.adceq_b2;
     } else {
         applyDefaultAdcConfig();
+        s_audio_config_migrated = true;
     }
     // PTT timeout lives in reserved4[0..1] and battery calibration in
     // reserved4[2..3] (both added without a config version bump). Configs
@@ -934,6 +988,9 @@ extern "C" void EXTERNAL_RADIO_Init(void)
 
     applyDefaults();
     if (!loadPersistedConfig()) {
+        normalizeConfig();
+        savePersistedConfig();
+    } else if (s_audio_config_migrated) {
         normalizeConfig();
         savePersistedConfig();
     }

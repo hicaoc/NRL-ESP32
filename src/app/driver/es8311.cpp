@@ -81,8 +81,6 @@ enum : uint8_t {
 
 constexpr uint8_t kEs8311ClockEnableAll = 0x3F;
 constexpr uint8_t kDefaultAdcRamprate = 0x04;
-constexpr uint8_t kEs8311AdcVolumeDefault = 0xBF;  // reference es8311_start: REG17 = 0xBF
-constexpr uint8_t kEs8311DacVolumeDefault = 180U;
 // REG0D bits: PDN_ANA(7) PDN_IBIASGEN(6) PDN_ADCBIASGEN(5) PDN_ADCVERFGEN(4)
 //             PDN_DACVREFGEN(3) PDN_VREF(2) VMIDSEL(1:0)
 // NOTE: PDN_VREF (bit 2) has REVERSE polarity vs other PDN bits!
@@ -91,9 +89,38 @@ constexpr uint8_t kEs8311DacVolumeDefault = 180U;
 constexpr uint8_t kEs8311PowerUpAnalog = 0x06;
 constexpr uint8_t kEs8311PowerUpPgaAdc = 0x02;
 constexpr uint8_t kEs8311PowerUpDac = 0x00;
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+// BI4UMD uses the tuned mic/speaker defaults from the desktop speaker-fix
+// path. REG17 is ALC MAXGAIN (+32 dB) so quiet talkers still reach the
+// -16.1 dBFS floor; REG32 is 0 dB so the FM8002E BTL amp is driven at a
+// loud-but-headroomed level. PGA 12 dB + ADC_SCALE 0 dB + ALC keep the
+// analog MEMS mic out of clipping while still boosting whispers.
+constexpr uint8_t kEs8311AdcVolumeDefault = 0xFFU;
+constexpr uint8_t kEs8311DacVolumeDefault = 0xBFU;
+constexpr uint8_t kDefaultDrcWinsize = 2U;
+constexpr uint8_t kDefaultDrcMaxlevel = 12U;
+constexpr uint8_t kDefaultDrcMinlevel = 4U;
+constexpr uint8_t kDefaultDacRamprate = 4U;
+constexpr uint8_t kDefaultAdcPgaGain = 4U;
+constexpr uint8_t kDefaultAdcScale = 0U;
+constexpr bool kDefaultAlcEnabled = true;
+constexpr uint8_t kDefaultAlcWinsize = 2U;
+constexpr uint8_t kDefaultAlcMaxlevel = 12U;
+constexpr uint8_t kDefaultAlcMinlevel = 4U;
+#else
+constexpr uint8_t kEs8311AdcVolumeDefault = 0xBF;
+constexpr uint8_t kEs8311DacVolumeDefault = 180U;
 constexpr uint8_t kDefaultDrcWinsize = 0x00;
-constexpr uint8_t kDefaultDrcLevel = 0x00;
+constexpr uint8_t kDefaultDrcMaxlevel = 0x00;
+constexpr uint8_t kDefaultDrcMinlevel = 0x00;
 constexpr uint8_t kDefaultDacRamprate = 0x00;
+constexpr uint8_t kDefaultAdcPgaGain = 10U;
+constexpr uint8_t kDefaultAdcScale = 4U;
+constexpr bool kDefaultAlcEnabled = false;
+constexpr uint8_t kDefaultAlcWinsize = 0U;
+constexpr uint8_t kDefaultAlcMaxlevel = 0U;
+constexpr uint8_t kDefaultAlcMinlevel = 0U;
+#endif
 constexpr uint32_t kDacEqCoefficientMask = 0x3FFFFFFFUL;
 constexpr uint32_t kAdcEqCoefficientMask = 0x3FFFFFFFUL;
 constexpr uint8_t kEs8311DacUnmute = 0x00;
@@ -127,8 +154,8 @@ static uint8_t s_line_out_volume = kEs8311DacVolumeDefault;
 static bool s_hp_drive_enabled = false;
 static bool s_drc_enabled = false;
 static uint8_t s_drc_winsize = kDefaultDrcWinsize;
-static uint8_t s_drc_maxlevel = kDefaultDrcLevel;
-static uint8_t s_drc_minlevel = kDefaultDrcLevel;
+static uint8_t s_drc_maxlevel = kDefaultDrcMaxlevel;
+static uint8_t s_drc_minlevel = kDefaultDrcMinlevel;
 static uint8_t s_dac_ramprate = kDefaultDacRamprate;
 static bool s_dac_eq_bypass = true;
 static uint32_t s_daceq_b0 = 0U;
@@ -136,18 +163,18 @@ static uint32_t s_daceq_b1 = 0U;
 static uint32_t s_daceq_a1 = 0U;
 static bool s_adc_dmic_enabled = false;
 static bool s_adc_linsel = true;
-static uint8_t s_adc_pga_gain = 10U;
+static uint8_t s_adc_pga_gain = kDefaultAdcPgaGain;
 static uint8_t s_adc_ramprate = kDefaultAdcRamprate;
 static bool s_adc_dmic_sense = false;
 static bool s_adc_sync = true;
 static bool s_adc_inv = false;
 static bool s_adc_ramclr = false;
-static uint8_t s_adc_scale = 4U;
-static bool s_alc_enabled = false;
+static uint8_t s_adc_scale = kDefaultAdcScale;
+static bool s_alc_enabled = kDefaultAlcEnabled;
 static bool s_adc_automute_enabled = false;
-static uint8_t s_alc_winsize = 0U;
-static uint8_t s_alc_maxlevel = 0U;
-static uint8_t s_alc_minlevel = 0U;
+static uint8_t s_alc_winsize = kDefaultAlcWinsize;
+static uint8_t s_alc_maxlevel = kDefaultAlcMaxlevel;
+static uint8_t s_alc_minlevel = kDefaultAlcMinlevel;
 static uint8_t s_adc_automute_winsize = 0U;
 static uint8_t s_adc_automute_noise_gate = 0U;
 static uint8_t s_adc_automute_volume = 0U;

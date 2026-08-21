@@ -69,6 +69,19 @@ uint8_t NRLAudioBridge_GetVoiceCodec(void);
 // the configured server. Thread-safe (same UDP mutex as voice).
 bool NRLAudioBridge_SendTyped(uint8_t packet_type, const uint8_t *payload, size_t payload_size);
 
+// NRL type-7 device commands. The server returns the public room list as
+// newline-separated "id,name" records. Room snapshots are safe to read from
+// the LVGL task while the bridge task updates them.
+typedef struct {
+    uint32_t id;
+    char name[48];
+} NrlRoomInfo;
+
+bool NRLAudioBridge_RequestRoomList(void);
+bool NRLAudioBridge_JoinRoom(uint32_t room_id);
+size_t NRLAudioBridge_GetRooms(NrlRoomInfo *rooms, size_t capacity,
+                               uint32_t *current_room_id, uint32_t *revision);
+
 // RX hook for NRL packet type 13 (video fragments). The callback runs in
 // the bridge task; it must copy the payload and return quickly. The sender
 // callsign of the current packet is available via GetRemoteIdentity.

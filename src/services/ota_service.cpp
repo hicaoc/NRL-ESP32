@@ -506,8 +506,14 @@ void otaTask(void *)
                      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
                      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
                      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
+            ESP_LOGI(TAG, "task stack watermark before check=%u",
+                     static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
         }
         const bool check_ok = !do_check || checkForReleases();
+        if (do_check) {
+            ESP_LOGI(TAG, "task stack watermark after check=%u",
+                     static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+        }
         if (do_check && !check_ok) {
             ESP_LOGW(TAG, "check failed: internal free=%u largest=%u min=%u",
                      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),

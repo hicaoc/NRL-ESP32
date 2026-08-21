@@ -54,6 +54,7 @@ namespace {
 constexpr uint8_t kNrlHeaderSize = 48u;
 constexpr uint8_t kNrlTypeVoice = 1u;
 constexpr uint8_t kNrlTypeTextMessage = 5u;
+constexpr uint8_t kNrlTypeRoomCommand = 7u;
 constexpr uint8_t kNrlTypeOpusVoice = 8u;  // wideband voice: one 16k/20ms Opus frame per packet
 constexpr uint8_t kNrlTypeVideo = 13u;     // video-call JPEG fragments (services/video_call)
 constexpr uint8_t kNrlTypeHeartbeat = 2u;
@@ -140,6 +141,12 @@ uint32_t s_last_sci_poll_ms = 0u;
 // task (sendVoiceFrame); a uint32_t word read/write is atomic on the ESP32, so
 // no lock is needed and an occasional stale read is harmless.
 uint32_t s_tail_suppress_until_ms = 0u;
+constexpr size_t kRoomMax = 32u;
+NrlRoomInfo s_rooms[kRoomMax] = {};
+size_t s_room_count = 0u;
+uint32_t s_current_room_id = UINT32_MAX;
+uint32_t s_room_revision = 0u;
+portMUX_TYPE s_room_lock = portMUX_INITIALIZER_UNLOCKED;
 
 constexpr uint32_t kWifiRetryBackoffMs = 30000u;
 constexpr uint8_t kWifiFallbackFailureThreshold = 3u;
@@ -965,6 +972,58 @@ static void handleIncomingTextMessagePayload(const uint8_t *payload, const size_
     DISPLAY_NOTICE_Post(notice, DISPLAY_NOTICE_INFO, kTextMessageNoticeDurationMs);
 }
 
+static void clearRoomCache(void)
+{
+    portENTER_CRITICAL(&s_room_lock);
+    s_room_count = 0u;
+    s_current_room_id = UINT32_MAX;
+    ++s_room_revision;
+    portEXIT_CRITICAL(&s_room_lock);
+}
+
+static void handleRoomCommandPayload(const uint8_t *payload, const size_t payload_size)
+{
+    if (payload == nullptr || payload_size == 0u) return;
+    if (payload[0] == 1u && payload_size >= 5u) {
+        const uint32_t id = (static_cast<uint32_t>(payload[1]) << 24u) |
+                            (static_cast<uint32_t>(payload[2]) << 16u) |
+                            (static_cast<uint32_t>(payload[3]) << 8u) |
+                            static_cast<uint32_t>(payload[4]);
+        portENTER_CRITICAL(&s_room_lock);
+        s_current_room_id = id;
+        ++s_room_revision;
+        portEXIT_CRITICAL(&s_room_lock);
+        return;
+    }
+    if (payload[0] != 2u || payload_size <= 1u) return;
+
+    NrlRoomInfo parsed[kRoomMax] = {};
+    size_t count = 0u;
+    const char *cursor = reinterpret_cast<const char *>(payload + 1u);
+    const char *end = cursor + payload_size - 1u;
+    while (cursor < end && count < kRoomMax) {
+        char *number_end = nullptr;
+        const unsigned long id = strtoul(cursor, &number_end, 10);
+        if (number_end == cursor || number_end >= end || *number_end != ',') break;
+        cursor = number_end + 1;
+        const char *line_end = static_cast<const char *>(memchr(cursor, '\n', end - cursor));
+        if (line_end == nullptr) line_end = end;
+        size_t name_size = static_cast<size_t>(line_end - cursor);
+        if (name_size > 0u && cursor[name_size - 1u] == '\r') --name_size;
+        if (name_size >= sizeof(parsed[count].name)) name_size = sizeof(parsed[count].name) - 1u;
+        parsed[count].id = static_cast<uint32_t>(id);
+        memcpy(parsed[count].name, cursor, name_size);
+        parsed[count].name[name_size] = '\0';
+        ++count;
+        cursor = line_end < end ? line_end + 1 : end;
+    }
+    portENTER_CRITICAL(&s_room_lock);
+    memcpy(s_rooms, parsed, count * sizeof(parsed[0]));
+    s_room_count = count;
+    ++s_room_revision;
+    portEXIT_CRITICAL(&s_room_lock);
+}
+
 static void stopDownlinkPlayback(void)
 {
     if (!s_downlink_playback_active) {
@@ -1147,6 +1206,7 @@ static void sendHeartbeat(void)
 static void restartTransport(const bool restart_wifi, const bool restart_udp)
 {
     if (restart_udp) {
+        clearRoomCache();
         if (s_udp_fd >= 0) {
             close(s_udp_fd);
             s_udp_fd = -1;
@@ -1325,6 +1385,8 @@ static void bridgeTask(void *)
                     handleIncomingVoicePayload(payload, payload_size);
                 } else if (packet_type == kNrlTypeTextMessage) {
                     handleIncomingTextMessagePayload(payload, payload_size);
+                } else if (packet_type == kNrlTypeRoomCommand) {
+                    handleRoomCommandPayload(payload, payload_size);
                 } else if (packet_type == kNrlTypeOpusVoice) {
                     handleIncomingOpusPayload(payload, payload_size);
                 } else if (packet_type == kNrlTypeVideo) {
@@ -1454,6 +1516,40 @@ bool NRLAudioBridge_SendTyped(const uint8_t packet_type, const uint8_t *payload,
         return false;
     }
     return udpSendPacket(packet, packet_size);
+}
+
+bool NRLAudioBridge_RequestRoomList(void)
+{
+    clearRoomCache();
+    const uint8_t payload[] = {2u};
+    return NRLAudioBridge_SendTyped(kNrlTypeRoomCommand, payload, sizeof(payload));
+}
+
+bool NRLAudioBridge_JoinRoom(const uint32_t room_id)
+{
+    const uint8_t payload[] = {
+        1u,
+        static_cast<uint8_t>(room_id >> 24u),
+        static_cast<uint8_t>(room_id >> 16u),
+        static_cast<uint8_t>(room_id >> 8u),
+        static_cast<uint8_t>(room_id),
+    };
+    return NRLAudioBridge_SendTyped(kNrlTypeRoomCommand, payload, sizeof(payload));
+}
+
+size_t NRLAudioBridge_GetRooms(NrlRoomInfo *rooms, const size_t capacity,
+                               uint32_t *current_room_id, uint32_t *revision)
+{
+    portENTER_CRITICAL(&s_room_lock);
+    const size_t room_count = s_room_count;
+    const size_t copy_count = room_count < capacity ? room_count : capacity;
+    if (rooms != nullptr && copy_count > 0u) {
+        memcpy(rooms, s_rooms, copy_count * sizeof(s_rooms[0]));
+    }
+    if (current_room_id != nullptr) *current_room_id = s_current_room_id;
+    if (revision != nullptr) *revision = s_room_revision;
+    portEXIT_CRITICAL(&s_room_lock);
+    return room_count;
 }
 
 void NRLAudioBridge_SetVideoRxHandler(NrlVideoRxHandler_t handler)

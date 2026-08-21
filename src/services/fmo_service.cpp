@@ -1102,9 +1102,12 @@ extern "C" bool FMO_Init(void)
         ESPNOW_LINK_GetPttMode() == 2u) {
         ESPNOW_LINK_SetPttMode(0u);
     }
-    if (xTaskCreate(controlTask, "fmo_link", 8192, nullptr, 4,
+    // FMO control/discovery use bounded buffers and do not need the former
+    // 8K-word stacks. Keeping 6K words preserves headroom while returning
+    // about 16 KB of internal RAM to the rest of the application.
+    if (xTaskCreate(controlTask, "fmo_link", 6144, nullptr, 4,
                     &s_control_task) != pdPASS ||
-        xTaskCreate(discoveryTask, "fmo_discovery", 8192, nullptr, 3,
+        xTaskCreate(discoveryTask, "fmo_discovery", 6144, nullptr, 3,
                     &s_discovery_task) != pdPASS) {
         ESP_LOGE(TAG, "worker task creation failed");
         return false;

@@ -40,6 +40,7 @@
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && NRL_BOARD_IS_GEZIPAI_FAMILY
 
 #include "../../lib/nrl_audio_bridge.h"
+#include "../../services/server_list_store.h"
 #include "../../lib/ble_config.h"
 #include "../../lib/nrl_psram.h"
 #include "../../lib/wifi_config_portal.h"
@@ -60,6 +61,7 @@
 #include "../../services/signaling_service.h"
 #include "../../lib/nrl_version.h"
 #include "external_radio.h"
+#include "serial_port_config.h"
 #include "fonts/lv_font_cjk.h"
 #include "status_io.h"
 
@@ -101,6 +103,7 @@ static const char *TAG = "LCD";
 #include <esp_lcd_panel_vendor.h>
 
 #include <lvgl.h>
+#include "src/core/lv_obj_event_private.h"
 
 namespace {
 
@@ -191,8 +194,15 @@ lv_obj_t *s_lbl_ota = nullptr;
 lv_obj_t *s_bar_ota = nullptr;
 lv_obj_t *s_content = nullptr;
 lv_obj_t *s_lbl_signaling = nullptr;
+// Drop-down volume panel (click the top-bar volume label to toggle).
+lv_obj_t *s_vol_panel = nullptr;
+lv_obj_t *s_vol_slider_spk = nullptr;
+lv_obj_t *s_vol_slider_mic = nullptr;
+lv_obj_t *s_vol_lbl_spk_val = nullptr;
+lv_obj_t *s_vol_lbl_mic_val = nullptr;
+bool s_vol_panel_open = false;
 #if NRL_BOARD == NRL_BOARD_BI4UMD
-enum class Bi4umdPage : uint8_t { Radio, Music, MusicList, Settings, Debug };
+enum class Bi4umdPage : uint8_t { Radio, Music, MusicList, Settings, RoomSwitch };
 Bi4umdPage s_bi4umd_page = Bi4umdPage::Radio;
 lv_obj_t *s_lbl_music_title = nullptr;
 lv_obj_t *s_lbl_music_artist = nullptr;
@@ -202,8 +212,6 @@ lv_obj_t *s_lbl_music_source = nullptr;
 lv_obj_t *s_list_music = nullptr;
 lv_obj_t *s_btn_music_play_label = nullptr;
 lv_obj_t *s_btn_music_repeat_label = nullptr;
-lv_obj_t *s_lbl_settings_mic = nullptr;
-lv_obj_t *s_lbl_settings_volume = nullptr;
 char s_shown_music_path[256] = {};
 bool s_shown_music_playing = false;
 size_t s_music_tap_index = SIZE_MAX;
@@ -212,6 +220,12 @@ lv_obj_t *s_music_tap_row = nullptr;
 bool s_bi4umd_aprs_from_settings = false;
 bool s_bi4umd_sstv_from_settings = false;
 bool s_bi4umd_map_from_settings = false;
+NrlServerInfo *s_room_servers = nullptr;
+size_t s_room_server_count = 0u;
+lv_obj_t *s_dd_room_server = nullptr;
+lv_obj_t *s_dd_room_group = nullptr;
+lv_obj_t *s_lbl_room_status = nullptr;
+uint32_t s_room_page_revision = UINT32_MAX;
 
 // Map page (slippy tiles + APRS station overlay, touch-driven). The viewport
 // sits between the EXIT/title row and the zoom button row; a 2x2 grid of
@@ -483,9 +497,20 @@ void refreshVolume();
 lv_obj_t *makeLabel(lv_obj_t *parent, const lv_font_t *font, uint32_t color);
 void buildUi();
 void buildProvisioningUi();
+
 void buildHomeContent();
 void buildMenuUi();
 size_t menuItemCount();
+// Volume drop-down panel.
+void buildVolumePanel();
+void toggleVolumePanel(lv_event_t *event);
+void closeVolumePanel(lv_event_t *event = nullptr);
+void onVolumePanelSlider(lv_event_t *event);
+void onVolumePanelBtnSpkDown(lv_event_t *event);
+void onVolumePanelBtnSpkUp(lv_event_t *event);
+void onVolumePanelBtnMicDown(lv_event_t *event);
+void onVolumePanelBtnMicUp(lv_event_t *event);
+void refreshVolumePanelValues();
 #if NRL_BOARD == NRL_BOARD_BI4UMD
 void menuTouchPressed(lv_event_t *event);
 void menuTouchReleased(lv_event_t *event);
@@ -494,7 +519,8 @@ void menuTouchReleased(lv_event_t *event);
 void buildBi4umdMusicContent();
 void buildBi4umdMusicListContent();
 void buildBi4umdSettingsContent();
-void buildBi4umdDebugContent();
+void buildBi4umdRoomSwitchContent();
+lv_obj_t *prepareContent();
 void refreshBi4umdMusic();
 void rebuildBi4umdMusicList();
 #endif
@@ -831,13 +857,6 @@ void bi4umdShowSettingsPage(lv_event_t *)
     buildBi4umdSettingsContent();
 }
 
-void bi4umdShowDebugPage(lv_event_t *)
-{
-    STATUS_IO_SetSoftPtt(false);
-    s_bi4umd_page = Bi4umdPage::Debug;
-    buildBi4umdDebugContent();
-}
-
 void bi4umdOpenMainMenu(lv_event_t *)
 {
     s_bi4umd_aprs_from_settings = false;
@@ -872,7 +891,7 @@ void bi4umdOpenAprsListPage(lv_event_t *)
     bi4umdOpenAprsPage(MenuPage::AprsList);
 }
 
-void bi4umdOpenMapPage(lv_event_t *)
+[[maybe_unused]] void bi4umdOpenMapPage(lv_event_t *)
 {
     STATUS_IO_SetSoftPtt(false);
     s_menu_active = true;
@@ -889,6 +908,21 @@ void bi4umdOpenMapPage(lv_event_t *)
 void bi4umdMenuUp(lv_event_t *) { Display_MenuNavigate(1); }
 void bi4umdMenuDown(lv_event_t *) { Display_MenuNavigate(-1); }
 void bi4umdMenuConfirm(lv_event_t *) { Display_MenuConfirm(); }
+void bi4umdGpsToggleEnabled(lv_event_t *)
+{
+    SerialPortConfig cfg{};
+    SERIAL_PORT_CONFIG_Get(&cfg);
+    SerialPortConfig updated = cfg;
+    updated.uart2_enabled = !cfg.uart2_enabled;
+    const bool ok = SERIAL_PORT_CONFIG_Set(&updated, true) &&
+                    SERIAL_PORT_CONFIG_ReloadDrivers();
+    if (!ok) {
+        (void)SERIAL_PORT_CONFIG_Set(&cfg, true);
+        (void)SERIAL_PORT_CONFIG_ReloadDrivers();
+    }
+    buildMenuUi();
+}
+
 
 void addBi4umdMenuButtons()
 {
@@ -917,7 +951,32 @@ void addBi4umdMenuButtons()
         lv_obj_center(label);
     };
 #if NRL_BOARD == NRL_BOARD_BI4UMD
-    if (s_menu_page == MenuPage::AprsList || s_menu_page == MenuPage::AprsGps) {
+    if (s_menu_page == MenuPage::AprsList) {
+        menu_button(kWidth - 48, LV_SYMBOL_LEFT, bi4umdMenuConfirm, 40, 40);
+        return;
+    }
+    if (s_menu_page == MenuPage::AprsGps) {
+        // GPS 串口启动/停止开关：颜色与文字随状态变化
+        SerialPortConfig serial{};
+        SERIAL_PORT_CONFIG_Get(&serial);
+        const bool gps_on = serial.uart2_enabled;
+        lv_obj_t *gps_btn = lv_button_create(s_content);
+        lv_obj_set_pos(gps_btn, 8, 208);
+        lv_obj_set_size(gps_btn, 120, 40);
+        lv_obj_set_style_radius(gps_btn, 6, 0);
+        lv_obj_set_style_bg_color(gps_btn, lv_color_hex(0x10212A), 0);
+        lv_obj_set_style_bg_color(gps_btn, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(gps_btn,
+            lv_color_hex(gps_on ? kColorGood : 0x4A5A6A), 0);
+        lv_obj_set_style_border_width(gps_btn, 1, 0);
+        lv_obj_add_event_cb(gps_btn, bi4umdGpsToggleEnabled,
+                            LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *gps_label = makeLabel(gps_btn, &s_font_aprs_16,
+            gps_on ? kColorGood : kColorWeak);
+        lv_label_set_text(gps_label,
+            gps_on ? menuText("GPS ON  / STOP", "GPS开 / 停止")
+                   : menuText("GPS OFF / START", "GPS关 / 启动"));
+        lv_obj_center(gps_label);
         menu_button(kWidth - 48, LV_SYMBOL_LEFT, bi4umdMenuConfirm, 40, 40);
         return;
     }
@@ -934,14 +993,26 @@ void addBi4umdMenuButtons()
 
 void bi4umdMusicPrev(lv_event_t *)
 {
-    if (bi4umdIsRadioPath(MUSIC_CurrentPath())) (void)RADIO_FAV_Prev();
-    else (void)PLAYLIST_Prev();
+    if (bi4umdIsRadioPath(MUSIC_CurrentPath())) {
+        (void)RADIO_FAV_Prev();
+        return;
+    }
+    if (!PLAYLIST_Prev()) {
+        (void)bi4umdScanSdMusic();
+        (void)PLAYLIST_Prev();
+    }
 }
 
 void bi4umdMusicNext(lv_event_t *)
 {
-    if (bi4umdIsRadioPath(MUSIC_CurrentPath())) (void)RADIO_FAV_Next();
-    else (void)PLAYLIST_Next();
+    if (bi4umdIsRadioPath(MUSIC_CurrentPath())) {
+        (void)RADIO_FAV_Next();
+        return;
+    }
+    if (!PLAYLIST_Next()) {
+        (void)bi4umdScanSdMusic();
+        (void)PLAYLIST_Next();
+    }
 }
 
 void bi4umdMusicToggle(lv_event_t *)
@@ -960,7 +1031,10 @@ void bi4umdMusicToggle(lv_event_t *)
 
     MUSIC_GetRadioUrl(path, sizeof(path));
     if (path[0] != '\0') (void)MUSIC_PlayFile(path);
-    else (void)PLAYLIST_Next();
+    else if (!PLAYLIST_Next()) {
+        (void)bi4umdScanSdMusic();
+        (void)PLAYLIST_Next();
+    }
 }
 
 void bi4umdMusicRepeat(lv_event_t *)
@@ -997,45 +1071,219 @@ void bi4umdMusicAdjustVolume(const int delta)
 void bi4umdMusicVolumeDown(lv_event_t *) { bi4umdMusicAdjustVolume(-16); }
 void bi4umdMusicVolumeUp(lv_event_t *) { bi4umdMusicAdjustVolume(16); }
 
-void refreshBi4umdSettingsValues()
+void bi4umdShowRoomSwitch(lv_event_t *)
+{
+    s_bi4umd_page = Bi4umdPage::RoomSwitch;
+    buildBi4umdRoomSwitchContent();
+}
+
+void bi4umdRoomBack(lv_event_t *)
+{
+    s_bi4umd_page = Bi4umdPage::Settings;
+    buildBi4umdSettingsContent();
+}
+
+void bi4umdRoomApply(lv_event_t *)
 {
     const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
-    if (cfg == nullptr) return;
-    char text[12] = {};
-    if (s_lbl_settings_mic != nullptr) {
-        snprintf(text, sizeof(text), "%u", static_cast<unsigned>(cfg->mic_volume));
-        lv_label_set_text(s_lbl_settings_mic, text);
+    if (cfg == nullptr || s_dd_room_server == nullptr || s_dd_room_group == nullptr) return;
+    const size_t si = lv_dropdown_get_selected(s_dd_room_server);
+    if (si >= s_room_server_count) return;
+    const bool server_changed = strcasecmp(cfg->server_host, s_room_servers[si].host) != 0 ||
+                                cfg->server_port != s_room_servers[si].port;
+    bool ok = true;
+    if (server_changed) {
+        ok = EXTERNAL_RADIO_SetServerHost(s_room_servers[si].host, false) &&
+             EXTERNAL_RADIO_SetServerPort(s_room_servers[si].port, false) &&
+             EXTERNAL_RADIO_SaveConfig();
+        if (ok) {
+            NRLAudioBridge_ApplyConfig(false, true);
+            vTaskDelay(pdMS_TO_TICKS(80));
+            ok = NRLAudioBridge_RequestRoomList();
+        }
+        if (s_lbl_room_status != nullptr) {
+            lv_label_set_text(s_lbl_room_status, ok ? menuText("Loading...", "加载中...")
+                                                     : menuText("FAILED", "失败"));
+        }
+        return;
     }
-    if (s_lbl_settings_volume != nullptr) {
-        snprintf(text, sizeof(text), "%u", static_cast<unsigned>(cfg->line_out_volume));
-        lv_label_set_text(s_lbl_settings_volume, text);
+    NrlRoomInfo rooms[32] = {};
+    uint32_t current = UINT32_MAX;
+    const size_t count = NRLAudioBridge_GetRooms(rooms, 32u, &current, nullptr);
+    if (count == 0u) {
+        if (s_lbl_room_status != nullptr) {
+            lv_label_set_text(s_lbl_room_status, menuText("Loading...", "加载中..."));
+        }
+        return;
+    }
+    const size_t gi = lv_dropdown_get_selected(s_dd_room_group);
+    ok = gi < count && NRLAudioBridge_JoinRoom(rooms[gi].id);
+    if (s_lbl_room_status != nullptr) {
+        lv_label_set_text(s_lbl_room_status, ok ? menuText("APPLIED", "已应用")
+                                                 : menuText("FAILED", "失败"));
+    }
+    if (ok) {
+        s_bi4umd_page = Bi4umdPage::Settings;
+        buildBi4umdSettingsContent();
     }
 }
 
-void bi4umdSettingsAdjustMic(const int delta)
+void bi4umdRoomServerChanged(lv_event_t *)
 {
+    const size_t si = lv_dropdown_get_selected(s_dd_room_server);
+    if (si >= s_room_server_count) return;
     const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
-    if (cfg == nullptr) return;
-    int value = static_cast<int>(cfg->mic_volume) + delta;
-    if (value < 0) value = 0;
-    if (value > 255) value = 255;
-    if (value != static_cast<int>(cfg->mic_volume)) {
-        EXTERNAL_RADIO_SetMicVolume(static_cast<uint8_t>(value), true);
-        refreshBi4umdSettingsValues();
+    bool ok = false;
+    if (cfg != nullptr && (strcasecmp(cfg->server_host, s_room_servers[si].host) != 0 ||
+                           cfg->server_port != s_room_servers[si].port)) {
+        if (EXTERNAL_RADIO_SetServerHost(s_room_servers[si].host, false) &&
+            EXTERNAL_RADIO_SetServerPort(s_room_servers[si].port, false) &&
+            EXTERNAL_RADIO_SaveConfig()) {
+            NRLAudioBridge_ApplyConfig(false, true);
+            ok = NRLAudioBridge_RequestRoomList();
+        }
+    } else {
+        ok = NRLAudioBridge_RequestRoomList();
+    }
+    if (s_lbl_room_status != nullptr) {
+        lv_label_set_text(s_lbl_room_status, ok ? menuText("Loading...", "加载中...")
+                                                 : menuText("FAILED", "失败"));
+    }
+    s_room_page_revision = UINT32_MAX;
+}
+
+void buildBi4umdRoomSwitchContent()
+{
+    lv_obj_t *content = prepareContent();
+    auto button = [content](int x, int y, int w, const char *text, lv_event_cb_t cb) {
+        lv_obj_t *b = lv_button_create(content);
+        lv_obj_set_pos(b, x, y); lv_obj_set_size(b, w, 38);
+        lv_obj_set_style_radius(b, 6, 0);
+        lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *l = makeLabel(b, &s_font_aprs_16, kColorCallIdle);
+        lv_obj_center(l); lv_label_set_text(l, text);
+    };
+    button(8, 22, 54, menuText("BACK", "返回"), bi4umdRoomBack);
+    lv_obj_t *title = makeLabel(content, &s_font_aprs_16, kColorAccent);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 30);
+    lv_label_set_text(title, menuText("SERVER SWITCH", "服务器切换"));
+    s_dd_room_server = lv_dropdown_create(content);
+    lv_obj_set_pos(s_dd_room_server, 16, 78); lv_obj_set_size(s_dd_room_server, 208, 42);
+    s_dd_room_group = lv_dropdown_create(content);
+    lv_obj_set_pos(s_dd_room_group, 16, 132); lv_obj_set_size(s_dd_room_group, 208, 42);
+    lv_obj_t *dropdowns[] = {s_dd_room_server, s_dd_room_group};
+    for (lv_obj_t *dropdown : dropdowns) {
+        lv_obj_set_style_text_font(dropdown, &s_font_aprs_16, 0);
+        lv_obj_t *list = lv_dropdown_get_list(dropdown);
+        if (list != nullptr) {
+            lv_obj_set_style_text_font(list, &s_font_aprs_16, 0);
+            lv_obj_set_style_max_height(list, 190, 0);
+        }
+    }
+    lv_obj_add_event_cb(s_dd_room_server, bi4umdRoomServerChanged, LV_EVENT_VALUE_CHANGED, nullptr);
+    button(78, 190, 90, menuText("APPLY", "应用"), bi4umdRoomApply);
+    s_lbl_room_status = makeLabel(content, &s_font_aprs_16, kColorSub);
+    lv_obj_align(s_lbl_room_status, LV_ALIGN_TOP_MID, 0, 238);
+
+    free(s_room_servers); s_room_servers = nullptr; s_room_server_count = 0u;
+    (void)SERVER_LIST_STORE_LoadNrlServers(&s_room_servers, &s_room_server_count);
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    char server_options[2048] = {};
+    int used = 0;
+    size_t selected = 0u;
+    for (size_t i = 0u; i < s_room_server_count && used < static_cast<int>(sizeof(server_options) - 64u); ++i) {
+        if (cfg != nullptr && strcasecmp(cfg->server_host, s_room_servers[i].host) == 0 &&
+            cfg->server_port == s_room_servers[i].port) selected = i;
+        used += snprintf(server_options + used, sizeof(server_options) - static_cast<size_t>(used),
+                         "%s%s", i ? "\n" : "", s_room_servers[i].name[0] ? s_room_servers[i].name : s_room_servers[i].host);
+    }
+    lv_dropdown_set_options(s_dd_room_server, used ? server_options : "(no servers)");
+    lv_dropdown_set_selected(s_dd_room_server, static_cast<uint32_t>(selected));
+    lv_dropdown_set_options(s_dd_room_group, menuText("Loading...", "加载中..."));
+    if (s_lbl_room_status != nullptr) {
+        const bool ok = NRLAudioBridge_RequestRoomList();
+        lv_label_set_text(s_lbl_room_status, ok ? menuText("Loading...", "加载中...")
+                                                 : menuText("FAILED", "失败"));
+    } else {
+        (void)NRLAudioBridge_RequestRoomList();
     }
 }
 
-void bi4umdSettingsMicDown(lv_event_t *) { bi4umdSettingsAdjustMic(-16); }
-void bi4umdSettingsMicUp(lv_event_t *) { bi4umdSettingsAdjustMic(16); }
-void bi4umdSettingsVolumeDown(lv_event_t *)
+void refreshBi4umdRoomSwitch()
 {
-    bi4umdMusicAdjustVolume(-16);
-    refreshBi4umdSettingsValues();
+    if (s_dd_room_group == nullptr) return;
+    uint32_t room_revision = 0u;
+    NrlRoomInfo rooms[32] = {};
+    uint32_t current = UINT32_MAX;
+    const size_t count = NRLAudioBridge_GetRooms(rooms, 32u, &current, &room_revision);
+    if (room_revision == s_room_page_revision) return;
+    s_room_page_revision = room_revision;
+    if (count == 0u) {
+        lv_dropdown_set_options(s_dd_room_group, menuText("Loading...", "加载中..."));
+        lv_dropdown_set_selected(s_dd_room_group, 0u);
+        return;
+    }
+    char options[1800] = {};
+    int used = 0;
+    size_t selected = 0u;
+    for (size_t i = 0u; i < count && used < static_cast<int>(sizeof(options) - 64u); ++i) {
+        if (rooms[i].id == current) selected = i;
+        used += snprintf(options + used, sizeof(options) - static_cast<size_t>(used),
+                         "%s%u: %.40s", i ? "\n" : "", static_cast<unsigned>(rooms[i].id), rooms[i].name);
+    }
+    lv_dropdown_set_options(s_dd_room_group, options);
+    lv_dropdown_set_selected(s_dd_room_group, static_cast<uint32_t>(selected));
+    if (s_lbl_room_status != nullptr) {
+        lv_label_set_text(s_lbl_room_status, "");
+    }
 }
-void bi4umdSettingsVolumeUp(lv_event_t *)
+
+[[maybe_unused]] void bi4umdSettingsNextServer(lv_event_t *)
 {
-    bi4umdMusicAdjustVolume(16);
-    refreshBi4umdSettingsValues();
+    bi4umdShowRoomSwitch(nullptr);
+/*
+    NrlServerInfo *servers = nullptr;
+    size_t count = 0u;
+        return;
+    }
+    size_t next = 0u;
+    for (size_t i = 0u; i < count; ++i) {
+        if (strcasecmp(servers[i].host, cfg->server_host) == 0 &&
+            servers[i].port == cfg->server_port) {
+            next = (i + 1u) % count;
+            break;
+        }
+    }
+    const bool ok = EXTERNAL_RADIO_SetServerHost(servers[next].host, false) &&
+                    EXTERNAL_RADIO_SetServerPort(servers[next].port, false) &&
+                    EXTERNAL_RADIO_SaveConfig();
+    free(servers);
+    if (ok) {
+        NRLAudioBridge_ApplyConfig(false, true);
+        (void)NRLAudioBridge_RequestRoomList();
+    }
+    buildBi4umdSettingsContent();
+*/
+}
+
+[[maybe_unused]] void bi4umdSettingsNextRoom(lv_event_t *)
+{
+    NrlRoomInfo rooms[32] = {};
+    uint32_t current = UINT32_MAX;
+    const size_t count = NRLAudioBridge_GetRooms(rooms, 32u, &current, nullptr);
+    if (count == 0u) {
+        (void)NRLAudioBridge_RequestRoomList();
+        return;
+    }
+    size_t next = 0u;
+    for (size_t i = 0u; i < count; ++i) {
+        if (rooms[i].id == current) {
+            next = (i + 1u) % count;
+            break;
+        }
+    }
+    (void)NRLAudioBridge_JoinRoom(rooms[next].id);
+    buildBi4umdSettingsContent();
 }
 #endif
 
@@ -1284,8 +1532,6 @@ void resetCenterWidgets()
     s_list_music = nullptr;
     s_btn_music_play_label = nullptr;
     s_btn_music_repeat_label = nullptr;
-    s_lbl_settings_mic = nullptr;
-    s_lbl_settings_volume = nullptr;
     s_sstv_rx_image = nullptr;
     s_sstv_rx_status = nullptr;
     s_sstv_rx_status_cache[0] = '\0';
@@ -1310,6 +1556,12 @@ void resetHomeWidgets()
     s_lbl_provision_ip = nullptr;
     s_lbl_provision_ssid = nullptr;
     s_lbl_provision_ble = nullptr;
+    s_vol_panel = nullptr;
+    s_vol_slider_spk = nullptr;
+    s_vol_slider_mic = nullptr;
+    s_vol_lbl_spk_val = nullptr;
+    s_vol_lbl_mic_val = nullptr;
+    s_vol_panel_open = false;
     s_shown_wifi[0] = '\0';
     s_shown_vol[0] = '\0';
     s_shown_batt[0] = '\0';
@@ -1333,6 +1585,10 @@ lv_obj_t *prepareScreen()
 // remain alive and keep updating while the physical-button menu is open.
 lv_obj_t *prepareContent()
 {
+    // Switching pages dismisses the drop-down volume panel so it never floats
+    // over the music/settings/menu views.
+    closeVolumePanel();
+
     if (s_content == nullptr) {
         s_content = lv_obj_create(lv_screen_active());
         lv_obj_remove_style_all(s_content);
@@ -1517,6 +1773,7 @@ void menuStatusFooter(lv_obj_t *scr, const char *default_text)
     }
 }
 
+#if NRL_BOARD != NRL_BOARD_BI4UMD
 size_t menuWindowStart(const size_t item_count, const size_t visible_count)
 {
     if (item_count <= visible_count || s_menu_index < visible_count) return 0u;
@@ -1551,6 +1808,7 @@ void menuScrollBar(lv_obj_t *scr, const size_t item_count,
     lv_obj_set_style_bg_opa(thumb, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(thumb, 2, 0);
 }
+#endif
 
 void buildMainMenu()
 {
@@ -1660,7 +1918,11 @@ void buildAboutMenu()
     lv_obj_set_width(board, kWidth);
     lv_obj_set_style_text_align(board, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(board, LV_ALIGN_TOP_MID, 0, 108);
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    lv_label_set_text(board, "BI4UMD");
+#else
     lv_label_set_text(board, "GEZIPAI");
+#endif
     menuFooter(scr, menuText("PTT BACK", "PTT返回"));
 }
 
@@ -3199,8 +3461,18 @@ void buildWideUi()
     lv_obj_center(s_lbl_time);
     lv_label_set_text(s_lbl_time, "--:--:--");
 
-    s_lbl_vol = makeLabel(top, &lv_font_montserrat_20, kColorSub);
-    lv_obj_align(s_lbl_vol, LV_ALIGN_RIGHT_MID, -22, 0);
+    lv_obj_t *vol_hit = lv_obj_create(top);
+    lv_obj_remove_style_all(vol_hit);
+    lv_obj_set_size(vol_hit, 96, 32);
+    lv_obj_align(vol_hit, LV_ALIGN_RIGHT_MID, -22, 0);
+    lv_obj_remove_flag(vol_hit, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(vol_hit, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(vol_hit, lv_color_hex(0x10212A), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(vol_hit, LV_OPA_COVER, LV_STATE_PRESSED);
+    lv_obj_set_style_radius(vol_hit, 4, 0);
+    lv_obj_add_event_cb(vol_hit, toggleVolumePanel, LV_EVENT_CLICKED, nullptr);
+    s_lbl_vol = makeLabel(vol_hit, &lv_font_montserrat_20, kColorSub);
+    lv_obj_align(s_lbl_vol, LV_ALIGN_RIGHT_MID, 0, 0);
     lv_label_set_text(s_lbl_vol, LV_SYMBOL_VOLUME_MID " --");
 
     lv_obj_t *accent = lv_obj_create(scr);
@@ -3552,22 +3824,10 @@ void buildBi4umdSettingsContent()
     };
     nav_button(8, kContentHeight - 48, 72,
                menuText("MAIN MENU", "主菜单"), bi4umdOpenMainMenu);
+    nav_button(8, 22, 72, menuText("MAP", "地图"), bi4umdOpenMapPage);
     nav_button(86, 22, 54, "GPS", bi4umdOpenGpsPage);
     nav_button(146, 22, 86,
                menuText("APRS RX", "APRS接收"), bi4umdOpenAprsListPage);
-
-    lv_obj_t *debug = lv_button_create(content);
-    lv_obj_set_pos(debug, 8, 22);
-    lv_obj_set_size(debug, 72, 40);
-    lv_obj_set_style_radius(debug, 6, 0);
-    lv_obj_set_style_bg_color(debug, lv_color_hex(0x10212A), 0);
-    lv_obj_set_style_bg_color(debug, lv_color_hex(0x087A82), LV_STATE_PRESSED);
-    lv_obj_set_style_border_color(debug, lv_color_hex(0x1C6B73), 0);
-    lv_obj_set_style_border_width(debug, 1, 0);
-    lv_obj_add_event_cb(debug, bi4umdShowDebugPage, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t *debug_label = makeLabel(debug, &s_font_aprs_16, kColorCallIdle);
-    lv_label_set_text(debug_label, menuText("DEBUG", "调试"));
-    lv_obj_center(debug_label);
 
     auto sstv_button = [content](int x, const char *text, lv_event_cb_t callback) {
         lv_obj_t *button = lv_button_create(content);
@@ -3587,7 +3847,7 @@ void buildBi4umdSettingsContent()
     };
     sstv_button(8, menuText("SSTV RX", "SSTV接收"), bi4umdOpenSstvRxPage);
     sstv_button(124, menuText("SSTV TX", "SSTV发射"), bi4umdOpenSstvTxPage);
-    nav_button(66, 142, 108, menuText("MAP", "地图"), bi4umdOpenMapPage);
+    nav_button(8, 142, 224, menuText("SERVER SWITCH", "服务器切换"), bi4umdShowRoomSwitch);
 
     lv_obj_t *home = lv_button_create(content);
     lv_obj_set_pos(home, kWidth - 48, kContentHeight - 48);
@@ -3601,81 +3861,6 @@ void buildBi4umdSettingsContent()
     lv_obj_t *home_label = makeLabel(home, &lv_font_montserrat_16, kColorCallIdle);
     lv_label_set_text(home_label, LV_SYMBOL_HOME);
     lv_obj_center(home_label);
-}
-
-void buildBi4umdDebugContent()
-{
-    lv_obj_t *content = prepareContent();
-
-    lv_obj_t *back = lv_button_create(content);
-    lv_obj_set_pos(back, 8, 22);
-    lv_obj_set_size(back, 40, 40);
-    lv_obj_set_style_radius(back, 6, 0);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0x10212A), 0);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0x087A82), LV_STATE_PRESSED);
-    lv_obj_set_style_border_color(back, lv_color_hex(0x1C6B73), 0);
-    lv_obj_set_style_border_width(back, 1, 0);
-    lv_obj_add_event_cb(back, bi4umdShowSettingsPage, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t *back_label = makeLabel(back, &lv_font_montserrat_16, kColorCallIdle);
-    lv_label_set_text(back_label, LV_SYMBOL_LEFT);
-    lv_obj_center(back_label);
-
-    auto square_button = [content](int x, int y, const char *text, lv_event_cb_t callback) {
-        lv_obj_t *button = lv_button_create(content);
-        lv_obj_set_pos(button, x, y);
-        lv_obj_set_size(button, 40, 38);
-        lv_obj_set_style_radius(button, 6, 0);
-        lv_obj_set_style_bg_color(button, lv_color_hex(0x10212A), 0);
-        lv_obj_set_style_bg_color(button, lv_color_hex(0x087A82), LV_STATE_PRESSED);
-        lv_obj_set_style_border_color(button, lv_color_hex(0x1C6B73), 0);
-        lv_obj_set_style_border_width(button, 1, 0);
-        lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
-        lv_obj_t *label = makeLabel(button, &lv_font_montserrat_16, kColorCallIdle);
-        lv_label_set_text(label, text);
-        lv_obj_center(label);
-    };
-
-    lv_obj_t *mic_name = makeLabel(content, &s_font_aprs_16, kColorSub);
-    lv_obj_set_pos(mic_name, 12, 88);
-    lv_label_set_text(mic_name, menuText("MIC", "麦克风"));
-    square_button(88, 78, LV_SYMBOL_MINUS, bi4umdSettingsMicDown);
-    s_lbl_settings_mic = makeLabel(content, &lv_font_montserrat_16, kColorCallIdle);
-    lv_obj_set_width(s_lbl_settings_mic, 44);
-    lv_obj_set_style_text_align(s_lbl_settings_mic, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(s_lbl_settings_mic, 132, 88);
-    square_button(184, 78, LV_SYMBOL_PLUS, bi4umdSettingsMicUp);
-
-    lv_obj_t *volume_name = makeLabel(content, &s_font_aprs_16, kColorSub);
-    lv_obj_set_pos(volume_name, 12, 142);
-    lv_label_set_text(volume_name, menuText("VOLUME", "音量"));
-    square_button(88, 132, LV_SYMBOL_MINUS, bi4umdSettingsVolumeDown);
-    s_lbl_settings_volume = makeLabel(content, &lv_font_montserrat_16, kColorCallIdle);
-    lv_obj_set_width(s_lbl_settings_volume, 44);
-    lv_obj_set_style_text_align(s_lbl_settings_volume, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(s_lbl_settings_volume, 132, 142);
-    square_button(184, 132, LV_SYMBOL_PLUS, bi4umdSettingsVolumeUp);
-
-    lv_obj_t *ptt = lv_button_create(content);
-    lv_obj_remove_style_all(ptt);
-    lv_obj_set_pos(ptt, 60, 194);
-    lv_obj_set_size(ptt, 120, 44);
-    lv_obj_set_style_radius(ptt, 6, 0);
-    lv_obj_set_style_bg_color(ptt, lv_color_hex(0x142033), 0);
-    lv_obj_set_style_bg_color(ptt, lv_color_hex(0x8B1E2D), LV_STATE_PRESSED);
-    lv_obj_set_style_bg_opa(ptt, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(ptt, lv_color_hex(kColorTx), 0);
-    lv_obj_set_style_border_color(ptt, lv_color_hex(0xFF3030), LV_STATE_PRESSED);
-    lv_obj_set_style_border_width(ptt, 0, 0);
-    lv_obj_set_style_outline_width(ptt, 0, 0);
-    lv_obj_set_style_shadow_width(ptt, 0, 0);
-    lv_obj_add_event_cb(ptt, bi4umdPttEvent, LV_EVENT_PRESSED, nullptr);
-    lv_obj_add_event_cb(ptt, bi4umdPttEvent, LV_EVENT_RELEASED, nullptr);
-    lv_obj_add_event_cb(ptt, bi4umdPttEvent, LV_EVENT_PRESS_LOST, nullptr);
-    lv_obj_t *ptt_label = makeLabel(ptt, &lv_font_montserrat_20, kColorCallIdle);
-    lv_label_set_text(ptt_label, "PTT");
-    lv_obj_center(ptt_label);
-
-    refreshBi4umdSettingsValues();
 }
 #endif
 
@@ -3834,8 +4019,18 @@ void buildUi()
     lv_obj_align(s_lbl_wifi, LV_ALIGN_LEFT_MID, 10, 0);
     lv_label_set_text(s_lbl_wifi, LV_SYMBOL_WIFI "  --");
 
-    s_lbl_vol = makeLabel(top, &lv_font_montserrat_14, kColorSub);
-    lv_obj_align(s_lbl_vol, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_t *vol_hit = lv_obj_create(top);
+    lv_obj_remove_style_all(vol_hit);
+    lv_obj_set_size(vol_hit, 80, 28);
+    lv_obj_align(vol_hit, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_remove_flag(vol_hit, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(vol_hit, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(vol_hit, lv_color_hex(0x10212A), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(vol_hit, LV_OPA_COVER, LV_STATE_PRESSED);
+    lv_obj_set_style_radius(vol_hit, 4, 0);
+    lv_obj_add_event_cb(vol_hit, toggleVolumePanel, LV_EVENT_CLICKED, nullptr);
+    s_lbl_vol = makeLabel(vol_hit, &lv_font_montserrat_14, kColorSub);
+    lv_obj_center(s_lbl_vol);
     lv_label_set_text(s_lbl_vol, LV_SYMBOL_VOLUME_MID " --");
 
     s_lbl_batt = makeLabel(top, &lv_font_montserrat_14, kColorSub);
@@ -4116,6 +4311,330 @@ void refreshVolume()
     }
     if (setLabel(s_lbl_vol, s_shown_vol, sizeof(s_shown_vol), vol_text)) {
         lv_obj_set_style_text_color(s_lbl_vol, lv_color_hex(color), 0);
+    }
+    if (s_vol_panel_open) {
+        refreshVolumePanelValues();
+    }
+}
+
+void refreshVolumePanelValues()
+{
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    if (cfg == nullptr) return;
+    if (s_vol_slider_spk != nullptr) {
+        lv_slider_set_value(s_vol_slider_spk, cfg->line_out_volume, LV_ANIM_OFF);
+    }
+    if (s_vol_slider_mic != nullptr) {
+        lv_slider_set_value(s_vol_slider_mic, cfg->mic_volume, LV_ANIM_OFF);
+    }
+    char buf[12];
+    if (s_vol_lbl_spk_val != nullptr) {
+        const int pct = (static_cast<int>(cfg->line_out_volume) * 100 + 127) / 255;
+        snprintf(buf, sizeof(buf), "%u (%d%%)",
+                 static_cast<unsigned>(cfg->line_out_volume), pct);
+        lv_label_set_text(s_vol_lbl_spk_val, buf);
+    }
+    if (s_vol_lbl_mic_val != nullptr) {
+        const int pct = (static_cast<int>(cfg->mic_volume) * 100 + 127) / 255;
+        snprintf(buf, sizeof(buf), "%u (%d%%)",
+                 static_cast<unsigned>(cfg->mic_volume), pct);
+        lv_label_set_text(s_vol_lbl_mic_val, buf);
+    }
+}
+
+void closeVolumePanel(lv_event_t * /*event*/)
+{
+    if (s_vol_panel != nullptr) {
+        lv_obj_delete(s_vol_panel);
+        s_vol_panel = nullptr;
+        s_vol_slider_spk = nullptr;
+        s_vol_slider_mic = nullptr;
+        s_vol_lbl_spk_val = nullptr;
+        s_vol_lbl_mic_val = nullptr;
+    }
+    s_vol_panel_open = false;
+}
+
+// LVGL v9 slider hit-test callback: force the slider to only accept presses
+// that land on the knob (origin) body itself. The track (line) and any
+// margin around the knob must NOT register as a hit -- only the knob and
+// the explicit +/- buttons can change the volume. This runs after the
+// slider's class-level LV_EVENT_HIT_TEST handler so its decision is final.
+//
+// The hit rectangle is rebuilt to match what lv_slider.c::draw_knob +
+// position_knob produce visually:
+//   knob_size = min(width, height)            (the square body, == 10 here)
+//   knob center x = obj_x1 + (value-min)*(w-1)/range   (LVGL knob-centred)
+//   knob rect    = (center - knob_size/2, obj_y1) .. (center + knob_size-1, obj_y2)
+//   then expanded by LV_PART_KNOB pad_* on every side
+// Plus a small tolerance so a fingertip on a 240x320 panel can still grab
+// the knob reliably. The tolerance is bounded so the hit box never reaches
+// the track midpoint or the +/- buttons.
+void volumeSliderHitTestCb(lv_event_t *event)
+{
+    lv_obj_t *slider = lv_event_get_current_target_obj(event);
+    lv_hit_test_info_t *info = lv_event_get_hit_test_info(event);
+    if (info == nullptr || info->point == nullptr || slider == nullptr) {
+        return;
+    }
+
+    // Slider geometry in screen coordinates.
+    lv_area_t obj_coords;
+    lv_obj_get_coords(slider, &obj_coords);
+    const int32_t w = lv_obj_get_width(slider);
+    const int32_t h = lv_obj_get_height(slider);
+    if (w <= 0 || h <= 0) {
+        info->res = false;
+        return;
+    }
+
+    // Knob square body size = short slider dimension (matches LVGL draw_knob).
+    const int32_t knob_size = LV_MIN(w, h);
+    // LV_PART_KNOB padding extends the knob visually on every side. Read it
+    // back so the hit box tracks whatever pad was set in make_row.
+    const int32_t pad_l = lv_obj_get_style_pad_left(slider, LV_PART_KNOB);
+    const int32_t pad_r = lv_obj_get_style_pad_right(slider, LV_PART_KNOB);
+    const int32_t pad_t = lv_obj_get_style_pad_top(slider, LV_PART_KNOB);
+    const int32_t pad_b = lv_obj_get_style_pad_bottom(slider, LV_PART_KNOB);
+
+    const int32_t value = lv_slider_get_value(slider);
+    const int32_t v_min = lv_slider_get_min_value(slider);
+    const int32_t v_max = lv_slider_get_max_value(slider);
+    const int32_t range = v_max - v_min;
+
+    // LVGL centres the knob on the value position, so the knob centre x runs
+    // from obj_x1 (at v_min) to obj_x1 + w - 1 (at v_max). This matches
+    // LV_SLIDER_KNOB_COORD + position_knob in lv_slider.c.
+    int32_t knob_center_x;
+    if (range > 0) {
+        knob_center_x = obj_coords.x1 + ((value - v_min) * (w - 1)) / range;
+    } else {
+        knob_center_x = obj_coords.x1;
+    }
+
+    // Build the knob rectangle in screen coords. position_knob does:
+    //   x1 = center - (knob_size>>1);  x2 = x1 + knob_size - 1
+    //   y1 = obj_y1;                   y2 = obj_y2
+    // then pad expands it outward.
+    int32_t kx1 = knob_center_x - (knob_size >> 1) - pad_l;
+    int32_t kx2 = kx1 + knob_size - 1 + pad_l + pad_r;
+    int32_t ky1 = obj_coords.y1 - pad_t;
+    int32_t ky2 = obj_coords.y2 + pad_b;
+
+    // Small tolerance so a fingertip can grab the knob even if the touch
+    // coordinate is a few pixels off. 6 px is plenty on a 240x320 panel but
+    // stays well clear of the track midpoint and the +/- buttons (the
+    // closest the knob ever gets to a button is ~8 px, and the button
+    // itself sits at a higher Z-order anyway).
+    const int32_t tol = 6;
+    kx1 -= tol;
+    kx2 += tol;
+    ky1 -= tol;
+    ky2 += tol;
+
+    const int32_t px = info->point->x;
+    const int32_t py = info->point->y;
+    info->res = (px >= kx1 && px <= kx2 && py >= ky1 && py <= ky2);
+}
+
+void onVolumePanelSlider(lv_event_t *event)
+{
+    lv_obj_t *slider = reinterpret_cast<lv_obj_t *>(lv_event_get_target(event));
+    const int32_t value = lv_slider_get_value(slider);
+    if (slider == s_vol_slider_spk) {
+        EXTERNAL_RADIO_SetLineOutVolume(static_cast<uint8_t>(value), true);
+    } else if (slider == s_vol_slider_mic) {
+        EXTERNAL_RADIO_SetMicVolume(static_cast<uint8_t>(value), true);
+    }
+    refreshVolumePanelValues();
+    refreshVolume();
+}
+
+void onVolumePanelBtnSpkDown(lv_event_t *)
+{
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    if (cfg == nullptr) return;
+    int v = static_cast<int>(cfg->line_out_volume) - 8;
+    if (v < 0) v = 0;
+    EXTERNAL_RADIO_SetLineOutVolume(static_cast<uint8_t>(v), true);
+    refreshVolumePanelValues();
+    refreshVolume();
+}
+
+void onVolumePanelBtnSpkUp(lv_event_t *)
+{
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    if (cfg == nullptr) return;
+    int v = static_cast<int>(cfg->line_out_volume) + 8;
+    if (v > 255) v = 255;
+    EXTERNAL_RADIO_SetLineOutVolume(static_cast<uint8_t>(v), true);
+    refreshVolumePanelValues();
+    refreshVolume();
+}
+
+void onVolumePanelBtnMicDown(lv_event_t *)
+{
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    if (cfg == nullptr) return;
+    int v = static_cast<int>(cfg->mic_volume) - 8;
+    if (v < 0) v = 0;
+    EXTERNAL_RADIO_SetMicVolume(static_cast<uint8_t>(v), true);
+    refreshVolumePanelValues();
+}
+
+void onVolumePanelBtnMicUp(lv_event_t *)
+{
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    if (cfg == nullptr) return;
+    int v = static_cast<int>(cfg->mic_volume) + 8;
+    if (v > 255) v = 255;
+    EXTERNAL_RADIO_SetMicVolume(static_cast<uint8_t>(v), true);
+    refreshVolumePanelValues();
+}
+
+void buildVolumePanel()
+{
+    // Panel sits just under the top status bar (y = 36) and spans full width.
+    // Height ~= 170 px leaves room for two sliders + labels + close button.
+    lv_obj_t *scr = lv_screen_active();
+    s_vol_panel = lv_obj_create(scr);
+    lv_obj_remove_style_all(s_vol_panel);
+    lv_obj_set_size(s_vol_panel, kWidth, 176);
+    lv_obj_set_pos(s_vol_panel, 0, kContentY);
+    lv_obj_set_style_bg_color(s_vol_panel, lv_color_hex(0x0C1826), 0);
+    lv_obj_set_style_bg_opa(s_vol_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(s_vol_panel, lv_color_hex(0x1C6B73), 0);
+    lv_obj_set_style_border_width(s_vol_panel, 1, 0);
+    lv_obj_set_style_radius(s_vol_panel, 8, 0);
+    lv_obj_remove_flag(s_vol_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Title + close button on the first row.
+    lv_obj_t *title = makeLabel(s_vol_panel, menuFont(&lv_font_montserrat_14),
+                                kColorAccent);
+    lv_obj_set_pos(title, 10, 8);
+    lv_label_set_text(title, menuText("VOLUME / MIC", "音量 / 麦克风"));
+
+    lv_obj_t *close_btn = lv_button_create(s_vol_panel);
+    lv_obj_set_pos(close_btn, kWidth - 36, 4);
+    lv_obj_set_size(close_btn, 28, 28);
+    lv_obj_set_style_radius(close_btn, 6, 0);
+    lv_obj_set_style_bg_color(close_btn, lv_color_hex(0x10212A), 0);
+    lv_obj_set_style_bg_color(close_btn, lv_color_hex(0x8B1E2D), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(close_btn, lv_color_hex(0x1C6B73), 0);
+    lv_obj_set_style_border_width(close_btn, 1, 0);
+    lv_obj_add_event_cb(close_btn, closeVolumePanel, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *close_lbl = makeLabel(close_btn, &lv_font_montserrat_14, kColorCallIdle);
+    lv_label_set_text(close_lbl, LV_SYMBOL_CLOSE);
+    lv_obj_center(close_lbl);
+
+    // Helper: one row = name + [minus] slider [plus] + numeric value.
+    //
+    // Slider hit-test order matters here. LVGL v9 slider's LV_EVENT_HIT_TEST
+    // only matches the knob area (so taps on the track itself never jump the
+    // value), but the slider constructor extends the click area by DPX(8)
+    // around the knob -- on a 10 px tall slider that is a 26x26 hit box that
+    // physically overlaps the adjacent +/- buttons. Combined with child
+    // Z-order (later children on top), the slider was stealing presses that
+    // should have gone to the minus button. Two fixes:
+    //   1. Create the slider FIRST, then the buttons on top of it, so the
+    //      buttons always win the hit-test at overlapping coordinates.
+    //   2. lv_obj_set_ext_click_area(slider, 0) removes the 8 px knob
+    //      extension so only the 10x10 knob itself is tappable. The track
+    //      (line) becomes inert, exactly as the user requested: only the
+    //      knob (origin) and the +/- buttons can change the value.
+    auto make_row = [&](int y, const char *name, const char *name_cn,
+                        lv_obj_t *&slider, lv_obj_t *&value_lbl,
+                        lv_event_cb_t cb_down, lv_event_cb_t cb_up) {
+        lv_obj_t *nm = makeLabel(s_vol_panel, &s_font_aprs_16, kColorSub);
+        lv_obj_set_pos(nm, 10, y);
+        lv_label_set_text(nm, menuText(name, name_cn));
+
+        auto small_btn = [](int x, int by, const char *sym, lv_event_cb_t cb) {
+            lv_obj_t *b = lv_button_create(s_vol_panel);
+            lv_obj_set_pos(b, x, by);
+            lv_obj_set_size(b, 28, 28);
+            lv_obj_set_style_radius(b, 5, 0);
+            lv_obj_set_style_bg_color(b, lv_color_hex(0x10212A), 0);
+            lv_obj_set_style_bg_color(b, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+            lv_obj_set_style_border_color(b, lv_color_hex(0x1C6B73), 0);
+            lv_obj_set_style_border_width(b, 1, 0);
+            lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
+            lv_obj_t *l = makeLabel(b, &lv_font_montserrat_14, kColorCallIdle);
+            lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+            lv_label_set_text(l, sym);
+            lv_obj_center(l);
+            return b;
+        };
+
+        // Slider created before the +/- buttons so the buttons sit at a
+        // higher Z-order and the slider's knob hit-test can never steal a
+        // press that lands on a button.
+        slider = lv_slider_create(s_vol_panel);
+        lv_obj_set_pos(slider, 46, y + 24);
+        lv_obj_set_size(slider, kWidth - 46 - 40, 10);
+        lv_slider_set_range(slider, 0, 255);
+        lv_obj_set_style_bg_color(slider, lv_color_hex(0x1C3348), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(slider, lv_color_hex(kColorAccent), LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(slider, lv_color_hex(kColorAccent), LV_PART_KNOB);
+        lv_obj_set_style_radius(slider, 4, LV_PART_MAIN);
+        lv_obj_set_style_radius(slider, 4, LV_PART_INDICATOR);
+        // Pad the knob out from its 10x10 body to a visible 18x18 square so
+        // a fingertip has something to aim at on the 240x320 panel. The
+        // hit-test callback below reads the same pad value back and adds a
+        // 6 px tolerance, so the actual tappable area is 30x30 -- easy to
+        // hit but still well clear of the +/- buttons and the track middle.
+        lv_obj_set_style_pad_all(slider, 4, LV_PART_KNOB);
+        lv_obj_set_style_radius(slider, 5, LV_PART_KNOB);
+        // Critical: the LVGL v9 slider constructor does NOT set
+        // LV_OBJ_FLAG_ADV_HITTEST, so without this flag lv_obj_hit_test()
+        // short-circuits to "any point inside the slider area is a hit" and
+        // the slider's own LV_EVENT_HIT_TEST handler (which would restrict
+        // the hit to the knob) is never even called. That is why tapping
+        // anywhere on the track used to jump the value to that position.
+        // Adding the flag makes LVGL actually dispatch LV_EVENT_HIT_TEST,
+        // where the slider restricts the hit to right_knob_area (now the
+        // padded 18x18 knob). lv_obj_set_ext_click_area(slider, 0) then
+        // strips the constructor's DPX(8) extension around that knob so the
+        // hit box does not spill onto the track or the +/- buttons.
+        lv_obj_add_flag(slider, LV_OBJ_FLAG_ADV_HITTEST);
+        lv_obj_set_ext_click_area(slider, 0);
+        // Belt-and-braces: a user LV_EVENT_HIT_TEST callback that recomputes
+        // the knob rectangle from public LVGL API and force-sets info->res.
+        // User callbacks run AFTER the slider's class event handler, so this
+        // is the final word: even if the slider's internal right_knob_area
+        // were stale (e.g. before first draw) or ext_click_pad got bumped
+        // back to nonzero elsewhere, the result still comes out as
+        // "knob-only hit, track fully inert".
+        lv_obj_add_event_cb(slider, volumeSliderHitTestCb, LV_EVENT_HIT_TEST, nullptr);
+        lv_obj_add_event_cb(slider, onVolumePanelSlider, LV_EVENT_VALUE_CHANGED, nullptr);
+
+        (void)small_btn(10, y + 20, LV_SYMBOL_MINUS, cb_down);
+        (void)small_btn(kWidth - 38, y + 20, LV_SYMBOL_PLUS, cb_up);
+
+        value_lbl = makeLabel(s_vol_panel, &lv_font_montserrat_14, kColorCallIdle);
+        lv_obj_set_width(value_lbl, 120);
+        lv_obj_set_style_text_align(value_lbl, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_pos(value_lbl, kWidth - 130, y);
+    };
+
+    make_row(40, "SPEAKER", "扬声器",
+             s_vol_slider_spk, s_vol_lbl_spk_val,
+             onVolumePanelBtnSpkDown, onVolumePanelBtnSpkUp);
+
+    make_row(106, "MICROPHONE", "麦克风",
+             s_vol_slider_mic, s_vol_lbl_mic_val,
+             onVolumePanelBtnMicDown, onVolumePanelBtnMicUp);
+
+    refreshVolumePanelValues();
+    s_vol_panel_open = true;
+}
+
+void toggleVolumePanel(lv_event_t * /*event*/)
+{
+    if (s_vol_panel_open || s_vol_panel != nullptr) {
+        closeVolumePanel();
+    } else {
+        buildVolumePanel();
     }
 }
 
@@ -5261,6 +5780,9 @@ extern "C" void Display_Poll(void)
     if (s_bi4umd_page != Bi4umdPage::Radio) {
         if (s_bi4umd_page == Bi4umdPage::Music) {
             refreshBi4umdMusic();
+        }
+        if (s_bi4umd_page == Bi4umdPage::RoomSwitch) {
+            refreshBi4umdRoomSwitch();
         }
         refreshIp();
         refreshVolume();

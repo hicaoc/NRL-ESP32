@@ -1,7 +1,7 @@
 #ifndef DRIVER_FONTS_LV_FONT_CJK_H
 #define DRIVER_FONTS_LV_FONT_CJK_H
 
-// Generated CJK bitmap fonts (scripts/gen_cjk_font.py): GB2312 level-1
+// Generated CJK bitmap fonts (scripts/gen_cjk_font.py): GB2312 level-1/2
 // hanzi + CJK punctuation, Noto Sans SC. The 16px font is also compiled for
 // gezipai's APRS ticker; S31 additionally uses the 20px font throughout its UI.
 
