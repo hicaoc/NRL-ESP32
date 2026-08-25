@@ -14,6 +14,8 @@
 #include "services/config_notify.h"
 #include "services/fmo_frame.h"
 #include "services/fmo_protocol.h"
+#include "services/fmo_qso.h"
+#include "services/fmo_station_broadcast.h"
 #include "services/server_list_store.h"
 #include "services/time_sync_service.h"
 
@@ -59,6 +61,11 @@ constexpr size_t kTxPacketsPerFrame = 6u;
 constexpr size_t kOpusFrameSamples = 320u; // FMO: 8 kHz, 40 ms
 constexpr uint32_t kVoiceHoldUs = 900000u;
 constexpr uint32_t kReconnectMs = 10000u;
+// SAS ACL requires the claimed role to match the role registered in the
+// certificate; on authentication refusal each remaining role is tried once,
+// starting from the initial role (mirrors the nrl-pulse ROLE_SEQ logic).
+constexpr const char *kRoleSequence[] = {"user", "super", "admin"};
+constexpr size_t kRoleCount = sizeof(kRoleSequence) / sizeof(kRoleSequence[0]);
 constexpr const char *kDiscoveryHost = "rotate.aprs2.net";
 constexpr const char *kDiscoveryPort = "10152";
 
@@ -105,6 +112,9 @@ static bool s_recreate_client = false;
 static bool s_initialized = false;
 static bool s_config_loaded = false;
 static uint16_t s_client_suffix = 0u;
+static size_t s_role_index = 0u;   // current role within kRoleSequence
+static uint8_t s_role_tried = 0u;  // bitmask of roles already tried; 0 = derive initial
+static bool s_role_retry = false;  // reconnect immediately with the next role
 
 static SemaphoreHandle_t s_client_mutex = nullptr;
 static SemaphoreHandle_t s_server_mutex = nullptr;
@@ -115,6 +125,10 @@ static TaskHandle_t s_discovery_task = nullptr;
 NRL_PSRAM_BSS static uint8_t s_raw[kRawMaxSize];
 static size_t s_raw_size = 0u;
 static size_t s_raw_expected = 0u;
+// FMO/QSO/UID/<本机uid> 记录 JSON 的分块重组缓冲（载荷很小）。
+static char s_qso_record[2048];
+static size_t s_qso_record_size = 0u;
+static size_t s_qso_record_expected = 0u;
 NRL_PSRAM_BSS static FmoServer s_servers[kServerMax];
 static size_t s_server_count = 0u;
 static uint32_t s_server_generation = 0u;
@@ -416,6 +430,77 @@ static void setLastError(const esp_err_t error)
     portEXIT_CRITICAL(&s_lock);
 }
 
+// Compare base callsigns only: any "-SSID" suffix and letter case are
+// ignored ("BG9JYT-14" == "bg9jyt").  The server list may carry an SSID
+// while the certificate never does, so own-server checks must strip it.
+static bool baseCallsEqual(const char *a, const char *b)
+{
+    if (a == nullptr || b == nullptr) return false;
+    size_t na = 0, nb = 0;
+    while (a[na] != '\0' && a[na] != '-') ++na;
+    while (b[nb] != '\0' && b[nb] != '-') ++nb;
+    return na > 0 && na == nb && strncasecmp(a, b, na) == 0;
+}
+
+static size_t initialRoleIndex(const FmoServer &server)
+{
+    // Own server (certificate callsign matches the server callsign) starts as
+    // "super", anything else as "user"; compared case-insensitively.
+    FmoIdentityStatus identity = {};
+    if (FMO_CERT_GetStatus(&identity) == ESP_OK && identity.ready &&
+        baseCallsEqual(identity.callsign, server.callsign)) {
+        return 1u; // kRoleSequence[1] == "super"
+    }
+    return 0u;     // kRoleSequence[0] == "user"
+}
+
+static const char *currentRole(const FmoServer &server)
+{
+    portENTER_CRITICAL(&s_lock);
+    const uint8_t tried = s_role_tried;
+    size_t index = s_role_index;
+    portEXIT_CRITICAL(&s_lock);
+    if (tried == 0u) {
+        index = initialRoleIndex(server);
+        portENTER_CRITICAL(&s_lock);
+        s_role_index = index;
+        s_role_tried = static_cast<uint8_t>(1u << index);
+        portEXIT_CRITICAL(&s_lock);
+    }
+    return kRoleSequence[index];
+}
+
+static void resetRoleState(void)
+{
+    // Cleared to 0 so the next startClient re-derives the initial role.
+    portENTER_CRITICAL(&s_lock);
+    s_role_tried = 0u;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+static void rotateRole(const int return_code)
+{
+    size_t current = 0u;
+    uint8_t tried = 0u;
+    portENTER_CRITICAL(&s_lock);
+    current = s_role_index;
+    tried = s_role_tried;
+    portEXIT_CRITICAL(&s_lock);
+    for (size_t i = 0u; i < kRoleCount; ++i) {
+        if ((tried & static_cast<uint8_t>(1u << i)) != 0u) continue;
+        ESP_LOGW(TAG, "role %s rejected by server (code=%d), retrying as %s",
+                 kRoleSequence[current], return_code, kRoleSequence[i]);
+        portENTER_CRITICAL(&s_lock);
+        s_role_index = i;
+        s_role_tried = tried | static_cast<uint8_t>(1u << i);
+        s_role_retry = true;
+        portEXIT_CRITICAL(&s_lock);
+        return;
+    }
+    ESP_LOGE(TAG, "authentication rejected for all roles (user/super/admin)");
+    resetRoleState();
+}
+
 static size_t decodeAdpcm(const uint8_t *data, const size_t data_size,
                           const int16_t sample, const uint8_t index,
                           int16_t *pcm, const size_t capacity)
@@ -476,6 +561,40 @@ static bool rawTopic(const esp_mqtt_event_t *event)
            memcmp(event->topic, topic, sizeof(topic) - 1u) == 0;
 }
 
+// "FMO/LATE/UID_V1/<uid>" heartbeat topic: parse the trailing decimal uid
+// (uid 0 counts too). Only the first data chunk carries the topic.
+static bool heartbeatUid(const esp_mqtt_event_t *event, uint32_t *uid)
+{
+    static const char prefix[] = "FMO/LATE/UID_V1/";
+    if (event->topic == nullptr || event->current_data_offset != 0 ||
+        event->topic_len <= static_cast<int>(sizeof(prefix) - 1u) ||
+        memcmp(event->topic, prefix, sizeof(prefix) - 1u) != 0) {
+        return false;
+    }
+    // event->topic is not NUL-terminated; copy the uid suffix first.
+    char tail[12];
+    const size_t tail_len =
+        static_cast<size_t>(event->topic_len) - (sizeof(prefix) - 1u);
+    if (tail_len == 0u || tail_len >= sizeof(tail)) return false;
+    memcpy(tail, event->topic + sizeof(prefix) - 1u, tail_len);
+    tail[tail_len] = '\0';
+    char *end = nullptr;
+    const unsigned long parsed = strtoul(tail, &end, 10);
+    if (end == tail || *end != '\0' || parsed > UINT32_MAX) return false;
+    *uid = static_cast<uint32_t>(parsed);
+    return true;
+}
+
+// "FMO/QSO/UID/<uid>" established-QSO record topic (only our own uid is
+// subscribed). Only the first data chunk carries the topic.
+static bool qsoRecordTopic(const esp_mqtt_event_t *event)
+{
+    static const char prefix[] = "FMO/QSO/UID/";
+    return event->topic != nullptr && event->current_data_offset == 0 &&
+           event->topic_len > static_cast<int>(sizeof(prefix) - 1u) &&
+           memcmp(event->topic, prefix, sizeof(prefix) - 1u) == 0;
+}
+
 static void mqttEvent(void *, esp_event_base_t, const int32_t event_id,
                       void *event_data)
 {
@@ -494,21 +613,43 @@ static void mqttEvent(void *, esp_event_base_t, const int32_t event_id,
                      esp_err_to_name(property_error));
         }
         (void)esp_mqtt_client_subscribe(event->client, "FMO/RAW", 0);
+        // Online-count source: every device heartbeats here ~once a minute.
+        (void)esp_mqtt_client_subscribe(event->client, "FMO/LATE/UID_V1/#", 0);
+        // Established-QSO records addressed to us (FMO QSO signaling).
+        {
+            FmoIdentityStatus identity = {};
+            if (FMO_CERT_GetStatus(&identity) == ESP_OK && identity.ready) {
+                char topic[40];
+                snprintf(topic, sizeof(topic), "FMO/QSO/UID/%lu",
+                         static_cast<unsigned long>(identity.uid));
+                (void)esp_mqtt_client_subscribe(event->client, topic, 0);
+            }
+        }
         portENTER_CRITICAL(&s_lock);
         s_status.connected = true;
         s_status.last_error = ESP_OK;
+        // Snapshot the role this connection actually logged in with BEFORE
+        // dropping the rotation state: s_role_index still holds the role
+        // picked by currentRole() for this CONNECT.
+        snprintf(s_status.role, sizeof(s_status.role), "%s",
+                 kRoleSequence[s_role_index]);
         s_recreate_client = false;
+        s_role_tried = 0u; // drop rotation state; next reconnect re-derives the initial role
         portEXIT_CRITICAL(&s_lock);
-        ESP_LOGI(TAG, "connected and subscribed to FMO/RAW (No Local=%u)",
+        ESP_LOGI(TAG, "connected and subscribed to FMO/RAW + FMO/LATE/UID_V1/# (No Local=%u)",
                  no_local ? 1u : 0u);
     } else if (event_id == MQTT_EVENT_DISCONNECTED) {
+        FMO_STATION_BCAST_RosterReset(); // drop the online roster (peak kept)
         portENTER_CRITICAL(&s_lock);
         s_status.connected = false;
         s_status.receiving = false;
         s_status.transmitting = false;
+        s_status.role[0] = '\0';
         if (s_status.last_error == ESP_OK) s_status.last_error = ESP_FAIL;
         s_recreate_client = true;
-        s_retry_at_us = esp_timer_get_time() + kReconnectMs * 1000LL;
+        s_retry_at_us = esp_timer_get_time() +
+                        (s_role_retry ? 0 : kReconnectMs * 1000LL);
+        s_role_retry = false;
         portEXIT_CRITICAL(&s_lock);
         STATUS_IO_SetFmoPttActive(false);
     } else if (event_id == MQTT_EVENT_DATA) {
@@ -535,10 +676,58 @@ static void mqttEvent(void *, esp_event_base_t, const int32_t event_id,
                 s_raw_size = 0u;
                 s_raw_expected = 0u;
             }
+        } else if (qsoRecordTopic(event)) {
+            // 分块重组（与 FMO/RAW 相同的模式，缓冲小得多）。
+            if (event->current_data_offset == 0) {
+                s_qso_record_size = 0u;
+                s_qso_record_expected =
+                    event->total_data_len > 0 &&
+                            event->total_data_len <
+                                static_cast<int>(sizeof(s_qso_record))
+                        ? static_cast<size_t>(event->total_data_len)
+                        : 0u;
+            }
+            if (s_qso_record_expected == 0u || event->data_len <= 0 ||
+                static_cast<size_t>(event->current_data_offset) !=
+                    s_qso_record_size ||
+                s_qso_record_size + static_cast<size_t>(event->data_len) >
+                    s_qso_record_expected) {
+                s_qso_record_size = 0u;
+                s_qso_record_expected = 0u;
+                return;
+            }
+            memcpy(s_qso_record + s_qso_record_size, event->data,
+                   static_cast<size_t>(event->data_len));
+            s_qso_record_size += static_cast<size_t>(event->data_len);
+            if (s_qso_record_size == s_qso_record_expected) {
+                FMO_QSO_OnMqttRecord(s_qso_record,
+                                     static_cast<int>(s_qso_record_size));
+                s_qso_record_size = 0u;
+                s_qso_record_expected = 0u;
+            }
+        } else {
+            uint32_t uid = 0u;
+            if (heartbeatUid(event, &uid)) {
+                FMO_STATION_BCAST_FeedHeartbeat(uid);
+            }
         }
     } else if (event_id == MQTT_EVENT_ERROR) {
         setLastError(ESP_FAIL);
-        ESP_LOGW(TAG, "MQTT transport/authentication error");
+        // CONNACK refusal: v3.1.1 reports 4/5, v5 (used here) reports 0x86/0x87.
+        const esp_mqtt_error_codes_t *handle = event->error_handle;
+        const int return_code = handle != nullptr
+                                    ? static_cast<int>(handle->connect_return_code)
+                                    : 0;
+        if (handle != nullptr &&
+            handle->error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED &&
+            (return_code == MQTT_CONNECTION_REFUSE_BAD_USERNAME ||
+             return_code == MQTT_CONNECTION_REFUSE_NOT_AUTHORIZED ||
+             return_code == MQTT5_BAD_USERNAME_OR_PWD ||
+             return_code == MQTT5_NOT_AUTHORIZED)) {
+            rotateRole(return_code);
+        } else {
+            ESP_LOGW(TAG, "MQTT transport/authentication error");
+        }
     }
 }
 
@@ -555,8 +744,10 @@ static void stopClient(void)
     s_status.connected = false;
     s_status.receiving = false;
     s_status.transmitting = false;
+    s_status.role[0] = '\0';
     s_active_generation = 0u;
     portEXIT_CRITICAL(&s_lock);
+    FMO_STATION_BCAST_RosterReset();
     STATUS_IO_SetFmoPttActive(false);
 }
 
@@ -568,7 +759,8 @@ static esp_err_t startClient(const FmoConfig &config,
     }
     char username[16], client_id[48];
     char *password = nullptr;
-    esp_err_t error = FMO_CERT_BuildCredentials(&config.server, "user", username,
+    const char *role = currentRole(config.server);
+    esp_err_t error = FMO_CERT_BuildCredentials(&config.server, role, username,
                                                 sizeof(username), &password);
     if (error != ESP_OK) return error;
     snprintf(client_id, sizeof(client_id), "FMO-%s-%lu-%04X", username,
@@ -841,7 +1033,7 @@ static int connectDiscovery(void)
                              ? -1 : static_cast<int>(aprsPasscode(callsign));
     char login[112];
     const int login_size = snprintf(login, sizeof(login),
-        "user %s pass %d vers NRL-ESP32-FMO 1.0 filter d/APFMO4\r\n",
+        "user %s pass %d vers NRL-ESP32-FMO 1.0 filter d/APFMO4 d/APFMO0\r\n",
         station, passcode);
     if (login_size <= 0 || static_cast<size_t>(login_size) >= sizeof(login) ||
         send(fd, login, static_cast<size_t>(login_size), 0) != login_size) {
@@ -1033,6 +1225,11 @@ static void discoveryTask(void *)
             if (ch == '\r' || ch == '\n') {
                 if (used > 0u) {
                     line[used] = '\0';
+                    if (strstr(line, ">APFMO0,") != nullptr &&
+                        strstr(line, "::") != nullptr) {
+                        // QSO 呼叫信令（APRS 消息，TOCALL=APFMO0）。
+                        FMO_QSO_HandleAprsLine(line);
+                    }
                     FmoServer server = {};
                     if (strstr(line, "FMO-V4,STATION,") != nullptr &&
                         parseStation(line, &server)) {
@@ -1158,6 +1355,22 @@ extern "C" void FMO_GetLinkStatus(FmoLinkStatus *status)
     portEXIT_CRITICAL(&s_lock);
 }
 
+extern "C" bool FMO_IsSuperOnOwnServer(void)
+{
+    FmoLinkStatus link = {};
+    FMO_GetLinkStatus(&link);
+    // The role snapshot is written on CONNACK success, so this is the role
+    // the server actually accepted -- not the role we would derive now.
+    // "admin" is intentionally not accepted as "super" (see header comment).
+    if (!link.connected || strcmp(link.role, "super") != 0) return false;
+    FmoConfig config = {};
+    configSnapshot(&config, nullptr);
+    if (config.server.callsign[0] == '\0') return false;
+    FmoIdentityStatus identity = {};
+    return FMO_CERT_GetStatus(&identity) == ESP_OK && identity.ready &&
+           baseCallsEqual(identity.callsign, config.server.callsign);
+}
+
 extern "C" bool FMO_IsTransmitSelected(void)
 {
     return ESPNOW_LINK_GetPttMode() == 2u;
@@ -1206,4 +1419,21 @@ extern "C" bool FMO_SelectServer(const size_t index, const bool persist)
     FMO_GetConfig(&config);
     config.server = server;
     return FMO_SetConfig(&config, persist);
+}
+
+extern "C" bool FMO_PublishMessage(const char *topic, const char *data,
+                                   const int len)
+{
+    if (topic == nullptr || data == nullptr || len < 0) return false;
+    bool connected = false;
+    portENTER_CRITICAL(&s_lock);
+    connected = s_status.connected;
+    portEXIT_CRITICAL(&s_lock);
+    if (!connected || s_client_mutex == nullptr) return false;
+    xSemaphoreTake(s_client_mutex, portMAX_DELAY);
+    const bool published =
+        s_client != nullptr &&
+        esp_mqtt_client_publish(s_client, topic, data, len, 0, 0) >= 0;
+    xSemaphoreGive(s_client_mutex);
+    return published;
 }

@@ -25,6 +25,9 @@
 #include "../services/espnow_link.h"
 #include "../services/fmo_cert_store.h"
 #include "../services/fmo_service.h"
+#include "../services/fmo_station_broadcast.h"
+#include "../services/fmo_station_broadcast_core.h"
+#include "../services/fmo_qso.h"
 #include "../services/music_player.h"
 #include "../services/music_playlist.h"
 #include "../services/nanny.h"
@@ -1243,7 +1246,9 @@ button{background:#1769aa;color:white;border:0;border-radius:6px;font-weight:650
 <label>intermediateCert JSON<input type="file" accept="application/json,.json" data-kind="intermediate"></label>
 <label>deviceKey JSON（含私钥种子）<input type="file" accept="application/json,.json" data-kind="devicekey"></label></div>
 <p class="hint">deviceKey 会写入板载 LittleFS，不会从网页读回。请妥善保管原始文件，不要上传到公共服务。</p></section>
-<section><h2>当前服务器</h2><div id="current" class="mono hint">未选择</div></section>
+<section><h2>当前服务器</h2><div id="current" class="mono hint">未选择</div></section><section><h2>QSO 呼叫</h2><div class="grid"><label>对方呼号<input id="qso_peer" maxlength="9" placeholder="BG8LLD"></label><label>对方 UID（0=未知，QTHANS 自动学习）<input id="qso_uid" type="number" min="0" placeholder="0"></label></div><div class="row"><button type="button" id="qso_call">发起呼叫</button><button type="button" id="qso_answer">接听</button><button type="button" id="qso_reject">拒绝</button><button type="button" id="qso_cancel">取消/结束</button></div><p id="qso_stat" class="mono hint">加载中…</p><p class="hint">流程：QTHQRY 查询对方服务器 &rarr; 主叫自动跳台 &rarr; CALL &rarr; 对方人工接听。呼号可带 SSID；需要 APRS-IS 上行 verified。被叫振铃 60 秒无人接听自动结束。</p></section>
+<section><h2>服务器广播（FMO-V4 STATION）</h2><form id="bcfg"><div class="grid"><label class="row"><input type="checkbox" name="bcast_enabled" value="1" id="bc_enabled">启用 APRS-IS 周期广播</label><label>周期<select name="bcast_mode" id="bc_mode"><option value="2">5 分钟</option><option value="3">10 分钟</option><option value="4">60 分钟</option></select></label><label>国家码（2 字母，手填）<input name="bcast_country" id="bc_country" maxlength="2" placeholder="CN"></label><label>SSID（0-15，0=不带）<input name="bcast_ssid" id="bc_ssid" type="number" min="0" max="15" placeholder="0"></label><label>覆盖半径 km<input name="bcast_cover_km" id="bc_cover" type="number" min="0" max="5000"></label><label>服务器名称（线上 UTF-8）<input name="bcast_name" id="bc_name" maxlength="32" placeholder="留空=当前服务器名"></label><label>广播 host<input name="bcast_host" id="bc_host" maxlength="63" placeholder="留空=当前 FMO host"></label><label>广播端口<input name="bcast_port" id="bc_port" type="number" min="0" max="65535" placeholder="0=当前 FMO 端口"></label><label>在线/峰值（0=自动）<div class="row"><input name="bcast_online" id="bc_online" type="number" min="0"><input name="bcast_peak" id="bc_peak" type="number" min="0"></div><div class="hint" id="bc_auto">填 0 使用自动</div></label></div><input type="hidden" name="bcast_present" value="1"><button type="submit">保存广播配置</button></form><p id="bstat" class="mono hint">加载中…</p><p class="hint">门控：MQTT 已连接、实际登录角色为 super（admin 暂不等同）、服务器呼号==本机证书呼号、APRS-IS logresp verified、SNTP 已同步；另有 60 秒最小限速。坐标取当前位置（GPS 新鲜优先，否则默认坐标）。远程关停（SERVER_REMOTE_CONTROL）未实现。</p></section>
+<section><h2>个人信标（FMO-V4 BEACON）</h2><form id="ncfg"><div class="grid"><label class="row"><input type="checkbox" name="bcn_enabled" value="1" id="nb_enabled">启用个人信标（固定 10 分钟周期）</label><label>SSID（0-15，0=不带）<input name="bcn_ssid" id="nb_ssid" type="number" min="0" max="15" placeholder="0"></label><label>频率 MHz（20-500，4 位小数）<input name="bcn_freq" id="nb_freq" maxlength="10" placeholder="439.1625"></label><label>天线高度 m（0=不播 HEIGHT）<input name="bcn_height" id="nb_height" type="number" min="0" max="65535"></label><label>电台 RIG（≤16 字符，线上 UTF-8）<input name="bcn_rig" id="nb_rig" placeholder="留空=不播 RIG"></label><label>天线 ANT（≤16 字符，线上 UTF-8）<input name="bcn_ant" id="nb_ant" placeholder="留空=不播 ANT"></label><label>APRS 个性消息 APFMO2（≤64 字符）<input name="bcn_aprs_msg" id="nb_msg" placeholder="信标成功后跟发，留空=不发"></label><label>登录公告 APFMO1（≤128 字符）<input name="bcn_notice" id="nb_notice" placeholder="服务器广播成功后跟发，留空=不发"></label><label>QSO 消息（仅存储，≤128 字符）<input name="bcn_qso_msg" id="nb_qso" placeholder="传输机制待研究"></label></div><input type="hidden" name="bcn_present" value="1"><button type="submit">保存信标配置</button></form><p id="nstat" class="mono hint">加载中…</p><p class="hint">门控：APRS-IS logresp verified + 证书就绪 + 频率&gt;0；固定 10 分钟周期 + 60 秒最小限速，不依赖服务器/super 角色。文本禁英文逗号；线上 RIG/ANT/消息/公告为 UTF-8（与签名 TBS 内一致）。整条信标帧 ≤512 字符，超长放弃。APFMO1 公告的名称/在线/峰值沿用服务器广播生效值。</p></section>
 <script>
 const esc=s=>String(s??'');let loaded=false;
 async function refresh(){try{const r=await fetch('/fmo/status',{cache:'no-store'}),j=await r.json();
@@ -1251,12 +1256,17 @@ enabled.checked=j.config.enabled;transmit.checked=j.config.transmit;mqtt_no_loca
 link.className='mono '+(j.link.connected?'ok':'hint');link.textContent=`${j.link.connected?'已连接':'未连接'} / MQTT Client ID ${j.link.client_id||'---'} / ${j.link.receiving?'接收 '+j.link.voice_callsign+' '+j.link.voice_codec:'空闲'} / RX ${j.link.rx_frames} / 解析错误 ${j.link.parse_errors} / last_error ${j.link.last_error}`;
 cert.className='mono '+(j.identity.ready?'ok':'bad');cert.textContent=j.identity.ready?`可用：${j.identity.callsign}，UID ${j.identity.uid}，有效期至 ${new Date(j.identity.expires_at*1000).toLocaleString()}，指纹 ${j.identity.fingerprint}`:`未就绪：user=${j.identity.user_present} intermediate=${j.identity.intermediate_present} deviceKey=${j.identity.device_key_present} error=${j.identity.error}`;
 current.textContent=j.config.server.host?`${j.config.server.name} / ${j.config.server.callsign} / UID ${j.config.server.uid} / ${j.config.server.host}:${j.config.server.port}`:'未选择服务器';
-const old=servers.value;servers.innerHTML='<option value="">保留当前服务器</option>';j.servers.forEach((s,i)=>{const o=document.createElement('option');o.value=i;o.textContent=`${s.name} (${s.callsign}) ${s.host}:${s.port} 在线 ${s.online}/${s.total}`;servers.appendChild(o)});if(old&&servers.querySelector(`option[value="${old}"]`))servers.value=old;loaded=true;
+qso_stat.className='mono hint';qso_stat.textContent=`状态 ${j.qso.phase}${j.qso.peer?` / 对方 ${j.qso.peer} UID ${j.qso.peer_uid}${j.qso.outgoing?' (呼出)':''}`:''}${j.qso.detail?` / ${j.qso.detail}`:''}`;
+bstat.className='mono '+(j.broadcast.status.gated?'bad':'ok');bstat.textContent=`角色 ${j.link.role||'---'} / 广播 ${j.broadcast.config.enabled?'开':'关'} / 门控 ${j.broadcast.status.gated?'阻塞':'通过'} / 已发 ${j.broadcast.status.tx_count} / 最近 ${j.broadcast.status.last_sent_epoch?new Date(j.broadcast.status.last_sent_epoch*1000).toLocaleString():'---'} / 拒因 ${j.broadcast.status.last_reject} / 坐标 ${j.position.lat} ${j.position.lon} ${j.position.gps?'(GPS)':'(默认)'}`;bc_auto.textContent=`填 0 使用自动（当前 在线 ${j.broadcast.auto.online} / 峰值 ${j.broadcast.auto.peak}，生效 ${j.broadcast.auto.effective_online}/${j.broadcast.auto.effective_peak}）`;nstat.className='mono '+(j.beacon.status.gated?'bad':'ok');nstat.textContent=`信标 ${j.beacon.config.enabled?'开':'关'} / 门控 ${j.beacon.status.gated?'阻塞':'通过'} / 已发 ${j.beacon.status.tx_count} / 最近 ${j.beacon.status.last_sent_epoch?new Date(j.beacon.status.last_sent_epoch*1000).toLocaleString():'---'} / 拒因 ${j.beacon.status.last_reject}`;if(!loaded){bc_enabled.checked=j.broadcast.config.enabled;bc_mode.value=String(j.broadcast.config.mode);bc_country.value=j.broadcast.config.country;bc_ssid.value=j.broadcast.config.ssid;bc_name.value=j.broadcast.config.name;bc_host.value=j.broadcast.config.host;bc_port.value=j.broadcast.config.port||'';bc_cover.value=j.broadcast.config.cover_km;bc_online.value=j.broadcast.config.online;bc_peak.value=j.broadcast.config.peak;nb_enabled.checked=j.beacon.config.enabled;nb_ssid.value=j.beacon.config.ssid;nb_freq.value=j.beacon.config.freq_x10000?j.beacon.config.freq:'';nb_height.value=j.beacon.config.height_m;nb_rig.value=j.beacon.config.rig;nb_ant.value=j.beacon.config.ant;nb_msg.value=j.beacon.config.aprs_msg;nb_notice.value=j.beacon.config.notice;nb_qso.value=j.beacon.config.qso_msg;}const old=servers.value;servers.innerHTML='<option value="">保留当前服务器</option>';j.servers.forEach((s,i)=>{const o=document.createElement('option');o.value=i;o.textContent=`${s.name} (${s.callsign}) ${s.host}:${s.port} 在线 ${s.online}/${s.total}`;servers.appendChild(o)});if(old&&servers.querySelector(`option[value="${old}"]`))servers.value=old;loaded=true;
 }catch(e){link.className='mono bad';link.textContent='状态读取失败：'+e}}
 cfg.onsubmit=async e=>{e.preventDefault();const body=new URLSearchParams(new FormData(cfg));try{const r=await fetch('/fmo/config',{method:'POST',body});const t=await r.text();if(!r.ok)throw Error(t);alert('FMO 配置已保存');refresh()}catch(e){alert('保存失败：'+e)}};
+bcfg.onsubmit=async e=>{e.preventDefault();const body=new URLSearchParams(new FormData(bcfg));try{const r=await fetch('/fmo/config',{method:'POST',body});const t=await r.text();if(!r.ok)throw Error(t);alert('广播配置已保存');refresh()}catch(e){alert('保存失败：'+e)}};
+ncfg.onsubmit=async e=>{e.preventDefault();const body=new URLSearchParams(new FormData(ncfg));try{const r=await fetch('/fmo/config',{method:'POST',body});const t=await r.text();if(!r.ok)throw Error(t);alert('信标配置已保存');refresh()}catch(e){alert('保存失败：'+e)}};
 servers.onchange=()=>cfg.requestSubmit();
 current.onclick=()=>{if(typeof servers.showPicker==='function')servers.showPicker();else servers.focus()};
 document.querySelectorAll('input[type=file]').forEach(el=>el.onchange=async()=>{if(!el.files[0])return;try{const text=await el.files[0].text();const r=await fetch('/fmo/cert/'+el.dataset.kind,{method:'POST',headers:{'Content-Type':'application/json'},body:text});const t=await r.text();if(!r.ok)throw Error(t);alert('证书已验证并写入');el.value='';refresh()}catch(e){alert('证书写入失败：'+e)}});
+async function qsoAct(a){const body=new URLSearchParams({action:a,peer:qso_peer.value,uid:qso_uid.value||'0'});try{const r=await fetch('/fmo/qso',{method:'POST',body});const t=await r.text();if(!r.ok)throw Error(t);refresh()}catch(e){alert('操作失败：'+e)}};
+qso_call.onclick=()=>qsoAct('call');qso_answer.onclick=()=>qsoAct('answer');qso_reject.onclick=()=>qsoAct('reject');qso_cancel.onclick=()=>qsoAct('cancel');
 refresh();setInterval(refresh,3000);
 </script></body></html>)FMO";
 
@@ -1301,6 +1311,7 @@ static esp_err_t handleFmoStatus(httpd_req_t *req)
             ",\"uid\":" + std::to_string(config.server.uid) + "}},";
     head += "\"link\":{\"connected\":";
     head += link.connected ? "true" : "false";
+    head += ",\"role\":\"" + jsonEscape(link.role) + "\"";
     head += ",\"receiving\":";
     head += link.receiving ? "true" : "false";
     head += ",\"transmitting\":";
@@ -1324,7 +1335,89 @@ static esp_err_t handleFmoStatus(httpd_req_t *req)
             ",\"expires_at\":" + std::to_string(identity.expires_at) +
             ",\"fingerprint\":\"" + (identity.ready ? fingerprintHex(identity.fingerprint) : "") +
             "\",\"error\":\"" + jsonEscape(esp_err_to_name(identity_error)) +
-            "\"},\"servers\":[";
+            "\"},";
+    {
+        FmoStationBroadcastConfig bcast = {};
+        FmoStationBroadcastStatus bstat = {};
+        FMO_STATION_BCAST_GetConfig(&bcast);
+        FMO_STATION_BCAST_GetStatus(&bstat);
+        uint32_t auto_online = 0u, auto_peak = 0u;
+        FMO_STATION_BCAST_GetAutoCounts(&auto_online, &auto_peak);
+        head += "\"broadcast\":{\"config\":{\"enabled\":";
+        head += bcast.enabled ? "true" : "false";
+        head += ",\"mode\":" + std::to_string(bcast.mode) +
+                ",\"country\":\"" + jsonEscape(bcast.country) +
+                "\",\"name\":\"" + jsonEscape(bcast.name) +
+                "\",\"host\":\"" + jsonEscape(bcast.host) +
+                "\",\"port\":" + std::to_string(bcast.port) +
+                ",\"cover_km\":" + std::to_string(bcast.cover_km) +
+                ",\"online\":" + std::to_string(bcast.online) +
+                ",\"peak\":" + std::to_string(bcast.peak) +
+                ",\"ssid\":" + std::to_string(bcast.ssid) +
+                "},\"status\":{\"configured\":";
+        head += bstat.configured ? "true" : "false";
+        head += ",\"gated\":";
+        head += bstat.gated ? "true" : "false";
+        head += ",\"tx_count\":" + std::to_string(bstat.tx_count) +
+                ",\"last_sent_epoch\":" + std::to_string(bstat.last_sent_epoch) +
+                ",\"last_reject\":" + std::to_string(bstat.last_reject) +
+                "},\"auto\":{\"online\":" + std::to_string(auto_online) +
+                ",\"peak\":" + std::to_string(auto_peak) +
+                ",\"effective_online\":" +
+                std::to_string(FMO_STATION_CORE_EffectiveCount(bcast.online, auto_online)) +
+                ",\"effective_peak\":" +
+                std::to_string(FMO_STATION_CORE_EffectiveCount(bcast.peak, auto_peak)) +
+                "}},";
+    }
+    {
+        FmoBeaconConfig bcn = {};
+        FmoBeaconStatus bstat = {};
+        FMO_BEACON_GetConfig(&bcn);
+        FMO_BEACON_GetStatus(&bstat);
+        char freq[16];
+        snprintf(freq, sizeof(freq), "%lu.%04lu",
+                 static_cast<unsigned long>(bcn.freq_x10000 / 10000u),
+                 static_cast<unsigned long>(bcn.freq_x10000 % 10000u));
+        head += "\"beacon\":{\"config\":{\"enabled\":";
+        head += bcn.enabled ? "true" : "false";
+        head += ",\"ssid\":" + std::to_string(bcn.ssid) +
+                ",\"freq\":\"" + std::string(freq) + "\"" +
+                ",\"freq_x10000\":" + std::to_string(bcn.freq_x10000) +
+                ",\"height_m\":" + std::to_string(bcn.height_m) +
+                ",\"rig\":\"" + jsonEscape(bcn.rig) +
+                "\",\"ant\":\"" + jsonEscape(bcn.ant) +
+                "\",\"aprs_msg\":\"" + jsonEscape(bcn.aprs_msg) +
+                "\",\"notice\":\"" + jsonEscape(bcn.notice) +
+                "\",\"qso_msg\":\"" + jsonEscape(bcn.qso_msg) +
+                "\"},\"status\":{\"gated\":";
+        head += bstat.gated ? "true" : "false";
+        head += ",\"tx_count\":" + std::to_string(bstat.tx_count) +
+                ",\"last_sent_epoch\":" + std::to_string(bstat.last_sent_epoch) +
+                ",\"last_reject\":" + std::to_string(bstat.last_reject) + "}},";
+    }
+    {
+        FmoQsoSnapshot qso = {};
+        FMO_QSO_GetSnapshot(&qso);
+        head += "\"qso\":{\"phase\":\"" + jsonEscape(qso.phase_name) +
+                "\",\"peer\":\"" + jsonEscape(qso.peer) +
+                "\",\"peer_uid\":" + std::to_string(qso.peer_uid) +
+                ",\"outgoing\":";
+        head += qso.outgoing ? "true" : "false";
+        head += ",\"detail\":\"" + jsonEscape(qso.detail) + "\"},";
+    }
+    {
+        // The position that would go into the next broadcast; GPS wins
+        // while fresh, otherwise the configured default coordinates.
+        double lat = 0.0, lon = 0.0;
+        const bool gps = APRS_SERVICE_GetOwnPosition(&lat, &lon, nullptr);
+        char lat_str[10], lon_str[11];
+        FMO_STATION_CORE_FormatLat(lat, lat_str);
+        FMO_STATION_CORE_FormatLon(lon, lon_str);
+        head += "\"position\":{\"lat\":\"" + std::string(lat_str) +
+                "\",\"lon\":\"" + std::string(lon_str) + "\",\"gps\":";
+        head += gps ? "true" : "false";
+        head += "},\"servers\":[";
+    }
     httpd_resp_send_chunk(req, head.c_str(), head.size());
     const size_t count = FMO_ServerCount();
     for (size_t i = 0; i < count; ++i) {
@@ -1350,6 +1443,69 @@ static esp_err_t handleFmoConfig(httpd_req_t *req)
     if (!s_server.bindPost(req)) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "form parse failed");
     }
+    if (s_server.hasArg("bcast_present")) {
+        // The broadcast form carries only bcast_* fields; it must not
+        // touch the FMO link config (absent checkboxes would read off).
+        FmoStationBroadcastConfig bcast = {};
+        FMO_STATION_BCAST_GetConfig(&bcast);
+        bcast.enabled = s_server.hasArg("bcast_enabled");
+        bcast.mode = static_cast<uint8_t>(strtoul(
+            s_server.arg("bcast_mode").c_str(), nullptr, 10));
+        snprintf(bcast.country, sizeof(bcast.country), "%s",
+                 s_server.arg("bcast_country").c_str());
+        snprintf(bcast.name, sizeof(bcast.name), "%s",
+                 s_server.arg("bcast_name").c_str());
+        snprintf(bcast.host, sizeof(bcast.host), "%s",
+                 s_server.arg("bcast_host").c_str());
+        bcast.port = static_cast<uint16_t>(strtoul(
+            s_server.arg("bcast_port").c_str(), nullptr, 10));
+        bcast.cover_km = static_cast<uint32_t>(strtoul(
+            s_server.arg("bcast_cover_km").c_str(), nullptr, 10));
+        bcast.online = static_cast<uint32_t>(strtoul(
+            s_server.arg("bcast_online").c_str(), nullptr, 10));
+        bcast.peak = static_cast<uint32_t>(strtoul(
+            s_server.arg("bcast_peak").c_str(), nullptr, 10));
+        bcast.ssid = static_cast<uint8_t>(strtoul(
+            s_server.arg("bcast_ssid").c_str(), nullptr, 10));
+        if (!FMO_STATION_BCAST_SetConfig(&bcast, true)) {
+            return httpd_resp_send_err(
+                req, HTTPD_400_BAD_REQUEST,
+                bcast.enabled && !FMO_STATION_BCAST_GatesOk()
+                    ? "broadcast gates unmet: MQTT connected + login role super + server callsign == certificate callsign"
+                    : "incomplete broadcast config (country/host/port/name or period)");
+        }
+        return httpd_resp_sendstr(req, "OK");
+    }
+    if (s_server.hasArg("bcn_present")) {
+        // The beacon form carries only bcn_* fields; it must not touch the
+        // FMO link or STATION broadcast config.
+        FmoBeaconConfig bcn = {};
+        FMO_BEACON_GetConfig(&bcn);
+        bcn.enabled = s_server.hasArg("bcn_enabled");
+        bcn.ssid = static_cast<uint8_t>(strtoul(
+            s_server.arg("bcn_ssid").c_str(), nullptr, 10));
+        const double mhz = strtod(s_server.arg("bcn_freq").c_str(), nullptr);
+        bcn.freq_x10000 =
+            mhz > 0.0 ? static_cast<uint32_t>(mhz * 10000.0 + 0.5) : 0u;
+        bcn.height_m = static_cast<uint16_t>(strtoul(
+            s_server.arg("bcn_height").c_str(), nullptr, 10));
+        snprintf(bcn.rig, sizeof(bcn.rig), "%s",
+                 s_server.arg("bcn_rig").c_str());
+        snprintf(bcn.ant, sizeof(bcn.ant), "%s",
+                 s_server.arg("bcn_ant").c_str());
+        snprintf(bcn.aprs_msg, sizeof(bcn.aprs_msg), "%s",
+                 s_server.arg("bcn_aprs_msg").c_str());
+        snprintf(bcn.notice, sizeof(bcn.notice), "%s",
+                 s_server.arg("bcn_notice").c_str());
+        snprintf(bcn.qso_msg, sizeof(bcn.qso_msg), "%s",
+                 s_server.arg("bcn_qso_msg").c_str());
+        if (!FMO_BEACON_SetConfig(&bcn, true)) {
+            return httpd_resp_send_err(
+                req, HTTPD_400_BAD_REQUEST,
+                "invalid beacon config (text char limit/ASCII comma, or freq outside 20-500 MHz)");
+        }
+        return httpd_resp_sendstr(req, "OK");
+    }
     FmoConfig config = {};
     FMO_GetConfig(&config);
     config.enabled = s_server.hasArg("enabled");
@@ -1369,6 +1525,39 @@ static esp_err_t handleFmoConfig(httpd_req_t *req)
                                    "select a valid FMO server before enabling");
     }
     return httpd_resp_sendstr(req, "OK");
+}
+
+// FMO QSO 呼叫信令: action=call（peer/uid）|answer|reject|cancel。
+static esp_err_t handleFmoQso(httpd_req_t *req)
+{
+    if (!s_server.bindPost(req)) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "form parse failed");
+    }
+    const std::string action = s_server.arg("action");
+    if (action == "call") {
+        const std::string peer = s_server.arg("peer");
+        const uint32_t uid = static_cast<uint32_t>(
+            strtoul(s_server.arg("uid").c_str(), nullptr, 10));
+        char err[128];
+        if (!FMO_QSO_StartCall(peer.c_str(), uid, err, sizeof(err))) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
+        }
+        return httpd_resp_sendstr(req, "OK");
+    }
+    if (action == "answer" || action == "reject") {
+        if (!FMO_QSO_Answer(action == "answer")) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "no incoming call");
+        }
+        return httpd_resp_sendstr(req, "OK");
+    }
+    if (action == "cancel") {
+        FMO_QSO_Cancel();
+        return httpd_resp_sendstr(req, "OK");
+    }
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                               "unknown qso action");
 }
 
 static bool receiveRawBodyLimit(httpd_req_t *req, const size_t limit,
@@ -3429,6 +3618,7 @@ static void ensureServerRunning()
         { "/fmo",                  HTTP_GET,  handleFmoPage },
         { "/fmo/status",           HTTP_GET,  handleFmoStatus },
         { "/fmo/config",           HTTP_POST, handleFmoConfig },
+        { "/fmo/qso",              HTTP_POST, handleFmoQso },
         { "/fmo/cert/user",        HTTP_POST, handleFmoCertificate },
         { "/fmo/cert/intermediate",HTTP_POST, handleFmoCertificate },
         { "/fmo/cert/devicekey",   HTTP_POST, handleFmoCertificate },

@@ -48,6 +48,9 @@
 #include "../../services/espnow_link.h"
 #include "../../services/fmo_service.h"
 #include "../../services/fmo_cert_store.h"
+#include "../../services/fmo_qso.h"
+#include "../../services/fmo_qso_core.h"
+#include "../../services/fmo_station_broadcast.h"
 #include "../../services/display_notice.h"
 #include "../../services/cw_service.h"
 #include "../../services/map_tiles.h"
@@ -329,6 +332,7 @@ enum class MainMenuAction : uint8_t {
     Back,
     PttMode,
     Fmo,
+    FmoBcast,
     NrlCodec,
     NowCodec,
     Cw,
@@ -353,6 +357,7 @@ constexpr MainMenuAction kMainMenuActions[] = {
     MainMenuAction::Signaling,
     MainMenuAction::PttMode,
     MainMenuAction::Fmo,
+    MainMenuAction::FmoBcast,
     MainMenuAction::NrlCodec,
     MainMenuAction::NowCodec,
     MainMenuAction::Ota,
@@ -361,6 +366,7 @@ constexpr MainMenuAction kMainMenuActions[] = {
 #else
     MainMenuAction::PttMode,
     MainMenuAction::Fmo,
+    MainMenuAction::FmoBcast,
     MainMenuAction::NrlCodec,
     MainMenuAction::NowCodec,
     MainMenuAction::Cw,
@@ -1956,6 +1962,7 @@ void buildMainMenu()
     lv_obj_t *scr = prepareContent();
     char ptt[32] = {};
     char fmo_item[24] = {};
+    char fmo_bcast[28] = {};
     char nrl_codec[32] = {};
     char now_codec[32] = {};
     const uint8_t ptt_mode = ESPNOW_LINK_GetPttMode();
@@ -1964,6 +1971,10 @@ void buildMainMenu()
     FmoConfig fmo_config = {};
     FMO_GetConfig(&fmo_config);
     snprintf(fmo_item, sizeof(fmo_item), "FMO: %s", fmo_config.enabled ? "ON" : "OFF");
+    FmoStationBroadcastConfig bcast_config = {};
+    FMO_STATION_BCAST_GetConfig(&bcast_config);
+    snprintf(fmo_bcast, sizeof(fmo_bcast), menuText("FMO BCAST: %s", "FMO广播: %s"),
+             bcast_config.enabled ? "ON" : "OFF");
     snprintf(nrl_codec, sizeof(nrl_codec), menuText("NRL CODEC: %s", "NRL编码: %s"),
              NRLAudioBridge_GetVoiceCodec() == 1u ? "OPUS" : "G711");
     snprintf(now_codec, sizeof(now_codec), menuText("NOW CODEC: %s", "NOW编码: %s"),
@@ -1974,6 +1985,7 @@ void buildMainMenu()
             case MainMenuAction::Back: items[i] = menuText("< BACK", "< 返回"); break;
             case MainMenuAction::PttMode: items[i] = ptt; break;
             case MainMenuAction::Fmo: items[i] = fmo_item; break;
+            case MainMenuAction::FmoBcast: items[i] = fmo_bcast; break;
             case MainMenuAction::NrlCodec: items[i] = nrl_codec; break;
             case MainMenuAction::NowCodec: items[i] = now_codec; break;
             case MainMenuAction::Cw: items[i] = "CW MORSE"; break;
@@ -5332,6 +5344,22 @@ void confirmMainMenu()
             buildMenuUi();
             break;
         }
+        case MainMenuAction::FmoBcast: {
+            FmoStationBroadcastConfig bcast = {};
+            FMO_STATION_BCAST_GetConfig(&bcast);
+            bcast.enabled = !bcast.enabled;
+            if (bcast.enabled && !FMO_STATION_BCAST_GatesOk()) {
+                // Needs an MQTT link where the accepted login role is
+                // "super" on our own server (callsign == certificate).
+                setMenuMessage("BCAST: NEED SUPER LINK");
+            } else if (FMO_STATION_BCAST_SetConfig(&bcast, true)) {
+                setMenuMessage(bcast.enabled ? "FMO BCAST -> ON" : "FMO BCAST -> OFF");
+            } else {
+                setMenuMessage("BCAST: CONFIG IN WEB");
+            }
+            buildMenuUi();
+            break;
+        }
         case MainMenuAction::NrlCodec: {
             const uint8_t codec = NRLAudioBridge_GetVoiceCodec() == 1u ? 0u : 1u;
             if (NRLAudioBridge_SetVoiceCodec(codec)) {
@@ -5978,6 +6006,67 @@ void processMenuInput(uint32_t now)
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// FMO QSO 来电弹屏：顶层 overlay 盖在主屏/菜单之上，PTT 短按接听、长按拒绝
+//（按键劫持在 status_io.cpp 的 updatePtt 里）。
+
+lv_obj_t *s_qso_overlay = nullptr;
+lv_obj_t *s_qso_overlay_peer = nullptr;
+lv_obj_t *s_qso_overlay_hint = nullptr;
+bool s_qso_overlay_visible = false;
+char s_qso_overlay_shown[64] = {};
+
+void ensureQsoOverlay()
+{
+    if (s_qso_overlay != nullptr) return;
+    s_qso_overlay = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(s_qso_overlay);
+    lv_obj_set_size(s_qso_overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(s_qso_overlay, lv_color_hex(kColorBg), 0);
+    lv_obj_set_style_bg_opa(s_qso_overlay, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(s_qso_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(s_qso_overlay);
+    lv_label_set_text(title, menuText("INCOMING FMO CALL", "FMO 来电"));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(kColorFmo), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 40);
+
+    s_qso_overlay_peer = lv_label_create(s_qso_overlay);
+    lv_obj_set_style_text_font(s_qso_overlay_peer, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(s_qso_overlay_peer, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(s_qso_overlay_peer, LV_ALIGN_CENTER, 0, -10);
+
+    s_qso_overlay_hint = lv_label_create(s_qso_overlay);
+    lv_obj_set_style_text_color(s_qso_overlay_hint, lv_color_hex(kColorSub), 0);
+    lv_obj_align(s_qso_overlay_hint, LV_ALIGN_BOTTOM_MID, 0, -40);
+}
+
+void updateFmoQsoOverlay()
+{
+    FmoQsoSnapshot qso = {};
+    FMO_QSO_GetSnapshot(&qso);
+    if (qso.phase == FMO_QSO_PHASE_IN_RING) {
+        ensureQsoOverlay();
+        char text[sizeof(s_qso_overlay_shown)];
+        snprintf(text, sizeof(text), "%s|%s", qso.peer,
+                 menuText("PRESS=ANSWER HOLD=REJECT", "短按接听 长按拒绝"));
+        if (strncmp(text, s_qso_overlay_shown, sizeof(s_qso_overlay_shown)) != 0) {
+            snprintf(s_qso_overlay_shown, sizeof(s_qso_overlay_shown), "%s", text);
+            lv_label_set_text(s_qso_overlay_peer, qso.peer);
+            lv_label_set_text(s_qso_overlay_hint, text + strlen(qso.peer) + 1u);
+        }
+        if (!s_qso_overlay_visible) {
+            s_qso_overlay_visible = true;
+            lv_obj_remove_flag(s_qso_overlay, LV_OBJ_FLAG_HIDDEN);
+        }
+    } else if (s_qso_overlay_visible) {
+        s_qso_overlay_visible = false;
+        s_qso_overlay_shown[0] = '\0';
+        lv_obj_add_flag(s_qso_overlay, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 } // namespace
 
 //================================ Public API =================================
@@ -6099,6 +6188,7 @@ extern "C" void Display_Poll(void)
     }
     processBh4tdvRfHardwareKeys();
     processMenuInput(now);
+    updateFmoQsoOverlay();
     if (s_last_battery_ms == 0u || (now - s_last_battery_ms) >= kBatteryIntervalMs) {
         s_last_battery_ms = now;
         s_battery_mv = readBatteryMv();

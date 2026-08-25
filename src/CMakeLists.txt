@@ -25,6 +25,10 @@ set(app_sources
     services/fmo_frame.cpp
     services/fmo_protocol.cpp
     services/fmo_service.cpp
+    services/fmo_station_broadcast.cpp
+    services/fmo_station_broadcast_core.cpp
+    services/fmo_qso.cpp
+    services/fmo_qso_core.cpp
     services/lan_discovery.cpp
     services/map_tiles.cpp
     services/music_player.cpp
