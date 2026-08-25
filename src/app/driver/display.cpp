@@ -235,6 +235,7 @@ lv_obj_t *s_dd_room_server = nullptr;
 lv_obj_t *s_dd_room_group = nullptr;
 lv_obj_t *s_lbl_room_status = nullptr;
 uint32_t s_room_page_revision = UINT32_MAX;
+size_t s_fmo_option_count = 0u;
 
 // Map page (slippy tiles + APRS station overlay, touch-driven). The viewport
 // sits between the EXIT/title row and the zoom button row; a 2x2 grid of
@@ -536,7 +537,9 @@ void buildBi4umdMusicListContent();
 void buildBi4umdSettingsContent();
 void buildBi4umdRoomSwitchContent();
 void buildBi4umdDebugContent();
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
 void buildBi4umdSensorsContent();
+#endif
 void refreshBi4umdSettingsValues();
 void bi4umdSettingsAdjustMic(const int delta);
 void bi4umdSettingsMicDown(lv_event_t *event);
@@ -882,19 +885,21 @@ void bi4umdShowSettingsPage(lv_event_t *)
     buildBi4umdSettingsContent();
 }
 
-void bi4umdShowDebugPage(lv_event_t *)
+[[maybe_unused]] void bi4umdShowDebugPage(lv_event_t *)
 {
     STATUS_IO_SetSoftPtt(false);
     s_bi4umd_page = Bi4umdPage::Debug;
     buildBi4umdDebugContent();
 }
 
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
 void bi4umdShowSensorsPage(lv_event_t *)
 {
     STATUS_IO_SetSoftPtt(false);
     s_bi4umd_page = Bi4umdPage::Sensors;
     buildBi4umdSensorsContent();
 }
+#endif
 
 void bi4umdOpenMainMenu(lv_event_t *)
 {
@@ -930,7 +935,7 @@ void bi4umdOpenAprsListPage(lv_event_t *)
     bi4umdOpenAprsPage(MenuPage::AprsList);
 }
 
-[[maybe_unused]] void bi4umdOpenMapPage(lv_event_t *)
+void bi4umdOpenMapPage(lv_event_t *)
 {
     STATUS_IO_SetSoftPtt(false);
     s_menu_active = true;
@@ -1140,26 +1145,12 @@ void bi4umdRoomApply(lv_event_t *)
              EXTERNAL_RADIO_SaveConfig();
         if (ok) {
             NRLAudioBridge_ApplyConfig(false, true);
-            vTaskDelay(pdMS_TO_TICKS(80));
-            ok = NRLAudioBridge_RequestRoomList();
         }
-        if (s_lbl_room_status != nullptr) {
-            lv_label_set_text(s_lbl_room_status, ok ? menuText("Loading...", "加载中...")
-                                                     : menuText("FAILED", "失败"));
-        }
-        return;
     }
-    NrlRoomInfo rooms[32] = {};
-    uint32_t current = UINT32_MAX;
-    const size_t count = NRLAudioBridge_GetRooms(rooms, 32u, &current, nullptr);
-    if (count == 0u) {
-        if (s_lbl_room_status != nullptr) {
-            lv_label_set_text(s_lbl_room_status, menuText("Loading...", "加载中..."));
-        }
-        return;
+    if (ok && s_fmo_option_count > 0u) {
+        const size_t fi = lv_dropdown_get_selected(s_dd_room_group);
+        ok = fi < s_fmo_option_count && FMO_SelectServer(fi, true);
     }
-    const size_t gi = lv_dropdown_get_selected(s_dd_room_group);
-    ok = gi < count && NRLAudioBridge_JoinRoom(rooms[gi].id);
     if (s_lbl_room_status != nullptr) {
         lv_label_set_text(s_lbl_room_status, ok ? menuText("APPLIED", "已应用")
                                                  : menuText("FAILED", "失败"));
@@ -1182,16 +1173,47 @@ void bi4umdRoomServerChanged(lv_event_t *)
             EXTERNAL_RADIO_SetServerPort(s_room_servers[si].port, false) &&
             EXTERNAL_RADIO_SaveConfig()) {
             NRLAudioBridge_ApplyConfig(false, true);
-            ok = NRLAudioBridge_RequestRoomList();
+            ok = true;
         }
-    } else {
-        ok = NRLAudioBridge_RequestRoomList();
     }
     if (s_lbl_room_status != nullptr) {
-        lv_label_set_text(s_lbl_room_status, ok ? menuText("Loading...", "加载中...")
+        lv_label_set_text(s_lbl_room_status, ok ? menuText("APPLIED", "已应用")
                                                  : menuText("FAILED", "失败"));
     }
-    s_room_page_revision = UINT32_MAX;
+}
+
+void fillBi4umdFmoServerDropdown(bool force)
+{
+    if (s_dd_room_group == nullptr) return;
+    const size_t count = FMO_ServerCount();
+    if (!force && count == s_room_page_revision && count == s_fmo_option_count) return;
+
+    FmoConfig config = {};
+    FMO_GetConfig(&config);
+    char options[1800] = {};
+    int used = 0;
+    size_t selected = 0u;
+    size_t filled = 0u;
+    for (size_t i = 0u; i < count && used < static_cast<int>(sizeof(options) - 64u); ++i) {
+        FmoServer server = {};
+        if (!FMO_GetServer(i, &server)) continue;
+        for (char *ch = server.name; *ch != '\0'; ++ch) {
+            if (*ch == '\r' || *ch == '\n') *ch = ' ';
+        }
+        if (server.uid == config.server.uid && server.port == config.server.port &&
+            strcasecmp(server.host, config.server.host) == 0) {
+            selected = filled;
+        }
+        used += snprintf(options + used, sizeof(options) - static_cast<size_t>(used),
+                         "%s%s", filled ? "\n" : "",
+                         server.name[0] != '\0' ? server.name : server.callsign);
+        ++filled;
+    }
+    s_fmo_option_count = filled;
+    s_room_page_revision = count;
+    lv_dropdown_set_options(s_dd_room_group,
+                            filled ? options : "(no FMO servers)");
+    lv_dropdown_set_selected(s_dd_room_group, static_cast<uint32_t>(selected));
 }
 
 void buildBi4umdRoomSwitchContent()
@@ -1241,43 +1263,16 @@ void buildBi4umdRoomSwitchContent()
     }
     lv_dropdown_set_options(s_dd_room_server, used ? server_options : "(no servers)");
     lv_dropdown_set_selected(s_dd_room_server, static_cast<uint32_t>(selected));
-    lv_dropdown_set_options(s_dd_room_group, menuText("Loading...", "加载中..."));
+    s_room_page_revision = UINT32_MAX;
+    fillBi4umdFmoServerDropdown(true);
     if (s_lbl_room_status != nullptr) {
-        const bool ok = NRLAudioBridge_RequestRoomList();
-        lv_label_set_text(s_lbl_room_status, ok ? menuText("Loading...", "加载中...")
-                                                 : menuText("FAILED", "失败"));
-    } else {
-        (void)NRLAudioBridge_RequestRoomList();
+        lv_label_set_text(s_lbl_room_status, "");
     }
 }
 
 void refreshBi4umdRoomSwitch()
 {
-    if (s_dd_room_group == nullptr) return;
-    uint32_t room_revision = 0u;
-    NrlRoomInfo rooms[32] = {};
-    uint32_t current = UINT32_MAX;
-    const size_t count = NRLAudioBridge_GetRooms(rooms, 32u, &current, &room_revision);
-    if (room_revision == s_room_page_revision) return;
-    s_room_page_revision = room_revision;
-    if (count == 0u) {
-        lv_dropdown_set_options(s_dd_room_group, menuText("Loading...", "加载中..."));
-        lv_dropdown_set_selected(s_dd_room_group, 0u);
-        return;
-    }
-    char options[1800] = {};
-    int used = 0;
-    size_t selected = 0u;
-    for (size_t i = 0u; i < count && used < static_cast<int>(sizeof(options) - 64u); ++i) {
-        if (rooms[i].id == current) selected = i;
-        used += snprintf(options + used, sizeof(options) - static_cast<size_t>(used),
-                         "%s%u: %.40s", i ? "\n" : "", static_cast<unsigned>(rooms[i].id), rooms[i].name);
-    }
-    lv_dropdown_set_options(s_dd_room_group, options);
-    lv_dropdown_set_selected(s_dd_room_group, static_cast<uint32_t>(selected));
-    if (s_lbl_room_status != nullptr) {
-        lv_label_set_text(s_lbl_room_status, "");
-    }
+    fillBi4umdFmoServerDropdown(false);
 }
 
 [[maybe_unused]] void bi4umdSettingsNextServer(lv_event_t *)
@@ -1396,6 +1391,7 @@ void refreshBi4umdSensors()
     setLabel(s_lbl_sensors, s_shown_sensors, sizeof(s_shown_sensors), text);
 }
 
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
 void buildBi4umdSensorsContent()
 {
     lv_obj_t *content = prepareContent();
@@ -1428,6 +1424,7 @@ void buildBi4umdSensorsContent()
     s_shown_sensors[0] = '\0';
     refreshBi4umdSensors();
 }
+#endif
 #endif
 
 #if NRL_DISPLAY_BUS_RGB
@@ -3988,7 +3985,7 @@ void buildBi4umdSettingsContent()
     };
     nav_button(8, kContentHeight - 48, 72,
                menuText("MAIN MENU", "主菜单"), bi4umdOpenMainMenu);
-    nav_button(8, 22, 72, menuText("DEBUG", "调试"), bi4umdShowDebugPage);
+    nav_button(8, 22, 72, menuText("MAP", "地图"), bi4umdOpenMapPage);
     nav_button(86, 22, 54, "GPS", bi4umdOpenGpsPage);
     nav_button(146, 22, 86,
                menuText("APRS RX", "APRS接收"), bi4umdOpenAprsListPage);
@@ -5767,7 +5764,9 @@ void processBh4tdvRfHardwareKeys()
         if (pressed(DISPLAY_HW_KEY_UP)) bi4umdSettingsVolumeUp(nullptr);
         if (pressed(DISPLAY_HW_KEY_DOWN)) bi4umdSettingsVolumeDown(nullptr);
         if (pressed(DISPLAY_HW_KEY_CONFIRM) || pressed(DISPLAY_HW_KEY_SOFT_LEFT)) {
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
             bi4umdShowSensorsPage(nullptr);
+#endif
         }
         if (pressed(DISPLAY_HW_KEY_SOFT_RIGHT)) bi4umdShowRadioPage(nullptr);
     } else if (s_bi4umd_page == Bi4umdPage::Debug) {
