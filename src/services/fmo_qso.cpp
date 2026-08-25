@@ -355,7 +355,7 @@ extern "C" bool FMO_QSO_Init(void)
         return false;
     }
     refreshIdentity();
-    if (xTaskCreate(qsoTask, "fmo_qso", 6144, nullptr, 3, &s_task) != pdPASS) {
+    if (xTaskCreate(qsoTask, "fmo_qso", 12288, nullptr, 3, &s_task) != pdPASS) {
         ESP_LOGE(TAG, "worker task creation failed");
         return false;
     }
