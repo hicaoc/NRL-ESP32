@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "services/fmo_station_broadcast_core.h"
 #include "services/server_list_store.h"
 
 #include <cJSON.h>
@@ -578,5 +579,73 @@ done:
     free(user_raw);
     free(int_raw);
     free(key_raw);
+    return result;
+}
+
+extern "C" esp_err_t FMO_CERT_RebuildUserCertBlob(uint8_t *out,
+                                                  const size_t capacity,
+                                                  size_t *out_size)
+{
+    if (out == nullptr || out_size == nullptr) return ESP_ERR_INVALID_ARG;
+    FmoIdentityStatus status = {};
+    esp_err_t result = FMO_CERT_GetStatus(&status);
+    if (result != ESP_OK || !status.ready) {
+        return result != ESP_OK ? result : ESP_ERR_INVALID_STATE;
+    }
+    uint8_t *raw = nullptr;
+    size_t size = 0u;
+    cJSON *json = nullptr;
+    result = readJson(FMO_CERT_USER, &raw, &size, &json);
+    if (result != ESP_OK) return result;
+    UserCertificate cert = {};
+    FmoStationCertFields fields = {};
+    if (parseUser(json, &cert)) {
+        fields.issuer_sn = cert.issuer_sn;
+        snprintf(fields.callsign, sizeof(fields.callsign), "%s", cert.callsign);
+        fields.uid = cert.uid;
+        memcpy(fields.public_key, cert.public_key, sizeof(fields.public_key));
+        fields.issued_at = cert.iat;
+        fields.expires_at = cert.exp;
+        memcpy(fields.signature, cert.signature, sizeof(fields.signature));
+        if (!FMO_STATION_CORE_BuildCertBlob(&fields, out, capacity, out_size)) {
+            result = ESP_ERR_INVALID_SIZE;
+        }
+    } else {
+        result = ESP_ERR_INVALID_ARG;
+    }
+    cJSON_Delete(json);
+    free(raw);
+    return result;
+}
+
+extern "C" esp_err_t FMO_CERT_SignWithDeviceKey(const uint8_t *tbs,
+                                                const size_t tbs_size,
+                                                uint8_t signature[64])
+{
+    if (tbs == nullptr || tbs_size == 0u || signature == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    FmoIdentityStatus status = {};
+    esp_err_t result = FMO_CERT_GetStatus(&status);
+    if (result != ESP_OK || !status.ready) {
+        return result != ESP_OK ? result : ESP_ERR_INVALID_STATE;
+    }
+    uint8_t *raw = nullptr;
+    size_t size = 0u;
+    cJSON *json = nullptr;
+    result = readJson(FMO_CERT_DEVICE_KEY, &raw, &size, &json);
+    if (result != ESP_OK) return result;
+    DeviceKey key = {};
+    uint8_t secret[64], public_key[32];
+    if (parseKey(json, &key) &&
+        crypto_sign_seed_keypair(public_key, secret, key.seed) == 0 &&
+        crypto_sign_detached(signature, nullptr, tbs, tbs_size, secret) == 0) {
+        result = ESP_OK;
+    } else {
+        result = ESP_FAIL;
+    }
+    sodium_memzero(secret, sizeof(secret));
+    cJSON_Delete(json);
+    free(raw);
     return result;
 }

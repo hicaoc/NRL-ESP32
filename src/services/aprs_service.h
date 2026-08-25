@@ -175,6 +175,15 @@ bool APRS_SERVICE_GetOwnPosition(double *lat, double *lon, double *alt_m);
 
 // Status for UI/web.
 bool APRS_SERVICE_IsNetConnected(void);
+// Stricter than IsNetConnected (which goes true the moment the login line is
+// sent): only true after the server answered "# logresp ... verified". A bad
+// passcode leaves the link up (Listen-Only) but never sets this.
+bool APRS_SERVICE_IsNetVerified(void);
+// Queue one raw pre-built TNC2 line for the APRS-IS uplink (used by the FMO
+// STATION broadcast). Single pending slot; returns false when the socket is
+// down, a line is still queued, or the line exceeds 1023 bytes. The APRS
+// task performs the actual send.
+bool APRS_SERVICE_SendRawLine(const char *line);
 uint32_t APRS_SERVICE_GetRxCount(void);   // frames decoded from RF
 uint32_t APRS_SERVICE_GetTxCount(void);   // beacons sent
 bool APRS_SERVICE_GpsHasFix(void);

@@ -8,6 +8,7 @@
 #include "es8311.h"
 #include "../../lib/nrl_bt_hfp.h"  // route the volume keys to a connected headset
 #include "../../services/cw_service.h"
+#include "../../services/fmo_qso.h"
 #if NRL_BOARD_IS_GEZIPAI_FAMILY
 #include "display.h"
 #endif
@@ -543,6 +544,19 @@ static void updatePtt(const unsigned long now)
     const bool is_pressed = s_btn_ptt.pressed;
 
 #if NRL_BOARD_IS_GEZIPAI_FAMILY
+    if (FMO_QSO_IncomingRing()) {
+        // FMO 来电振铃中：PTT 短按=接听（CALLANS,ACCEPT），长按=拒绝（REJECT），
+        // 优先级高于 CW/菜单/发射。振铃期间 PTT 不得触达电台门控。
+        if (is_pressed && !was_pressed) {
+            s_ptt_press_ms = now;
+        } else if (!is_pressed && was_pressed) {
+            (void)FMO_QSO_Answer(now - s_ptt_press_ms < kPttLongPressMs);
+        }
+        s_tx_latched = false;
+        s_tx_suppressed = false;
+        s_tx_active = false;
+        return;
+    }
     if (Display_CwIsActive()) {
         if (is_pressed && !was_pressed) {
             s_ptt_press_ms = now;

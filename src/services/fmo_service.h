@@ -40,6 +40,7 @@ typedef struct {
     bool transmitting;
     int last_error;
     char client_id[48];
+    char role[8];           // role the current link logged in with ("user"/"super"/"admin"), "" when disconnected
     char voice_callsign[8];
     char voice_codec[8];
     uint32_t rx_frames;
@@ -50,6 +51,12 @@ bool FMO_Init(void);
 void FMO_GetConfig(FmoConfig *config);
 bool FMO_SetConfig(const FmoConfig *config, bool persist);
 void FMO_GetLinkStatus(FmoLinkStatus *status);
+// True only while the link is connected AND the role it logged in with is
+// "super" AND the configured server callsign equals this device's certificate
+// callsign (i.e. we are operating our own server). "admin" deliberately does
+// NOT count as "super" here (open question whether the reference firmware
+// treats it equivalently for the STATION broadcast).
+bool FMO_IsSuperOnOwnServer(void);
 bool FMO_IsTransmitSelected(void);
 // Dedicated touch PTT used by the S31 split home control. It keys FMO without
 // changing the persisted target of the physical PTT button.
@@ -59,6 +66,11 @@ bool FMO_PttActive(void);
 size_t FMO_ServerCount(void);
 bool FMO_GetServer(size_t index, FmoServer *server);
 bool FMO_SelectServer(size_t index, bool persist);
+
+// Publish on the FMO MQTT link (used by the QSO signaling to post the
+// established-QSO record to FMO/QSO/UID/<peer uid>). Returns false when the
+// link is down or the publish could not be queued.
+bool FMO_PublishMessage(const char *topic, const char *data, int len);
 
 #ifdef __cplusplus
 }

@@ -18,6 +18,9 @@
 #include "services/display_notice.h"
 #include "services/espnow_link.h"
 #include "services/fmo_service.h"
+#include "services/fmo_qso.h"
+#include "services/fmo_station_broadcast.h"
+#include "services/fmo_station_broadcast_core.h"
 #include "services/video_call.h"
 #include "services/music_player.h"
 #include "services/music_playlist.h"
@@ -2209,6 +2212,176 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         ESPNOW_LINK_SetPttMode(mode);
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
                            "PTT_MODE", mode == 2u ? "FMO" : mode == 1u ? "ESPNOW" : "NRL");
+        return;
+    }
+
+    // FMO-V4 STATION server broadcast on APRS-IS: AT+FMO_BCAST=ON|OFF|?
+    // (period/country/name/host/... are configured on the /fmo web page).
+    if (stringEqualsIgnoreCase(command.command, "FMO_BCAST")) {
+        FmoStationBroadcastConfig bcast = {};
+        FMO_STATION_BCAST_GetConfig(&bcast);
+        if (is_query) {
+            FmoStationBroadcastStatus bstat = {};
+            FMO_STATION_BCAST_GetStatus(&bstat);
+            uint32_t auto_online = 0u, auto_peak = 0u;
+            FMO_STATION_BCAST_GetAutoCounts(&auto_online, &auto_peak);
+            char status[192];
+            snprintf(status, sizeof(status),
+                     "%s,MODE=%uMIN,SSID=%u,TX=%lu,LAST=%lu,GATED=%u,U=%lu/%lu,AUTO=%lu/%lu",
+                     bcast.enabled ? "ON" : "OFF",
+                     bcast.mode == FMO_STATION_BCAST_MODE_5MIN ? 5u :
+                     bcast.mode == FMO_STATION_BCAST_MODE_10MIN ? 10u :
+                     bcast.mode == FMO_STATION_BCAST_MODE_60MIN ? 60u : 0u,
+                     static_cast<unsigned>(bcast.ssid),
+                     static_cast<unsigned long>(bstat.tx_count),
+                     static_cast<unsigned long>(bstat.last_sent_epoch),
+                     bstat.gated ? 1u : 0u,
+                     static_cast<unsigned long>(FMO_STATION_CORE_EffectiveCount(bcast.online, auto_online)),
+                     static_cast<unsigned long>(FMO_STATION_CORE_EffectiveCount(bcast.peak, auto_peak)),
+                     static_cast<unsigned long>(auto_online),
+                     static_cast<unsigned long>(auto_peak));
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "FMO_BCAST", status);
+            return;
+        }
+        if (stringEqualsIgnoreCase(command.value, "ON")) {
+            bcast.enabled = true;
+            if (!FMO_STATION_BCAST_SetConfig(&bcast, true)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                                   "ERR", FMO_STATION_BCAST_GatesOk() ? "FMO_BCAST_CFG" : "FMO_BCAST_GATES");
+                return;
+            }
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "FMO_BCAST", "ON");
+            return;
+        }
+        if (stringEqualsIgnoreCase(command.value, "OFF")) {
+            bcast.enabled = false;
+            if (!FMO_STATION_BCAST_SetConfig(&bcast, true)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                                   "ERR", "FMO_BCAST");
+                return;
+            }
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "FMO_BCAST", "OFF");
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           "ERR", "FMO_BCAST");
+        return;
+    }
+
+    // FMO-V4 BEACON personal beacon: AT+FMO_BCN=ON|OFF|?
+    // (freq/rig/ant/aprs_msg/notice/qso_msg are configured on the /fmo web page).
+    if (stringEqualsIgnoreCase(command.command, "FMO_BCN")) {
+        FmoBeaconConfig bcn = {};
+        FMO_BEACON_GetConfig(&bcn);
+        if (is_query) {
+            FmoBeaconStatus bstat = {};
+            FMO_BEACON_GetStatus(&bstat);
+            char status[160];
+            snprintf(status, sizeof(status),
+                     "%s,SSID=%u,FREQ=%lu.%04lu,TX=%lu,LAST=%lu,GATED=%u",
+                     bcn.enabled ? "ON" : "OFF",
+                     static_cast<unsigned>(bcn.ssid),
+                     static_cast<unsigned long>(bcn.freq_x10000 / 10000u),
+                     static_cast<unsigned long>(bcn.freq_x10000 % 10000u),
+                     static_cast<unsigned long>(bstat.tx_count),
+                     static_cast<unsigned long>(bstat.last_sent_epoch),
+                     bstat.gated ? 1u : 0u);
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "FMO_BCN", status);
+            return;
+        }
+        if (stringEqualsIgnoreCase(command.value, "ON")) {
+            bcn.enabled = true;
+            if (!FMO_BEACON_SetConfig(&bcn, true)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                                   "ERR", "FMO_BCN_CFG");
+                return;
+            }
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "FMO_BCN", "ON");
+            return;
+        }
+        if (stringEqualsIgnoreCase(command.value, "OFF")) {
+            bcn.enabled = false;
+            if (!FMO_BEACON_SetConfig(&bcn, true)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                                   "ERR", "FMO_BCN");
+                return;
+            }
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "FMO_BCN", "OFF");
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           "ERR", "FMO_BCN");
+        return;
+    }
+
+    // FMO QSO 呼叫信令（APRS APFMO0 消息）：
+    //   AT+FMO_CALL=<呼号>[,<uid>]  发起呼叫（uid 可省，QTHANS 自动学习）
+    //   AT+FMO_CALL=?               状态（阶段/对方/详情）
+    //   AT+FMO_ANSWER=ON|OFF        接听 / 拒绝当前来电
+    //   AT+FMO_CANCEL               取消出站呼叫 / 结束已建立的 QSO
+    if (stringEqualsIgnoreCase(command.command, "FMO_CALL")) {
+        if (is_query) {
+            FmoQsoSnapshot qso = {};
+            FMO_QSO_GetSnapshot(&qso);
+            char status[208];
+            snprintf(status, sizeof(status), "%s,PEER=%s,UID=%lu,%s,%s",
+                     qso.phase_name, qso.peer,
+                     static_cast<unsigned long>(qso.peer_uid),
+                     qso.outgoing ? "OUT" : "IN", qso.detail);
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "FMO_CALL", status);
+            return;
+        }
+        char peer[24];
+        snprintf(peer, sizeof(peer), "%s", command.value);
+        char *comma = strchr(peer, ',');
+        uint32_t uid = 0u;
+        if (comma != nullptr) {
+            *comma = '\0';
+            uid = static_cast<uint32_t>(strtoul(comma + 1, nullptr, 10));
+        }
+        char err[128];
+        if (!FMO_QSO_StartCall(peer, uid, err, sizeof(err))) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "ERR", "FMO_CALL");
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "FMO_CALL_ERR", err);
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           "FMO_CALL", "CALLING");
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "FMO_ANSWER")) {
+        bool accept = false;
+        if (stringEqualsIgnoreCase(command.value, "ON")) {
+            accept = true;
+        } else if (!stringEqualsIgnoreCase(command.value, "OFF")) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "ERR", "FMO_ANSWER");
+            return;
+        }
+        if (!FMO_QSO_Answer(accept)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "ERR", "FMO_ANSWER");
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           "FMO_ANSWER", accept ? "ACCEPT" : "REJECT");
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "FMO_CANCEL")) {
+        FMO_QSO_Cancel();
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           "FMO_CANCEL", "OK");
         return;
     }
 

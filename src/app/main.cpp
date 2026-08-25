@@ -36,6 +36,8 @@
 #include "../lib/nrl_wifi.h"
 #include "../lib/wifi_config_portal.h"
 #include "../services/fmo_service.h"
+#include "../services/fmo_qso.h"
+#include "../services/fmo_station_broadcast.h"
 #include "../services/server_list_store.h"
 #include "driver/board_pins.h"
 #include "driver/display.h"
@@ -403,6 +405,16 @@ static bool initFullApp()
         ESP_LOGE(TAG, "FMO service initialization failed.");
     }
     logDramMark("fmo");
+    // FMO-V4 STATION server broadcast: idles until enabled in /fmo and
+    // the super-on-own-server gates hold.
+    if (!FMO_STATION_BCAST_Init()) {
+        ESP_LOGE(TAG, "FMO station broadcast initialization failed.");
+    }
+    // FMO QSO 呼叫信令（APRS APFMO0 消息）：1s tick 驱动状态机；
+    // 收包挂点在 fmo_service 的发现连接与 MQTT 订阅里。
+    if (!FMO_QSO_Init()) {
+        ESP_LOGE(TAG, "FMO QSO signaling initialization failed.");
+    }
 
     s_full_app_started = true;
     s_waiting_for_provisioning = false;

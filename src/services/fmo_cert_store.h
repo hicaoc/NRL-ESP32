@@ -36,6 +36,15 @@ esp_err_t FMO_CERT_GetStatus(FmoIdentityStatus *status);
 esp_err_t FMO_CERT_BuildCredentials(const FmoServer *server,
                                     const char *role, char *username,
                                     size_t username_size, char **password);
+// Rebuild the deterministic 10-element user-certificate CBOR blob from the
+// stored cert_user JSON (the "CERT:" payload of the FMO-V4 STATION broadcast;
+// certBlobHash = SHA-256 over these exact bytes).
+esp_err_t FMO_CERT_RebuildUserCertBlob(uint8_t *out, size_t capacity,
+                                       size_t *out_size);
+// Sign an arbitrary TBS with the device Ed25519 key derived from the stored
+// deviceKey seed (the "SIG:" payload of the STATION broadcast).
+esp_err_t FMO_CERT_SignWithDeviceKey(const uint8_t *tbs, size_t tbs_size,
+                                     uint8_t signature[64]);
 
 #ifdef __cplusplus
 }
