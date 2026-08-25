@@ -47,6 +47,9 @@ set(app_sources
     app/driver/display.cpp
     app/driver/display_bi4umd.cpp
     app/driver/touch_bi4umd.cpp
+    app/driver/bh4tdv_rf_io.cpp
+    app/driver/environment_sensors.cpp
+    app/driver/sr110u.cpp
     app/driver/display_s31.cpp
     app/driver/es7210.cpp
     app/driver/es8311.cpp

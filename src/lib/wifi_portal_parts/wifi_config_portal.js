@@ -682,7 +682,9 @@ const translations = {
         aiToken: '访问令牌 (Token)',
         aiEnabledText: '启用助手连接'
       }
-    };
+};
+Object.assign(translations.en, {sensorStatus: 'Sensors'});
+Object.assign(translations.zh, {sensorStatus: '传感器'});
 
     function currentLang() {
       const saved = localStorage.getItem('nrl_lang');
