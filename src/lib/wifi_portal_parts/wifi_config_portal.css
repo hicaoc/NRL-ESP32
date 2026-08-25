@@ -5,14 +5,12 @@
     .topbar{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px;}
     h1{margin:0;font-size:26px;line-height:1.18;letter-spacing:0;}
     .sub{margin:6px 0 0;color:var(--muted);font-size:14px;}
-    .language{margin-top:12px;}
-    .language .lang-label{display:block;margin:0 0 6px;font-weight:700;font-size:13px;}
     .language .lang-radio{display:flex;gap:14px;flex-wrap:wrap;}
     .language .lang-radio label{display:inline-flex;align-items:center;margin:0;font-weight:400;font-size:14px;cursor:pointer;}
     input[type=radio]{width:auto;min-height:0;margin-right:6px;}
-    .status{display:grid;grid-template-columns:repeat(2,minmax(150px,1fr));gap:8px;min-width:320px;}
-    .status div{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px;}
-    .status span{display:block;color:var(--muted);font-size:12px;margin-bottom:3px;}
+    .status{display:grid;grid-template-columns:repeat(3,minmax(150px,1fr));gap:8px;min-width:320px;}
+    .status>div{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px;}
+    .status>div>span{display:block;color:var(--muted);font-size:12px;margin-bottom:3px;}
     .mono{font-family:Consolas,monospace;}
     .nav{display:flex;gap:8px;margin:0 0 14px;border-bottom:1px solid var(--line);}
     .nav a{display:inline-block;padding:10px 12px;text-decoration:none;color:var(--muted);border-bottom:3px solid transparent;font-weight:700;}
