@@ -40,12 +40,15 @@
 #include "../services/fmo_station_broadcast.h"
 #include "../services/server_list_store.h"
 #include "driver/board_pins.h"
+#include "driver/bh4tdv_rf_io.h"
 #include "driver/display.h"
 #include "driver/es7210.h"
 #include "driver/es8311.h"
 #include "driver/es8389.h"
 #include "driver/external_radio.h"
 #include "driver/status_io.h"
+#include "driver/environment_sensors.h"
+#include "driver/sr110u.h"
 #include "main_loop_profile.h"
 
 #include <string.h>
@@ -431,7 +434,22 @@ static bool initFullApp()
 static void initApp()
 {
     logDramMark("boot");
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    if (!BH4TDV_RF_IO_Init()) {
+        ESP_LOGE(TAG, "BH4TDV-RF PCA9555 initialization failed.");
+    } else {
+        (void)BH4TDV_RF_IO_SetGpsPower(true);
+    }
+    if (!ENV_SENSORS_Init()) {
+        ESP_LOGE(TAG, "BH4TDV-RF sensor worker initialization failed.");
+    }
+#endif
     EXTERNAL_RADIO_Init();
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    if (!SR110U_Init()) {
+        ESP_LOGE(TAG, "SR-110U initialization failed.");
+    }
+#endif
     applyPendingAudioConfig();
     if (!nrlEthernetInit()) {
         ESP_LOGE(TAG, "Ethernet initialization failed; Wi-Fi fallback remains available.");

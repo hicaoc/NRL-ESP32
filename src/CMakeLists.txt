@@ -51,6 +51,9 @@ set(app_sources
     app/driver/display.cpp
     app/driver/display_bi4umd.cpp
     app/driver/touch_bi4umd.cpp
+    app/driver/bh4tdv_rf_io.cpp
+    app/driver/environment_sensors.cpp
+    app/driver/sr110u.cpp
     app/driver/display_s31.cpp
     app/driver/es7210.cpp
     app/driver/es8311.cpp
@@ -86,6 +89,46 @@ set(app_sources
     lib/wifi_config_portal.cpp
     lib/wifi_config_portal_view.cpp
 )
+
+# ESP-IDF master e37a7ae includes btdm_le.h before esp_bt.h defines the named
+# esp_power_level and esp_ble_power_type enums. GCC 16 correctly rejects those
+# C-style forward declarations in C++. Generate an S31-only header overlay that
+# moves the include below both enum definitions. Nothing under IDF_PATH is
+# modified, and the overlay is disabled automatically once the upstream header
+# no longer contains the offending order.
+set(app_private_include_dirs)
+if(IDF_TARGET STREQUAL "esp32s31")
+    set(idf_s31_bt_header
+        "$ENV{IDF_PATH}/components/bt/include/esp32s31/include/esp_bt.h")
+    set(idf_btdm_le_header
+        "$ENV{IDF_PATH}/components/bt/include/common/btdm_le.h")
+    file(READ "${idf_s31_bt_header}" s31_bt_header_text)
+    file(READ "${idf_btdm_le_header}" s31_btdm_le_text)
+    string(FIND "${s31_btdm_le_text}"
+        "typedef enum esp_power_level esp_power_level_t;" s31_bad_enum_forward)
+    string(FIND "${s31_bt_header_text}"
+        "#include \"../../common/btdm_le.h\"" s31_early_btdm_include)
+    if(NOT s31_bad_enum_forward EQUAL -1 AND NOT s31_early_btdm_include EQUAL -1)
+        set(s31_bt_overlay "${CMAKE_CURRENT_BINARY_DIR}/nrl_s31_bt_include")
+        file(MAKE_DIRECTORY
+            "${s31_bt_overlay}/esp32s31/include"
+            "${s31_bt_overlay}/common")
+        string(REPLACE
+            "#include \"../../common/btdm_le.h\""
+            "/* btdm_le.h is included below the enum definitions by NRL's GCC 16 compatibility overlay. */"
+            s31_bt_header_text "${s31_bt_header_text}")
+        string(REPLACE
+            "} esp_power_level_t;"
+            "} esp_power_level_t;\n\n#if SOC_BLE_SUPPORTED\n#include \"../../common/btdm_le.h\"\n#endif /* SOC_BLE_SUPPORTED */"
+            s31_bt_header_text "${s31_bt_header_text}")
+        file(WRITE "${s31_bt_overlay}/esp32s31/include/esp_bt.h"
+            "${s31_bt_header_text}")
+        configure_file("${idf_btdm_le_header}"
+            "${s31_bt_overlay}/common/btdm_le.h" COPYONLY)
+        list(APPEND app_private_include_dirs
+            "${s31_bt_overlay}/esp32s31/include")
+    endif()
+endif()
 
 # LVGL is vendored under components/lvgl/ only for display-equipped boards.
 # On bh4tdv and the S31 Function CoreBoard, display sources compile their LVGL
@@ -168,6 +211,7 @@ idf_component_register(
         .
         app
         app/driver
+    PRIV_INCLUDE_DIRS ${app_private_include_dirs}
     PRIV_REQUIRES ${app_priv_requires}
     # WHOLE_ARCHIVE keeps app_main (and other referenced-by-startup symbols) from
     # being dropped at link time. Under PlatformIO src is the main component

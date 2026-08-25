@@ -4,9 +4,9 @@
 
 HTML 阅读版：[中文](README.html) / [English](README.en.html)
 
-当前固件版本：`0.8.56`
+当前固件版本：`0.8.59`
 
-完整构建矩阵包含 `gezipai`、`gezipai_4g`、`bi4umd`、`bh4tdv`、`s31_korvo` 和 `s31_function_coreboard`。其中 `gezipai_4g` 在保留格子派音频与屏幕功能的基础上增加 ML307R 硬件映射；`bi4umd` 保留其触摸屏和 TF 卡扩展。
+完整构建矩阵包含 `gezipai`、`gezipai_4g`、`bi4umd`、`bh4tdv`、`bh4tdv_rf`、`s31_korvo` 和 `s31_function_coreboard`。其中 `gezipai_4g` 在保留格子派音频与屏幕功能的基础上增加 ML307R 硬件映射；`bi4umd` 保留其触摸屏和 TF 卡扩展，`bh4tdv_rf` 增加伴侣扩展板、SR-110U 射频、实体键及环境传感器。
 
 本项目是以 ESP32-S31 为主要目标平台、兼容 ESP32-S3 板卡的 NRL 网络语音电台桥接固件，用于把电台音频、PTT、SQL、频道选择、串口透明传输和网络配置集中到一个嵌入式应用中。不同板卡分别适配 ES8311 或 ES8389 等音频编解码器，当前工程覆盖 Moto3188/NRL 硬件及 ESP32-S31 开发板。
 
@@ -18,6 +18,7 @@ HTML 阅读版：[中文](README.html) / [English](README.en.html)
 | --- | --- | --- | --- |
 | `gezipai` | 格子派，ESP32-S3 | ES7210 麦克风 ADC + ES8311 DAC、240×240 ST7789 彩屏、电池电压检测、音量+/音量-/PTT 三按键、三色状态灯、SCI 串口 | 带小屏幕和实体 PTT 的便携式网络语音终端 |
 | `bh4tdv` | BH4TDV NRL-3188 / Moto3188 控制板，ESP32-S3 | ES8311 全双工音频、PTT/SQL/三色状态灯、三位频道选择（0–7）、SCI 串口；无板载屏幕 | 连接 3188 电台的网络桥接与频道控制 |
+| `bh4tdv_rf` | BH4TDV-RF（BI4UMD 主板 + NRL 伴侣扩展板），ESP32-S3 | ILI9341 触摸屏、ES8311、GPS、TF 卡、PCA9555 实体键、SR-110U 射频模块 | 带本机 UHF 收发与实体键交互的网络电台终端 |
 | `s31_korvo` | ESP32-S31-Korvo-1，ESP32-S31 | ES8389 音频、800×480 RGB 触摸屏、ADC 按键（音量、模式、PTT）、TF 卡、USB-OTG 主机、板载 RGB 状态灯 | 带触控界面的多媒体/网络语音终端；UART1/SCI 与 UART2/GPS 默认关闭，可通过 Web/AT 启用 |
 | `s31_function_coreboard` | ESP32-S31-Function-CoreBoard-1，ESP32-S31 | ES8311 音频、YT8531 千兆以太网、USB-A 主机、WS2812 RGB 状态灯、SCI 串口；无屏幕、无实体音量/PTT 键 | 需要有线网络或 USB 存储的功能核心板方案 |
 
@@ -40,7 +41,7 @@ HTML 阅读版：[中文](README.html) / [English](README.en.html)
 
 左图为 `s31_korvo` 使用的 ESP32-S31-Korvo-1，提供屏幕、触摸、TF 卡、USB 主机及音频外设；右图为 `s31_function_coreboard` 使用的 ESP32-S31-Function-CoreBoard-1，提供 RJ45 千兆以太网、USB-A 主机、板载音频和 RGB 状态灯。
 
-> 注意：由 NRL-OTA 提供的网页 USB 刷机支持四块 ESP32-S3 板：`gezipai`、`gezipai_4g`、`bi4umd` 和 `bh4tdv`；两块 ESP32-S31 板请使用串口烧录。Korvo 的 UART1/SCI 与 UART2/GPS 使用 DVP 摄像头接口 GPIO，默认关闭，可通过 Web/AT 启用；启用后不能同时使用并口摄像头。
+> 注意：由 NRL-OTA 提供的网页 USB 刷机支持五块 ESP32-S3 板：`gezipai`、`gezipai_4g`、`bi4umd`、`bh4tdv` 和 `bh4tdv_rf`；两块 ESP32-S31 板请使用串口烧录。Korvo 的 UART1/SCI 与 UART2/GPS 使用 DVP 摄像头接口 GPIO，默认关闭，可通过 Web/AT 启用；启用后不能同时使用并口摄像头。
 
 ## 扩展功能与适用范围
 
@@ -80,7 +81,7 @@ HTML 阅读版：[中文](README.html) / [English](README.en.html)
   - OTA 管理系统已拆分到独立的 [`NRL-OTA`](https://github.com/hicaoc/NRL-OTA) 仓库：Go 服务端配合 Vue 管理界面，使用 SQLite 保存按板卡、版本和发布通道（如 `stable` / `beta`）划分的固件发布记录与更新说明。
   - 管理后台提供板卡介绍、各板卡固件历史与变更说明、USB 刷机入口，以及设备管理面板。设备在检查更新时会上报板卡型号、固件版本、呼号、SSID、IP 和最后在线时间，后台可识别有可用更新的设备。
   - 发布流程以**完整刷机包**为唯一来源：一次上传包含 bootloader、分区表、OTA data、应用及所需资源镜像。服务端从其中登记应用镜像作为设备 OTA 版本，并为 ESP32-S3 板生成其刷机页面所需的 manifest，避免两套固件来源不一致。
-  - 所有六个构建目标均可接入 OTA 管理系统；`gezipai`、`gezipai_4g`、`bi4umd` 和 `bh4tdv` 还可通过 NRL-OTA 在 Chrome/Edge 中首次全量安装，`s31_korvo` 和 `s31_function_coreboard` 保持串口首次烧录，后续可使用设备 OTA。
+  - 所有七个构建目标均可接入 OTA 管理系统；五块 ESP32-S3 板还可通过 NRL-OTA 在 Chrome/Edge 中首次全量安装，`s31_korvo` 和 `s31_function_coreboard` 保持串口首次烧录，后续可使用设备 OTA。
   - 设备端保存 OTA 服务 URL 与设备令牌，定时或按需拉取兼容版本清单，可安装最新版本或指定历史版本；生产 OTA 下载仅接受 HTTPS。可通过本地串口 AT 命令 `AT+OTAURL`、`AT+OTACHECK`、`AT+OTALIST`、`AT+OTA` 管理和执行更新。
   - 管理员可通过网页登录或管理令牌维护发布；构建环境设置 `OTA_SERVER_URL`、`OTA_UPLOAD_TOKEN` 等变量后，`scripts/build.py` 会在构建成功后自动上传发布包。
   - 推荐使用 `scripts/publish_ota_mcp.py` 进行需要审核确认的正式发布。脚本通过 MCP 创建一次性上传会话，上传完整刷机包后校验状态，再显式确认发布；重复执行时会核对应用镜像大小和 SHA-256，不会重复创建相同版本。
@@ -88,9 +89,9 @@ HTML 阅读版：[中文](README.html) / [English](README.en.html)
 ```powershell
 $env:OTA_SERVER_URL = 'https://ota.nrlptt.com/nrlota/api'
 $env:OTA_ADMIN_TOKEN = '<管理员令牌>'
-python scripts/publish_ota_mcp.py --version 0.8.56 --notes 'release notes'
-# 仅核验服务器上的六板发布包：
-python scripts/publish_ota_mcp.py --version 0.8.56 --verify-only
+python scripts/publish_ota_mcp.py --version 0.8.59 --notes 'release notes'
+# 仅核验服务器上的七板发布包：
+python scripts/publish_ota_mcp.py --version 0.8.59 --verify-only
 ```
 
 ## 支持功能
@@ -283,8 +284,8 @@ LVGL 以**本地组件**形式放在 `components/lvgl`。LVGL 与 esp_lcd 的对
 
 ## 构建和烧录
 
-工程使用原生 ESP-IDF（≥6.1，含 ESP32-S31 支持），不再使用 PlatformIO。共有六个构建目标：
-`gezipai`、`gezipai_4g`、`bi4umd`、`bh4tdv`、`s31_korvo` 和 `s31_function_coreboard`。
+工程使用原生 ESP-IDF（≥6.1，含 ESP32-S31 支持），不再使用 PlatformIO。共有七个构建目标：
+`gezipai`、`gezipai_4g`、`bi4umd`、`bh4tdv`、`bh4tdv_rf`、`s31_korvo` 和 `s31_function_coreboard`。
 
 首次需安装 ESP-IDF 工具链（一次性）：
 
@@ -303,6 +304,7 @@ C:\esp\esp-idf\export.ps1        # Linux/macOS 用: . export.sh
 ```powershell
 python scripts/build.py gezipai build                     # 编译格子派
 python scripts/build.py bh4tdv build                      # 编译 BH4TDV
+python scripts/build.py bh4tdv_rf build                   # 编译 BH4TDV-RF
 python scripts/build.py s31_korvo flash monitor -p COM5   # S31: 编译+烧录+监视
 python scripts/build.py s31_function_coreboard build      # S31 功能核心板
 python scripts/build.py gezipai menuconfig                # 修改配置
@@ -313,7 +315,7 @@ python scripts/build.py gezipai menuconfig                # 修改配置
 `-DNRL_BOARD_ID` 传入。
 
 GitHub Actions 会在每次 push、pull request 或手动触发时，用官方 ESP-IDF 镜像原生构建
-六块板，并上传各板的 `firmware` / `partition-table` / `bootloader` 作为构建产物，
+七块板，并上传各板的 `firmware` / `partition-table` / `bootloader` 作为构建产物，
 打 tag 时发布到 Release。
 
 ## 固件刷机
@@ -322,7 +324,7 @@ GitHub Actions 会在每次 push、pull request 或手动触发时，用官方 E
 
 本仓库不再包含 USB 网页刷机页面、静态资源或打包脚本。本项目仍会构建和上传包含 bootloader、分区表、OTA data、应用固件及资源镜像的完整刷机包；刷机页面和 manifest 由独立的 [`NRL-OTA`](https://github.com/hicaoc/NRL-OTA) 项目提供。
 
-> NRL-OTA 支持四块 ESP32-S3 板（`gezipai`、`gezipai_4g`、`bi4umd` 和 `bh4tdv`）的首次 USB 安装或恢复。ESP32-S31 因浏览器刷机工具不支持，`s31_korvo` 和 `s31_function_coreboard` 需使用串口烧录。
+> NRL-OTA 支持五块 ESP32-S3 板（`gezipai`、`gezipai_4g`、`bi4umd`、`bh4tdv` 和 `bh4tdv_rf`）的首次 USB 安装或恢复。ESP32-S31 因浏览器刷机工具不支持，`s31_korvo` 和 `s31_function_coreboard` 需使用串口烧录。
 
 ### WiFi 网页刷机
 

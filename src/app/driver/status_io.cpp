@@ -2,6 +2,10 @@
 
 #include "board_pins.h"
 
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+#include "bh4tdv_rf_io.h"
+#endif
+
 #if NRL_BOARD_IS_GEZIPAI_FAMILY || NRL_BOARD == NRL_BOARD_S31_KORVO || \
     NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
 #include "external_radio.h"
@@ -154,21 +158,30 @@ struct AutoRepeat {
     unsigned long next_fire_ms;
 };
 
-DebouncedButton s_btn_vol_up   = {NRL_PIN_BTN_VOL_UP,   1, false, 0UL};
-DebouncedButton s_btn_vol_down = {NRL_PIN_BTN_VOL_DOWN, 1, false, 0UL};
+[[maybe_unused]] DebouncedButton s_btn_vol_up   = {NRL_PIN_BTN_VOL_UP,   1, false, 0UL};
+[[maybe_unused]] DebouncedButton s_btn_vol_down = {NRL_PIN_BTN_VOL_DOWN, 1, false, 0UL};
 DebouncedButton s_btn_ptt      = {NRL_PIN_BTN_PTT,      1, false, 0UL};
 
-AutoRepeat s_btn_vol_up_repeat   = {false, 0UL};
-AutoRepeat s_btn_vol_down_repeat = {false, 0UL};
+[[maybe_unused]] AutoRepeat s_btn_vol_up_repeat   = {false, 0UL};
+[[maybe_unused]] AutoRepeat s_btn_vol_down_repeat = {false, 0UL};
 
 bool s_volume_dirty = false;
 unsigned long s_volume_change_ms = 0UL;
-#if NRL_BOARD_IS_GEZIPAI_FAMILY
+#if NRL_BOARD_IS_GEZIPAI_FAMILY && NRL_BOARD != NRL_BOARD_BH4TDV_RF
 bool s_menu_chord_active = false;
 bool s_menu_ptt_suppressed_until_release = false;
 int s_pending_volume_delta = 0;
 unsigned long s_pending_volume_ms = 0UL;
 constexpr unsigned long kMenuChordGraceMs = 100UL;
+#endif
+
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+uint8_t s_rf_keys_raw = 0u;
+uint8_t s_rf_keys_stable = 0u;
+unsigned long s_rf_keys_changed_ms = 0UL;
+unsigned long s_rf_up_repeat_ms = 0UL;
+unsigned long s_rf_down_repeat_ms = 0UL;
+bool s_rf_sql_active = false;
 #endif
 
 unsigned long s_ptt_press_ms = 0UL;  // press-down time of the current press
@@ -423,7 +436,7 @@ static void adjustLineOutVolume(const int pct_delta)
 
 // Step the speaker volume on the initial press, and again at a steady cadence
 // while the button is held so the user can sweep up/down by holding.
-static void updateVolumeButton(DebouncedButton &btn, AutoRepeat &rep,
+[[maybe_unused]] static void updateVolumeButton(DebouncedButton &btn, AutoRepeat &rep,
                                const int pct_delta, const unsigned long now,
                                const bool press_edge)
 {
@@ -454,7 +467,7 @@ static void pollVolumeButton(DebouncedButton &btn, AutoRepeat &rep,
 // Gezipai has no touch panel. Pressing VOL+ and VOL- together opens the menu;
 // while it is active the individual keys navigate and PTT confirms. Input is
 // queued into display.cpp, where LVGL consumes it from the display task.
-#if NRL_BOARD_IS_GEZIPAI_FAMILY
+#if NRL_BOARD_IS_GEZIPAI_FAMILY && NRL_BOARD != NRL_BOARD_BH4TDV_RF
 static void pollGezipaiMenuButtons(const unsigned long now)
 {
     const bool up_edge = pollButtonPressEdge(s_btn_vol_up, now);
@@ -521,6 +534,56 @@ static void pollGezipaiMenuButtons(const unsigned long now)
 }
 #endif
 
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+static void queueRfKey(const uint8_t key)
+{
+    if (key == BH4TDV_RF_KEY_UP) Display_HardwareKeyPress(DISPLAY_HW_KEY_UP);
+    else if (key == BH4TDV_RF_KEY_DOWN) Display_HardwareKeyPress(DISPLAY_HW_KEY_DOWN);
+    else if (key == BH4TDV_RF_KEY_CONFIRM) Display_HardwareKeyPress(DISPLAY_HW_KEY_CONFIRM);
+    else if (key == BH4TDV_RF_KEY_F2) Display_HardwareKeyPress(DISPLAY_HW_KEY_SOFT_LEFT);
+    else if (key == BH4TDV_RF_KEY_F3) Display_HardwareKeyPress(DISPLAY_HW_KEY_SOFT_RIGHT);
+}
+
+static void pollBh4tdvRfKeys(const unsigned long now)
+{
+    uint8_t keys = 0u;
+    bool sql = false;
+    if (!BH4TDV_RF_IO_Read(&keys, &sql)) return;
+    s_rf_sql_active = sql;
+
+    if (keys != s_rf_keys_raw) {
+        s_rf_keys_raw = keys;
+        s_rf_keys_changed_ms = now;
+    } else if (keys != s_rf_keys_stable &&
+               now - s_rf_keys_changed_ms >= kButtonDebounceMs) {
+        const uint8_t pressed = keys & static_cast<uint8_t>(~s_rf_keys_stable);
+        s_rf_keys_stable = keys;
+        constexpr uint8_t kKeys[] = {
+            BH4TDV_RF_KEY_F2, BH4TDV_RF_KEY_F3, BH4TDV_RF_KEY_DOWN,
+            BH4TDV_RF_KEY_UP, BH4TDV_RF_KEY_CONFIRM,
+        };
+        for (const uint8_t key : kKeys) {
+            if ((pressed & key) != 0u) queueRfKey(key);
+        }
+        if ((pressed & BH4TDV_RF_KEY_UP) != 0u)
+            s_rf_up_repeat_ms = now + kVolumeRepeatDelayMs;
+        if ((pressed & BH4TDV_RF_KEY_DOWN) != 0u)
+            s_rf_down_repeat_ms = now + kVolumeRepeatDelayMs;
+    }
+
+    if ((s_rf_keys_stable & BH4TDV_RF_KEY_UP) != 0u &&
+        (long)(now - s_rf_up_repeat_ms) >= 0) {
+        queueRfKey(BH4TDV_RF_KEY_UP);
+        s_rf_up_repeat_ms = now + kVolumeRepeatIntervalMs;
+    }
+    if ((s_rf_keys_stable & BH4TDV_RF_KEY_DOWN) != 0u &&
+        (long)(now - s_rf_down_repeat_ms) >= 0) {
+        queueRfKey(BH4TDV_RF_KEY_DOWN);
+        s_rf_down_repeat_ms = now + kVolumeRepeatIntervalMs;
+    }
+}
+#endif
+
 #endif  // !defined(NRL_HAS_USER_BUTTONS) || NRL_HAS_USER_BUTTONS
 
 // Effective PTT auto-off timeout in milliseconds, from the persisted config.
@@ -557,6 +620,9 @@ static void updatePtt(const unsigned long now)
         s_tx_active = false;
         return;
     }
+#endif
+
+#if NRL_BOARD_IS_GEZIPAI_FAMILY && NRL_BOARD != NRL_BOARD_BH4TDV_RF
     if (Display_CwIsActive()) {
         if (is_pressed && !was_pressed) {
             s_ptt_press_ms = now;
@@ -602,11 +668,17 @@ static void updatePtt(const unsigned long now)
     } else if (!is_pressed && was_pressed) {
         // release
         const unsigned long held = now - s_ptt_press_ms;
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+        (void)held;
+        // BH4TDV-RF has a dedicated F1 PTT key: it is strictly momentary.
+        s_tx_latched = false;
+#else
         if (!s_tx_suppressed && held < kPttLongPressMs) {
             s_tx_latched = !s_tx_latched;  // short press toggles the latch
         } else {
             s_tx_latched = false;  // a long press always ends transmit
         }
+#endif
         s_tx_suppressed = false;
     }
 #else
@@ -642,7 +714,11 @@ extern "C" bool STATUS_IO_IsSqlActive(void)
     // 格子派 has no radio squelch: the PTT button state machine (short-press
     // latch / long-press momentary / timeout) decides when the microphone is
     // captured and streamed, mirroring the SQL-active gate.
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    return s_rf_sql_active || s_tx_active;
+#else
     return s_tx_active;
+#endif
 }
 
 extern "C" bool STATUS_IO_IsPttActive(void)
@@ -655,6 +731,10 @@ extern "C" void STATUS_IO_Init(void)
     if (s_poll_mutex == nullptr) {
         s_poll_mutex = xSemaphoreCreateMutex();
     }
+
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    (void)BH4TDV_RF_IO_Init();
+#endif
 
 #if defined(NRL_HAS_ADC_BUTTONS) && NRL_HAS_ADC_BUTTONS
     initAdcButtons();
@@ -712,6 +792,9 @@ extern "C" void STATUS_IO_SetPttActive(const bool active)
     // On Gezipai, "PTT active" means inbound network voice is being played out.
     s_nrl_audio_active = active;
     s_net_audio_active = s_nrl_audio_active || s_fmo_audio_active;
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    (void)BH4TDV_RF_IO_SetRadioPtt(s_net_audio_active);
+#endif
     writeLed(NRL_PIN_LED_AUDIO, s_net_audio_active);
 }
 
@@ -719,6 +802,9 @@ extern "C" void STATUS_IO_SetFmoPttActive(const bool active)
 {
     s_fmo_audio_active = active;
     s_net_audio_active = s_nrl_audio_active || s_fmo_audio_active;
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    (void)BH4TDV_RF_IO_SetRadioPtt(s_net_audio_active);
+#endif
     writeLed(NRL_PIN_LED_AUDIO, s_net_audio_active);
 }
 
@@ -764,7 +850,9 @@ extern "C" void STATUS_IO_Poll(void)
     // four ADC samples separately for each key (12 conversions per poll).
     s_button_adc_value = sampleAdcButtonValue();
 #endif
-#if NRL_BOARD_IS_GEZIPAI_FAMILY
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    pollBh4tdvRfKeys(now);
+#elif NRL_BOARD_IS_GEZIPAI_FAMILY
     pollGezipaiMenuButtons(now);
 #else
     pollVolumeButton(s_btn_vol_up,   s_btn_vol_up_repeat,   +1, now);

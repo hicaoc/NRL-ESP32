@@ -377,6 +377,9 @@ static void flushSciPayload(void)
 
 static void pollSciUplink(void)
 {
+#if defined(NRL_HAS_SCI_BRIDGE) && !NRL_HAS_SCI_BRIDGE
+    return;
+#endif
     int available = SCI_SERIAL_Available();
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
     while (available > 0) {
@@ -406,6 +409,11 @@ static void pollSciUplink(void)
 
 static void handleIncomingSciPayload(const uint8_t *payload, const size_t payload_size)
 {
+#if defined(NRL_HAS_SCI_BRIDGE) && !NRL_HAS_SCI_BRIDGE
+    (void)payload;
+    (void)payload_size;
+    return;
+#endif
     if (payload == nullptr || payload_size == 0u || payload_size > kNrlMaxPayloadSize) {
         return;
     }

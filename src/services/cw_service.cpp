@@ -575,7 +575,7 @@ void CW_SERVICE_Init(void)
     AudioRouter_SetRoute(AUDIO_SRC_CW_NRL, AUDIO_SINK_NRL_UPLINK, true);
     AudioRouter_SetRoute(AUDIO_SRC_CW_SPEAKER, AUDIO_SINK_SPEAKER, true);
     s_queue = xQueueCreate(12u, sizeof(Command));
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     BaseType_t task_result = pdFAIL;
     if (s_queue != nullptr) {
         task_result = xTaskCreateWithCaps(worker, "cw_tx", kTxTaskStackBytes,

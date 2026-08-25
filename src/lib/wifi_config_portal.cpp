@@ -17,6 +17,7 @@
 #include "../app/driver/serial_port_config.h"
 #include "../app/driver/board_pins.h"
 #include "../app/driver/display.h"
+#include "../app/driver/environment_sensors.h"
 #include "../services/ai_assistant.h"
 #include "../services/aprs_service.h"
 #include "../services/signaling_service.h"
@@ -3444,6 +3445,74 @@ static esp_err_t handlePing(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t handleSensorStatus(httpd_req_t *req)
+{
+    s_server.bind(req);
+    EnvironmentSensorSnapshot sensor = {};
+    (void)ENV_SENSORS_GetSnapshot(&sensor);
+    cJSON *root = cJSON_CreateObject();
+    if (root == nullptr) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "sensor JSON allocation failed");
+    }
+    cJSON_AddNumberToObject(root, "updated_ms", sensor.updated_ms);
+    cJSON_AddBoolToObject(root, "aht20_available", sensor.aht20_available);
+    cJSON_AddStringToObject(root, "aht20_status",
+                            sensor.aht20_available ? "ready" : "address_conflict_with_touch");
+    auto addValue = [root](const char *name, const bool valid, const double value) {
+        if (valid) cJSON_AddNumberToObject(root, name, value);
+        else cJSON_AddNullToObject(root, name);
+    };
+    addValue("temperature_c", sensor.bmp280_valid, sensor.temperature_c);
+    addValue("pressure_hpa", sensor.bmp280_valid, sensor.pressure_hpa);
+    addValue("humidity_percent", sensor.aht20_valid, sensor.humidity_percent);
+    addValue("illuminance_lux", sensor.bh1750_valid, sensor.illuminance_lux);
+    addValue("magnetic_x_ut", sensor.qmc5883l_valid, sensor.magnetic_x_ut);
+    addValue("magnetic_y_ut", sensor.qmc5883l_valid, sensor.magnetic_y_ut);
+    addValue("magnetic_z_ut", sensor.qmc5883l_valid, sensor.magnetic_z_ut);
+    addValue("heading_deg", sensor.qmc5883l_valid, sensor.heading_deg);
+    cJSON_AddBoolToObject(root, "compass_calibrated", sensor.compass_calibrated);
+    char *body = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (body == nullptr) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "sensor JSON serialization failed");
+    }
+    s_server.sendHeader("Cache-Control", "no-store");
+    s_server.send(200, "application/json; charset=utf-8", body);
+    cJSON_free(body);
+    return ESP_OK;
+}
+
+static esp_err_t handleSensorsPage(httpd_req_t *req)
+{
+    s_server.bind(req);
+    static const char page[] = R"HTML(<!doctype html><html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BH4TDV-RF 传感器</title><link rel="stylesheet" href="/portal.css"></head><body><main class="shell">
+<p class="back-home"><a href="/">&larr; 返回首页</a></p><section class="panel">
+<div class="section-head"><h2>传感器实时数据</h2><span class="hint mono" id="stamp">--</span></div>
+<div class="status"><div><span>温度</span><strong id="temp">--</strong></div>
+<div><span>气压</span><strong id="pressure">--</strong></div>
+<div><span>湿度</span><strong id="humidity">--</strong></div>
+<div><span>照度</span><strong id="lux">--</strong></div>
+<div><span>航向</span><strong id="heading">--</strong></div>
+<div><span>磁场 X/Y/Z</span><strong class="mono" id="mag">--</strong></div></div>
+<p class="notice" id="aht">AHT20：正在读取状态</p>
+<p class="hint">罗盘航向未完成安装方向及硬铁/软铁校准前仅供调试。</p></section></main>
+<script>const f=(v,d,u)=>v==null?'--':Number(v).toFixed(d)+u;
+async function refresh(){try{const r=await fetch('/sensors/status',{cache:'no-store'});const s=await r.json();
+temp.textContent=f(s.temperature_c,1,' °C');pressure.textContent=f(s.pressure_hpa,1,' hPa');
+humidity.textContent=f(s.humidity_percent,1,' %RH');lux.textContent=f(s.illuminance_lux,1,' lx');
+heading.textContent=f(s.heading_deg,1,'°');mag.textContent=[s.magnetic_x_ut,s.magnetic_y_ut,s.magnetic_z_ut].map(v=>f(v,1,'')).join(' / ')+' µT';
+aht.textContent=s.aht20_available?'AHT20：可用':'AHT20：与触摸屏地址 0x38 冲突，已安全禁用';
+stamp.textContent='更新 '+new Date().toLocaleTimeString();}catch(e){stamp.textContent='读取失败';}}
+refresh();setInterval(refresh,2000);</script></body></html>)HTML";
+    s_server.sendHeader("Cache-Control", "no-store");
+    s_server.send(200, "text/html; charset=utf-8", page);
+    return ESP_OK;
+}
+
 // Machine-readable local AT endpoint used by the mini program. This avoids
 // scraping the device's HTML UI and executes the same command parser as the
 // USB serial console. LAN access is intentionally equivalent to opening the
@@ -3573,6 +3642,8 @@ static void ensureServerRunning()
         { "/ota/install",          HTTP_POST, handleOtaInstall },
         { "/portal.css",           HTTP_GET,  handlePortalCss },
         { "/portal.js",            HTTP_GET,  handlePortalJs },
+        { "/sensors",             HTTP_GET,  handleSensorsPage },
+        { "/sensors/status",      HTTP_GET,  handleSensorStatus },
         { "/update.css",           HTTP_GET,  handleUpdateCss },
         { "/update.js",            HTTP_GET,  handleUpdateJs },
         { "/ping",                 HTTP_GET,  handlePing },

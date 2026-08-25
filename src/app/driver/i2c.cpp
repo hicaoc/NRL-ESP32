@@ -122,6 +122,15 @@ bool I2C_MasterTransmit(const uint8_t address, const uint8_t *data,
            i2c_master_transmit(device, data, size, timeout_ms) == ESP_OK;
 }
 
+bool I2C_MasterReceive(const uint8_t address, uint8_t *data,
+                       const size_t size, const int timeout_ms)
+{
+    if (data == nullptr || size == 0u) return false;
+    i2c_master_dev_handle_t device = nullptr;
+    return getDevice(address, &device) &&
+           i2c_master_receive(device, data, size, timeout_ms) == ESP_OK;
+}
+
 bool I2C_MasterTransmitReceive(const uint8_t address,
                                const uint8_t *write_data, const size_t write_size,
                                uint8_t *read_data, const size_t read_size,

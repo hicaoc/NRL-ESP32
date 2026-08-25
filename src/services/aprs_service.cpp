@@ -303,7 +303,7 @@ const char *boardType()
     return "gezipai_4g";
 #elif NRL_BOARD == NRL_BOARD_GEZIPAI
     return "gezipai";
-#elif NRL_BOARD == NRL_BOARD_BI4UMD
+#elif NRL_BOARD_IS_BI4UMD_FAMILY
     return "bi4umd";
 #elif NRL_BOARD == NRL_BOARD_BH4TDV
     return "bh4tdv";
@@ -1326,7 +1326,7 @@ bool sendBeacon()
                                       (status_now - s_gps_last_fix_ms) < kGpsFixFreshMs;
         const int16_t status_satellites =
             (status_gps_fresh && s_gps_satellites >= 0) ? s_gps_satellites : -1;
-#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD_IS_BI4UMD_FAMILY
         // Report the ADC result verbatim, including 0 V or implausible
         // high/low readings: those values are useful battery/sense diagnostics
         // and must not be hidden by a "reasonable voltage" filter.

@@ -2,7 +2,7 @@
 
 #include "board_pins.h"
 
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
 
 #include <driver/gpio.h>
 #include <driver/spi_master.h>

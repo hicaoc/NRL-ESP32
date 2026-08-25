@@ -49,6 +49,12 @@ jobs:
             sdkconfig: sdkconfig.bi4umd.defaults
             lvgl: "true"
             extra_args: ""
+          - board: bh4tdv_rf
+            target: esp32s3
+            board_macro: NRL_BOARD_BH4TDV_RF
+            sdkconfig: sdkconfig.bi4umd.defaults
+            lvgl: "true"
+            extra_args: ""
           - board: bh4tdv
             target: esp32s3
             board_macro: NRL_BOARD_BH4TDV
