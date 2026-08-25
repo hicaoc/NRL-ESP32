@@ -28,3 +28,8 @@ __pycache__/
 scripts/cache/
 /sdkconfig.old
 dist/
+.tmp/fmo_online_roster_test.exe
+.gitignore
+.tmp/fmo_qso_test.exe
+.tmp/fmo_station_broadcast_test.exe
+.tmp/t.exe

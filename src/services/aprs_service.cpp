@@ -197,6 +197,10 @@ uint32_t s_rx_nrl_level_n = 0;
 // other threads request a reconnect via the flag instead of closing it.
 int s_is_socket = -1;
 bool s_is_logged_in = false;
+// Set only after the server answers "# logresp ... verified"; a wrong
+// passcode keeps the link up (Listen-Only) but must not allow STATION
+// broadcasts (fmo-sim docs/firmware-analysis.md section 8.3/8.6).
+bool s_is_verified = false;
 bool s_is_status_sent = false;
 int16_t s_is_status_satellites = -2; // -2=never sent, -1=no current fix
 int s_is_status_battery_mv = -1;
@@ -226,6 +230,12 @@ char s_msg_dest[kMsgDestMax + 1u] = {};
 char s_msg_text[kMsgTextMax + 1u] = {};
 volatile bool s_msg_pending = false;
 uint32_t s_msg_seq = 0;
+// Raw uplink slot for pre-built TNC2 lines (FMO STATION broadcast):
+// filled through APRS_SERVICE_SendRawLine() from any task, transmitted
+// by the APRS task that owns the socket (same pattern as s_msg_pending).
+constexpr size_t kRawLineMax = 1023u;
+char s_raw_line[kRawLineMax + 1u] = {};
+volatile bool s_raw_pending = false;
 // Gateway: pacing for relayed AFSK frames so a busy APRS-IS feed or a
 // chattering RF channel cannot peg the modulator (beacons/messages share it).
 constexpr uint32_t kFwdAfskMinGapMs = 1000u;
@@ -1039,6 +1049,7 @@ void isDisconnect()
         s_is_socket = -1;
     }
     s_is_logged_in = false;
+    s_is_verified = false;
     s_is_status_sent = false;
     s_is_status_satellites = -2;
     s_is_status_battery_mv = -1;
@@ -1051,7 +1062,7 @@ void isSendLine(const char *line)
     if (s_is_socket < 0) {
         return;
     }
-    char buf[600];
+    char buf[1024];
     const int n = snprintf(buf, sizeof(buf), "%s\r\n", line);
     if (n > 0) {
         if (send(s_is_socket, buf, (size_t)n, 0) < 0) {
@@ -1126,7 +1137,27 @@ void isTryConnect()
              "user %s pass %u vers NRL-ESP32 1.0 filter m/100", call, (unsigned)pass);
     isSendLine(login);
     s_is_logged_in = true;
+    s_is_verified = false; // until "# logresp ... verified" arrives
     ESP_LOGI(TAG, "APRS-IS connected to %s:%u as %s", host, (unsigned)port, call);
+}
+
+// '#' lines are server chatter. The only one acted on is the login
+// verdict: "# logresp <call> verified, server ..." (or "unverified" on
+// a bad passcode). s_is_logged_in is set optimistically when the login
+// line goes out; the FMO STATION broadcast additionally requires this
+// verified flag.
+void handleIsServerLine(const char *line)
+{
+    if (strncmp(line, "# logresp", 9) != 0) {
+        return;
+    }
+    if (strstr(line, "unverified") != nullptr) {
+        s_is_verified = false;
+        ESP_LOGW(TAG, "APRS-IS login rejected: %s", line);
+    } else if (strstr(line, "verified") != nullptr) {
+        s_is_verified = true;
+        ESP_LOGI(TAG, "APRS-IS login verified: %s", line);
+    }
 }
 
 void isPoll()
@@ -1155,7 +1186,9 @@ void isPoll()
             if (c == '\n' || c == '\r') {
                 if (s_is_line_len > 0) {
                     s_is_line[s_is_line_len] = '\0';
-                    if (s_is_line[0] != '#') { // '#' = server chatter
+                    if (s_is_line[0] == '#') { // '#' = server chatter
+                        handleIsServerLine(s_is_line);
+                    } else {
                         parseTnc2(s_is_line, false);
                         // Gateway: relay IS traffic onto the AFSK channels.
                         // Each direction also needs its transmitter route on;
@@ -1965,6 +1998,14 @@ void aprsTask(void *)
             s_msg_pending = false;
             sendMessage();
         }
+        if (s_raw_pending) {
+            s_raw_pending = false;
+            // Queued by APRS_SERVICE_SendRawLine (FMO STATION broadcast).
+            if (s_is_socket >= 0 && s_is_logged_in) {
+                isSendLine(s_raw_line);
+                s_tx_count++;
+            }
+        }
         txPump();
         rxDemodPoll();
         rxFramePoll();
@@ -2402,6 +2443,25 @@ extern "C" bool APRS_SERVICE_GetOwnPosition(double *lat, double *lon, double *al
 extern "C" bool APRS_SERVICE_IsNetConnected(void)
 {
     return s_is_socket >= 0 && s_is_logged_in;
+}
+
+extern "C" bool APRS_SERVICE_IsNetVerified(void)
+{
+    return s_is_socket >= 0 && s_is_logged_in && s_is_verified;
+}
+
+extern "C" bool APRS_SERVICE_SendRawLine(const char *line)
+{
+    if (line == nullptr || s_is_socket < 0 || !s_is_logged_in || s_raw_pending) {
+        return false;
+    }
+    const size_t len = strlen(line);
+    if (len == 0u || len > kRawLineMax) {
+        return false;
+    }
+    memcpy(s_raw_line, line, len + 1u);
+    s_raw_pending = true;
+    return true;
 }
 
 extern "C" uint32_t APRS_SERVICE_GetRxCount(void) { return s_rx_count; }

@@ -783,7 +783,9 @@ std::string WifiConfigPortalView_BuildHomeCards(void)
     html += navCard("/audio", "audioSettings", "Audio Settings");
     html += navCard("/media", "mediaConfig", "Media / Nanny");
     html += navCard("/aprs", "aprsConfig", "APRS");
+#if NRL_HAS_SIGNALING
     html += navCard("/signaling", "signalingConfig", "Signaling / CTCSS");
+#endif
     html += navCard("/fmo", "fmoConfig", "FMO");
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
     html += navCard("/sensors", "sensorStatus", "Sensors");

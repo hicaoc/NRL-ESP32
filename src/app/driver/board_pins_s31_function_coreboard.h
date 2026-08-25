@@ -59,6 +59,7 @@
 #define NRL_PIN_I2S_DOUT        56
 
 #define NRL_HAS_DISPLAY         0
+#define NRL_HAS_SIGNALING       0
 #define NRL_HAS_BATTERY_ADC     0
 
 #endif // DRIVER_BOARD_PINS_S31_FUNCTION_COREBOARD_H

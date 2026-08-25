@@ -30,6 +30,7 @@
 #define NRL_HAS_SDCARD          0
 #define NRL_HAS_USB_HOST        0
 #define NRL_HAS_DISPLAY         0
+#define NRL_HAS_SIGNALING       0
 #define NRL_HAS_BATTERY_ADC     0
 
 // I2C bus.

@@ -44,4 +44,11 @@
 #error "Unknown NRL_BOARD: select a supported NRL_BOARD_* value"
 #endif
 
+// CTCSS/CW/MDC1200/DTMF signaling is only built on display-equipped boards.
+// Board pin headers define NRL_HAS_SIGNALING 0 to compile the service out;
+// everything else keeps the feature.
+#ifndef NRL_HAS_SIGNALING
+#define NRL_HAS_SIGNALING 1
+#endif
+
 #endif // DRIVER_BOARD_PINS_H

@@ -25,6 +25,10 @@ set(app_sources
     services/fmo_frame.cpp
     services/fmo_protocol.cpp
     services/fmo_service.cpp
+    services/fmo_station_broadcast.cpp
+    services/fmo_station_broadcast_core.cpp
+    services/fmo_qso.cpp
+    services/fmo_qso_core.cpp
     services/lan_discovery.cpp
     services/map_tiles.cpp
     services/music_player.cpp
@@ -156,7 +160,6 @@ set(app_priv_requires
     espressif__mqtt
     joltwallet__littlefs
     mbedtls
-    mdc1200
     esp_lcd
     esp_netif
     esp_ringbuf
@@ -186,6 +189,21 @@ endif()
 # ESP-IDF's early requirement scan pull the display BSP into every S31 build.
 # SMB network playback is available on every board.
 list(APPEND app_priv_requires sahlberg__libsmb2 vfs)
+
+# CTCSS/CW/MDC1200/DTMF signaling is only built on display-equipped boards.
+# No-screen boards compile the no-op stub headers (NRL_HAS_SIGNALING=0 in
+# board_pins.h) and skip the decoder services and the mdc1200 component.
+if(NRL_BOARD_ID STREQUAL "NRL_BOARD_BH4TDV" OR
+   NRL_BOARD_ID STREQUAL "NRL_BOARD_S31_FUNCTION_COREBOARD")
+    list(REMOVE_ITEM app_sources
+        services/cw_service.cpp
+        services/signaling_service.cpp
+        lib/ctcss_decoder.cpp
+        lib/cw_codec.cpp
+        lib/dtmf_codec.cpp)
+else()
+    list(APPEND app_priv_requires mdc1200)
+endif()
 
 # USB flash drive and the S31-only assistant/display dependencies.
 if(IDF_TARGET STREQUAL "esp32s31")
