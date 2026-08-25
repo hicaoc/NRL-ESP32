@@ -531,6 +531,12 @@ void buildBi4umdSettingsContent();
 void buildBi4umdRoomSwitchContent();
 void buildBi4umdDebugContent();
 void buildBi4umdSensorsContent();
+void refreshBi4umdSettingsValues();
+void bi4umdSettingsAdjustMic(const int delta);
+void bi4umdSettingsMicDown(lv_event_t *event);
+void bi4umdSettingsMicUp(lv_event_t *event);
+void bi4umdSettingsVolumeDown(lv_event_t *event);
+void bi4umdSettingsVolumeUp(lv_event_t *event);
 void refreshBi4umdSensors();
 void refreshBi4umdMusic();
 void rebuildBi4umdMusicList();
@@ -1316,6 +1322,47 @@ void refreshBi4umdRoomSwitch()
     buildBi4umdSettingsContent();
 }
 
+void refreshBi4umdSettingsValues()
+{
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    if (cfg == nullptr) return;
+    char text[12] = {};
+    if (s_lbl_settings_mic != nullptr) {
+        snprintf(text, sizeof(text), "%u", static_cast<unsigned>(cfg->mic_volume));
+        lv_label_set_text(s_lbl_settings_mic, text);
+    }
+    if (s_lbl_settings_volume != nullptr) {
+        snprintf(text, sizeof(text), "%u", static_cast<unsigned>(cfg->line_out_volume));
+        lv_label_set_text(s_lbl_settings_volume, text);
+    }
+}
+
+void bi4umdSettingsAdjustMic(const int delta)
+{
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    if (cfg == nullptr) return;
+    int value = static_cast<int>(cfg->mic_volume) + delta;
+    if (value < 0) value = 0;
+    if (value > 255) value = 255;
+    if (value != static_cast<int>(cfg->mic_volume)) {
+        EXTERNAL_RADIO_SetMicVolume(static_cast<uint8_t>(value), true);
+        refreshBi4umdSettingsValues();
+    }
+}
+
+void bi4umdSettingsMicDown(lv_event_t *) { bi4umdSettingsAdjustMic(-16); }
+void bi4umdSettingsMicUp(lv_event_t *) { bi4umdSettingsAdjustMic(16); }
+void bi4umdSettingsVolumeDown(lv_event_t *)
+{
+    bi4umdMusicAdjustVolume(-16);
+    refreshBi4umdSettingsValues();
+}
+void bi4umdSettingsVolumeUp(lv_event_t *)
+{
+    bi4umdMusicAdjustVolume(16);
+    refreshBi4umdSettingsValues();
+}
+
 void refreshBi4umdSensors()
 {
     if (s_lbl_sensors == nullptr) return;
@@ -1867,7 +1914,7 @@ void menuStatusFooter(lv_obj_t *scr, const char *default_text)
     }
 }
 
-#if NRL_BOARD != NRL_BOARD_BI4UMD
+#if !NRL_BOARD_IS_BI4UMD_FAMILY
 size_t menuWindowStart(const size_t item_count, const size_t visible_count)
 {
     if (item_count <= visible_count || s_menu_index < visible_count) return 0u;
@@ -3929,7 +3976,7 @@ void buildBi4umdSettingsContent()
     };
     nav_button(8, kContentHeight - 48, 72,
                menuText("MAIN MENU", "主菜单"), bi4umdOpenMainMenu);
-    nav_button(8, 22, 72, menuText("MAP", "地图"), bi4umdOpenMapPage);
+    nav_button(8, 22, 72, menuText("DEBUG", "调试"), bi4umdShowDebugPage);
     nav_button(86, 22, 54, "GPS", bi4umdOpenGpsPage);
     nav_button(146, 22, 86,
                menuText("APRS RX", "APRS接收"), bi4umdOpenAprsListPage);
@@ -3969,6 +4016,81 @@ void buildBi4umdSettingsContent()
     lv_obj_t *home_label = makeLabel(home, &lv_font_montserrat_16, kColorCallIdle);
     lv_label_set_text(home_label, LV_SYMBOL_HOME);
     lv_obj_center(home_label);
+}
+
+void buildBi4umdDebugContent()
+{
+    lv_obj_t *content = prepareContent();
+
+    lv_obj_t *back = lv_button_create(content);
+    lv_obj_set_pos(back, 8, 22);
+    lv_obj_set_size(back, 40, 40);
+    lv_obj_set_style_radius(back, 6, 0);
+    lv_obj_set_style_bg_color(back, lv_color_hex(0x10212A), 0);
+    lv_obj_set_style_bg_color(back, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(back, lv_color_hex(0x1C6B73), 0);
+    lv_obj_set_style_border_width(back, 1, 0);
+    lv_obj_add_event_cb(back, bi4umdShowSettingsPage, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *back_label = makeLabel(back, &lv_font_montserrat_16, kColorCallIdle);
+    lv_label_set_text(back_label, LV_SYMBOL_LEFT);
+    lv_obj_center(back_label);
+
+    auto square_button = [content](int x, int y, const char *text, lv_event_cb_t callback) {
+        lv_obj_t *button = lv_button_create(content);
+        lv_obj_set_pos(button, x, y);
+        lv_obj_set_size(button, 40, 38);
+        lv_obj_set_style_radius(button, 6, 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x10212A), 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(button, lv_color_hex(0x1C6B73), 0);
+        lv_obj_set_style_border_width(button, 1, 0);
+        lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *label = makeLabel(button, &lv_font_montserrat_16, kColorCallIdle);
+        lv_label_set_text(label, text);
+        lv_obj_center(label);
+    };
+
+    lv_obj_t *mic_name = makeLabel(content, &s_font_aprs_16, kColorSub);
+    lv_obj_set_pos(mic_name, 12, 88);
+    lv_label_set_text(mic_name, menuText("MIC", "麦克风"));
+    square_button(88, 78, LV_SYMBOL_MINUS, bi4umdSettingsMicDown);
+    s_lbl_settings_mic = makeLabel(content, &lv_font_montserrat_16, kColorCallIdle);
+    lv_obj_set_width(s_lbl_settings_mic, 44);
+    lv_obj_set_style_text_align(s_lbl_settings_mic, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_lbl_settings_mic, 132, 88);
+    square_button(184, 78, LV_SYMBOL_PLUS, bi4umdSettingsMicUp);
+
+    lv_obj_t *volume_name = makeLabel(content, &s_font_aprs_16, kColorSub);
+    lv_obj_set_pos(volume_name, 12, 142);
+    lv_label_set_text(volume_name, menuText("VOLUME", "音量"));
+    square_button(88, 132, LV_SYMBOL_MINUS, bi4umdSettingsVolumeDown);
+    s_lbl_settings_volume = makeLabel(content, &lv_font_montserrat_16, kColorCallIdle);
+    lv_obj_set_width(s_lbl_settings_volume, 44);
+    lv_obj_set_style_text_align(s_lbl_settings_volume, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_lbl_settings_volume, 132, 142);
+    square_button(184, 132, LV_SYMBOL_PLUS, bi4umdSettingsVolumeUp);
+
+    lv_obj_t *ptt = lv_button_create(content);
+    lv_obj_remove_style_all(ptt);
+    lv_obj_set_pos(ptt, 60, 194);
+    lv_obj_set_size(ptt, 120, 44);
+    lv_obj_set_style_radius(ptt, 6, 0);
+    lv_obj_set_style_bg_color(ptt, lv_color_hex(0x142033), 0);
+    lv_obj_set_style_bg_color(ptt, lv_color_hex(0x8B1E2D), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(ptt, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(ptt, lv_color_hex(kColorTx), 0);
+    lv_obj_set_style_border_color(ptt, lv_color_hex(0xFF3030), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(ptt, 0, 0);
+    lv_obj_set_style_outline_width(ptt, 0, 0);
+    lv_obj_set_style_shadow_width(ptt, 0, 0);
+    lv_obj_add_event_cb(ptt, bi4umdPttEvent, LV_EVENT_PRESSED, nullptr);
+    lv_obj_add_event_cb(ptt, bi4umdPttEvent, LV_EVENT_RELEASED, nullptr);
+    lv_obj_add_event_cb(ptt, bi4umdPttEvent, LV_EVENT_PRESS_LOST, nullptr);
+    lv_obj_t *ptt_label = makeLabel(ptt, &lv_font_montserrat_20, kColorCallIdle);
+    lv_label_set_text(ptt_label, "PTT");
+    lv_obj_center(ptt_label);
+
+    refreshBi4umdSettingsValues();
 }
 #endif
 
