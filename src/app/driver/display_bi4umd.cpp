@@ -7,10 +7,12 @@
 #include <driver/gpio.h>
 #include <driver/spi_master.h>
 #include <esp_err.h>
+#include <esp_log.h>
 #include <esp_rom_sys.h>
 
 namespace {
 
+constexpr const char *TAG = "LCD_BI4UMD";
 constexpr int kDrawBufferLines = 60;
 constexpr uint8_t kCmdSwReset = 0x01;
 constexpr uint8_t kCmdColumnAddress = 0x2A;
@@ -60,7 +62,10 @@ bool BI4UMD_Display_Init(esp_lcd_panel_io_handle_t *panel_io)
     gpio_config_t backlight_config = {};
     backlight_config.pin_bit_mask = 1ULL << NRL_PIN_DISPLAY_BL;
     backlight_config.mode = GPIO_MODE_OUTPUT;
-    if (gpio_config(&backlight_config) != ESP_OK) {
+    esp_err_t error = gpio_config(&backlight_config);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "backlight GPIO%d setup failed: %s (0x%x)",
+                 NRL_PIN_DISPLAY_BL, esp_err_to_name(error), error);
         return false;
     }
     BI4UMD_Display_SetBacklight(false);
@@ -73,7 +78,10 @@ bool BI4UMD_Display_Init(esp_lcd_panel_io_handle_t *panel_io)
     bus_config.quadhd_io_num = -1;
     bus_config.max_transfer_sz =
         NRL_DISPLAY_WIDTH * kDrawBufferLines * static_cast<int>(sizeof(uint16_t));
-    if (spi_bus_initialize(SPI3_HOST, &bus_config, SPI_DMA_CH_AUTO) != ESP_OK) {
+    error = spi_bus_initialize(SPI3_HOST, &bus_config, SPI_DMA_CH_AUTO);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "SPI3 bus init failed: %s (0x%x)",
+                 esp_err_to_name(error), error);
         return false;
     }
 
@@ -88,17 +96,29 @@ bool BI4UMD_Display_Init(esp_lcd_panel_io_handle_t *panel_io)
     // The LVGL render buffer lives in PSRAM: DMA straight from it instead of
     // bounce-copying every flush through an internal temporary buffer.
     io_config.flags.psram_dma_direct = 1;
-    if (esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, panel_io) != ESP_OK) {
+    error = esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, panel_io);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "panel IO init failed: %s (0x%x)",
+                 esp_err_to_name(error), error);
+        (void)spi_bus_free(SPI3_HOST);
         return false;
     }
 
     if (!txParameter(*panel_io, kCmdSwReset, nullptr, 0)) {
+        ESP_LOGE(TAG, "ILI9341 software reset command failed");
+        (void)esp_lcd_panel_io_del(*panel_io);
+        *panel_io = nullptr;
+        (void)spi_bus_free(SPI3_HOST);
         return false;
     }
     esp_rom_delay_us(120000);
     for (const InitCommand &step : kInitCommands) {
         const uint8_t *data = step.data_length > 0 ? step.data : nullptr;
         if (!txParameter(*panel_io, step.command, data, step.data_length)) {
+            ESP_LOGE(TAG, "ILI9341 init command 0x%02X failed", step.command);
+            (void)esp_lcd_panel_io_del(*panel_io);
+            *panel_io = nullptr;
+            (void)spi_bus_free(SPI3_HOST);
             return false;
         }
         if (step.delay_ms > 0) {

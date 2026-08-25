@@ -7522,6 +7522,8 @@ extern "C" void Display_Init(void)
     ESP_LOGI(TAG, "display ready");
 }
 
+extern "C" bool Display_IsReady(void) { return s_ready; }
+
 extern "C" void Display_SetProvisioningMode(bool enabled)
 {
     if (s_provisioning_mode == enabled) {

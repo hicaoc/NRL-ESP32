@@ -293,7 +293,10 @@ static void initDisplay()
     }
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && !(defined(NRL_SKIP_DISPLAY_INIT) && NRL_SKIP_DISPLAY_INIT)
     Display_Init();
-    s_display_started = true;
+    s_display_started = Display_IsReady();
+    if (!s_display_started) {
+        ESP_LOGE(TAG, "display initialization failed; it may be retried after memory is released");
+    }
     logDramMark("display");
 #else
     s_display_started = true;
@@ -308,6 +311,20 @@ static bool initFullApp()
 
     initStorageAndMusic();
     initDisplay();
+
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    // Keep first-boot provisioning lean. The sensor task stack and SR-110U
+    // UART buffers previously consumed the last internal DRAM before the SPI
+    // LCD was created, leaving the ILI9341 dark. The PCA9555 safe state is
+    // established in initApp(), so both peripherals can wait until the full
+    // application starts and the display has claimed its DMA resources.
+    if (!ENV_SENSORS_Init()) {
+        ESP_LOGE(TAG, "BH4TDV-RF sensor worker initialization failed.");
+    }
+    if (!SR110U_Init()) {
+        ESP_LOGE(TAG, "SR-110U initialization failed.");
+    }
+#endif
 
     // Bring the audio bridge up BEFORE ES8311_Init. ES8311_Init internally
     // calls AEC_Init which mallocs ~50 KB (WebRtcNs + AFE state) from the
@@ -428,16 +445,8 @@ static void initApp()
     } else {
         (void)BH4TDV_RF_IO_SetGpsPower(true);
     }
-    if (!ENV_SENSORS_Init()) {
-        ESP_LOGE(TAG, "BH4TDV-RF sensor worker initialization failed.");
-    }
 #endif
     EXTERNAL_RADIO_Init();
-#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
-    if (!SR110U_Init()) {
-        ESP_LOGE(TAG, "SR-110U initialization failed.");
-    }
-#endif
     applyPendingAudioConfig();
     if (!nrlEthernetInit()) {
         ESP_LOGE(TAG, "Ethernet initialization failed; Wi-Fi fallback remains available.");

@@ -16,6 +16,10 @@ extern "C" {
 // once from setup(); a failure is logged and leaves Display_Poll() inert.
 void Display_Init(void);
 
+// True only after the panel, LVGL and first frame have all initialized.
+// Callers may use this to retry a failed low-memory initialization later.
+bool Display_IsReady(void);
+
 // Select the lightweight provisioning UI. This may be called before
 // Display_Init(); once the display is ready it rebuilds the active screen.
 // Provisioning mode deliberately avoids polling audio/APRS/storage services

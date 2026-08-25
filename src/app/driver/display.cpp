@@ -5432,6 +5432,8 @@ extern "C" void Display_Init(void)
     ESP_LOGI(TAG,"[LCD] display ready");
 }
 
+extern "C" bool Display_IsReady(void) { return s_ready; }
+
 extern "C" void Display_Poll(void)
 {
     if (!s_ready) {
@@ -5551,6 +5553,7 @@ extern "C" long Display_FramebufferBenchMBps(void) { return -1; }
 #elif NRL_BOARD != NRL_BOARD_S31_KORVO
 
 extern "C" void Display_Init(void) {}
+extern "C" bool Display_IsReady(void) { return false; }
 extern "C" void Display_Poll(void) {}
 extern "C" void Display_SetProvisioningMode(bool) {}
 extern "C" void Display_MenuOpen(void) {}
