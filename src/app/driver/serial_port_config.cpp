@@ -46,6 +46,11 @@ void applyDefaults()
     // mapped GPIO44/43 pins so USB Serial/JTAG remains the console.
     s_config.uart1_enabled = false;
     s_config.uart2_enabled = true;
+#elif NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    // SR-110U uses UART1 on GPIO44/43 while the proven UMD GPS uses UART2 on
+    // GPIO2/3. Both ports are fixed board functions and enabled by default.
+    s_config.uart1_enabled = true;
+    s_config.uart2_enabled = true;
 #else
     s_config.uart1_enabled = true;
     s_config.uart2_enabled = true;
@@ -124,7 +129,7 @@ extern "C" bool SERIAL_PORT_CONFIG_IsAllowedPin(const int gpio)
         default:
             return false;
     }
-#elif NRL_BOARD == NRL_BOARD_BI4UMD
+#elif NRL_BOARD_IS_BI4UMD_FAMILY
     switch (gpio) {
         case 2: case 3: case 19: case 20: case 22: case 23: case 24: case 25:
         case 33: case 34: case 35: case 36: case 37: case 43: case 44:

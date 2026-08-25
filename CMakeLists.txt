@@ -152,7 +152,8 @@ endif()
 # allocators so PNG inflate/conversion scratch never consumes internal RAM.
 # The final lv_draw_buf allocation is forced through a PSRAM image handler in
 # map_tiles.cpp as well.
-if(NRL_BOARD_ID STREQUAL "NRL_BOARD_BI4UMD" AND
+if((NRL_BOARD_ID STREQUAL "NRL_BOARD_BI4UMD" OR
+    NRL_BOARD_ID STREQUAL "NRL_BOARD_BH4TDV_RF") AND
    EXISTS "${CMAKE_CURRENT_LIST_DIR}/components/lvgl/lvgl.h")
     idf_component_get_property(lvgl_lib lvgl COMPONENT_LIB)
     if(lvgl_lib)

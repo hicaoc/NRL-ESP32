@@ -26,6 +26,7 @@ CHIP_FAMILY = {
     "gezipai": "ESP32-S3",
     "gezipai_4g": "ESP32-S3",
     "bi4umd": "ESP32-S3",
+    "bh4tdv_rf": "ESP32-S3",
     "bh4tdv": "ESP32-S3",
     "s31_korvo": "ESP32-S31",
     "s31_function_coreboard": "ESP32-S31",

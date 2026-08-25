@@ -35,6 +35,16 @@ void Display_MenuOpen(void);
 bool Display_MenuIsActive(void);
 void Display_MenuNavigate(int direction);
 void Display_MenuConfirm(void);
+enum DisplayHardwareKey {
+    DISPLAY_HW_KEY_UP = 0,
+    DISPLAY_HW_KEY_DOWN,
+    DISPLAY_HW_KEY_CONFIRM,
+    DISPLAY_HW_KEY_SOFT_LEFT,
+    DISPLAY_HW_KEY_SOFT_RIGHT,
+};
+// Thread-safe event injection from board-key polling. LVGL consumes the event
+// later from Display_Poll() in the display task.
+void Display_HardwareKeyPress(enum DisplayHardwareKey key);
 bool Display_CwIsActive(void);
 void Display_CwExit(void);
 

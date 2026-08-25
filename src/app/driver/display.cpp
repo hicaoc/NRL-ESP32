@@ -32,7 +32,7 @@
 
 #include "board_pins.h"
 #include "i2c1.h"
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
 #include "display_bi4umd.h"
 #include "touch_bi4umd.h"
 #endif
@@ -64,6 +64,7 @@
 #include "serial_port_config.h"
 #include "fonts/lv_font_cjk.h"
 #include "status_io.h"
+#include "environment_sensors.h"
 
 #include "../../lib/nrl_net_compat.h"
 
@@ -140,7 +141,7 @@ constexpr uint32_t kColorFmo      = 0xF5B453;  // FMO caller / link
 // APRS packets may contain Chinese comments. Keep the normal Latin UI font,
 // but fall back to the bundled 16px GB2312 font for the ticker only.
 lv_font_t s_font_aprs_16;
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
 lv_font_t s_font_music_20;
 constexpr size_t kBi4umdMusicListMaxRows = 48u;
 #endif
@@ -172,7 +173,7 @@ NRL_PSRAM_BSS uint8_t s_rgb_draw_buffer[kWidth * kBufLines * 2u];
 esp_lcd_touch_handle_t s_touch = nullptr;
 esp_lcd_panel_io_handle_t s_touch_io = nullptr;
 lv_indev_t *s_touch_indev = nullptr;
-#elif NRL_BOARD == NRL_BOARD_BI4UMD
+#elif NRL_BOARD_IS_BI4UMD_FAMILY
 lv_indev_t *s_touch_indev = nullptr;
 uint8_t s_bi4umd_touch_count = 0u;
 uint16_t s_bi4umd_touch_x[2] = {};
@@ -201,8 +202,8 @@ lv_obj_t *s_vol_slider_mic = nullptr;
 lv_obj_t *s_vol_lbl_spk_val = nullptr;
 lv_obj_t *s_vol_lbl_mic_val = nullptr;
 bool s_vol_panel_open = false;
-#if NRL_BOARD == NRL_BOARD_BI4UMD
-enum class Bi4umdPage : uint8_t { Radio, Music, MusicList, Settings, RoomSwitch };
+#if NRL_BOARD_IS_BI4UMD_FAMILY
+enum class Bi4umdPage : uint8_t { Radio, Music, MusicList, Settings, RoomSwitch, Debug, Sensors };
 Bi4umdPage s_bi4umd_page = Bi4umdPage::Radio;
 lv_obj_t *s_lbl_music_title = nullptr;
 lv_obj_t *s_lbl_music_artist = nullptr;
@@ -212,9 +213,14 @@ lv_obj_t *s_lbl_music_source = nullptr;
 lv_obj_t *s_list_music = nullptr;
 lv_obj_t *s_btn_music_play_label = nullptr;
 lv_obj_t *s_btn_music_repeat_label = nullptr;
+lv_obj_t *s_lbl_settings_mic = nullptr;
+lv_obj_t *s_lbl_settings_volume = nullptr;
+lv_obj_t *s_lbl_sensors = nullptr;
+char s_shown_sensors[256] = {};
 char s_shown_music_path[256] = {};
 bool s_shown_music_playing = false;
 size_t s_music_tap_index = SIZE_MAX;
+size_t s_music_hw_index = 0u;
 uint32_t s_music_tap_ms = 0u;
 lv_obj_t *s_music_tap_row = nullptr;
 bool s_bi4umd_aprs_from_settings = false;
@@ -376,6 +382,7 @@ volatile bool s_menu_active = false;
 volatile bool s_menu_open_requested = false;
 volatile int s_menu_nav_pending = 0;
 volatile unsigned s_menu_confirm_pending = 0u;
+volatile uint32_t s_hw_key_pending = 0u;
 volatile bool s_cw_exit_requested = false;
 // bi4umd map page touch EXIT; same deferred-teardown pattern as the CW exit
 // (rebuilding inside the button's own CLICKED event would free the pressed
@@ -495,6 +502,8 @@ uint32_t s_radio_name_refresh_ms = 0u;
 
 void refreshVolume();
 lv_obj_t *makeLabel(lv_obj_t *parent, const lv_font_t *font, uint32_t color);
+lv_obj_t *prepareContent();
+bool setLabel(lv_obj_t *label, char *cache, size_t cache_size, const char *text);
 void buildUi();
 void buildProvisioningUi();
 
@@ -511,16 +520,18 @@ void onVolumePanelBtnSpkUp(lv_event_t *event);
 void onVolumePanelBtnMicDown(lv_event_t *event);
 void onVolumePanelBtnMicUp(lv_event_t *event);
 void refreshVolumePanelValues();
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
 void menuTouchPressed(lv_event_t *event);
 void menuTouchReleased(lv_event_t *event);
 #endif
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
 void buildBi4umdMusicContent();
 void buildBi4umdMusicListContent();
 void buildBi4umdSettingsContent();
 void buildBi4umdRoomSwitchContent();
-lv_obj_t *prepareContent();
+void buildBi4umdDebugContent();
+void buildBi4umdSensorsContent();
+void refreshBi4umdSensors();
 void refreshBi4umdMusic();
 void rebuildBi4umdMusicList();
 #endif
@@ -547,7 +558,7 @@ NrlOtaStatus *otaUiSnapshot()
 
 bool initPanel()
 {
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     if (!BI4UMD_Display_Init(&s_panel_io)) {
         ESP_LOGI(TAG,"[LCD] BI4UMD ILI9341V init failed");
         return false;
@@ -684,7 +695,7 @@ bool onColorTransDone(esp_lcd_panel_io_handle_t /*io*/,
 // RGB565, LVGL renders little-endian) and DMA it to the panel.
 void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     const int32_t count = (area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1);
     if (!BI4UMD_Display_Flush(s_panel_io, area->x1, area->y1,
                               area->x2, area->y2, px_map,
@@ -762,7 +773,7 @@ bool initLvgl()
     return true;
 }
 
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
 void bi4umdTouchRead(lv_indev_t *, lv_indev_data_t *data)
 {
     s_bi4umd_touch_count = BI4UMD_Touch_ReadPoints(
@@ -846,6 +857,8 @@ void bi4umdShowMusicPage(lv_event_t *)
 
 void bi4umdShowMusicListPage(lv_event_t *)
 {
+    const int current = PLAYLIST_CurrentIndex();
+    s_music_hw_index = current >= 0 ? static_cast<size_t>(current) : 0u;
     s_bi4umd_page = Bi4umdPage::MusicList;
     buildBi4umdMusicListContent();
 }
@@ -855,6 +868,20 @@ void bi4umdShowSettingsPage(lv_event_t *)
     STATUS_IO_SetSoftPtt(false);
     s_bi4umd_page = Bi4umdPage::Settings;
     buildBi4umdSettingsContent();
+}
+
+void bi4umdShowDebugPage(lv_event_t *)
+{
+    STATUS_IO_SetSoftPtt(false);
+    s_bi4umd_page = Bi4umdPage::Debug;
+    buildBi4umdDebugContent();
+}
+
+void bi4umdShowSensorsPage(lv_event_t *)
+{
+    STATUS_IO_SetSoftPtt(false);
+    s_bi4umd_page = Bi4umdPage::Sensors;
+    buildBi4umdSensorsContent();
 }
 
 void bi4umdOpenMainMenu(lv_event_t *)
@@ -926,8 +953,11 @@ void bi4umdGpsToggleEnabled(lv_event_t *)
 
 void addBi4umdMenuButtons()
 {
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     if (s_content == nullptr) return;
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    return;
+#endif
     if (s_menu_page == MenuPage::Cw) return;
     // The map page is fully touch-driven (drag + zoom/EXIT buttons).
     if (s_menu_page == MenuPage::Map) return;
@@ -950,7 +980,7 @@ void addBi4umdMenuButtons()
         lv_label_set_text(label, text);
         lv_obj_center(label);
     };
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     if (s_menu_page == MenuPage::AprsList) {
         menu_button(kWidth - 48, LV_SYMBOL_LEFT, bi4umdMenuConfirm, 40, 40);
         return;
@@ -1285,6 +1315,66 @@ void refreshBi4umdRoomSwitch()
     (void)NRLAudioBridge_JoinRoom(rooms[next].id);
     buildBi4umdSettingsContent();
 }
+
+void refreshBi4umdSensors()
+{
+    if (s_lbl_sensors == nullptr) return;
+    EnvironmentSensorSnapshot sensor = {};
+    (void)ENV_SENSORS_GetSnapshot(&sensor);
+    char text[sizeof(s_shown_sensors)] = {};
+    char temp[20] = "--";
+    char pressure[24] = "--";
+    char lux[24] = "--";
+    char heading[24] = "--";
+    char magnetic[64] = "-- / -- / -- uT";
+    if (sensor.bmp280_valid) {
+        snprintf(temp, sizeof(temp), "%.1f C", sensor.temperature_c);
+        snprintf(pressure, sizeof(pressure), "%.1f hPa", sensor.pressure_hpa);
+    }
+    if (sensor.bh1750_valid) snprintf(lux, sizeof(lux), "%.1f lx", sensor.illuminance_lux);
+    if (sensor.qmc5883l_valid) {
+        snprintf(heading, sizeof(heading), "%.1f deg (UNCAL)", sensor.heading_deg);
+        snprintf(magnetic, sizeof(magnetic), "%.1f / %.1f / %.1f uT",
+                 sensor.magnetic_x_ut, sensor.magnetic_y_ut, sensor.magnetic_z_ut);
+    }
+    snprintf(text, sizeof(text),
+             "TEMP   %s\nPRESS  %s\nHUM    AHT20 ADDR CONFLICT\nLIGHT  %s\nHEAD   %s\nMAG    %s",
+             temp, pressure, lux, heading, magnetic);
+    setLabel(s_lbl_sensors, s_shown_sensors, sizeof(s_shown_sensors), text);
+}
+
+void buildBi4umdSensorsContent()
+{
+    lv_obj_t *content = prepareContent();
+    lv_obj_t *heading = makeLabel(content, &s_font_aprs_16, kColorAccent);
+    lv_obj_set_pos(heading, 54, 8);
+    lv_label_set_text(heading, menuText("SENSORS", "传感器"));
+
+    lv_obj_t *back = lv_button_create(content);
+    lv_obj_set_pos(back, 8, 4);
+    lv_obj_set_size(back, 40, 36);
+    lv_obj_set_style_radius(back, 6, 0);
+    lv_obj_add_event_cb(back, bi4umdShowSettingsPage, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *back_label = makeLabel(back, &lv_font_montserrat_16, kColorCallIdle);
+    lv_label_set_text(back_label, LV_SYMBOL_LEFT);
+    lv_obj_center(back_label);
+
+    lv_obj_t *home = lv_button_create(content);
+    lv_obj_set_pos(home, kWidth - 48, 4);
+    lv_obj_set_size(home, 40, 36);
+    lv_obj_set_style_radius(home, 6, 0);
+    lv_obj_add_event_cb(home, bi4umdShowRadioPage, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *home_label = makeLabel(home, &lv_font_montserrat_16, kColorCallIdle);
+    lv_label_set_text(home_label, LV_SYMBOL_HOME);
+    lv_obj_center(home_label);
+
+    s_lbl_sensors = makeLabel(content, &lv_font_montserrat_16, kColorCallIdle);
+    lv_obj_set_pos(s_lbl_sensors, 12, 48);
+    lv_obj_set_width(s_lbl_sensors, kWidth - 24);
+    lv_obj_set_style_text_line_space(s_lbl_sensors, 7, 0);
+    s_shown_sensors[0] = '\0';
+    refreshBi4umdSensors();
+}
 #endif
 
 #if NRL_DISPLAY_BUS_RGB
@@ -1523,7 +1613,7 @@ void resetCenterWidgets()
     s_shown_media = false;
     s_lbl_signaling = nullptr;
     s_shown_signaling[0] = '\0';
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     s_lbl_music_title = nullptr;
     s_lbl_music_artist = nullptr;
     s_lbl_music_state = nullptr;
@@ -1532,6 +1622,10 @@ void resetCenterWidgets()
     s_list_music = nullptr;
     s_btn_music_play_label = nullptr;
     s_btn_music_repeat_label = nullptr;
+    s_lbl_settings_mic = nullptr;
+    s_lbl_settings_volume = nullptr;
+    s_lbl_sensors = nullptr;
+    s_shown_sensors[0] = '\0';
     s_sstv_rx_image = nullptr;
     s_sstv_rx_status = nullptr;
     s_sstv_rx_status_cache[0] = '\0';
@@ -1597,7 +1691,7 @@ lv_obj_t *prepareContent()
         lv_obj_set_style_bg_color(s_content, lv_color_hex(kColorBg), 0);
         lv_obj_set_style_bg_opa(s_content, LV_OPA_COVER, 0);
         lv_obj_remove_flag(s_content, LV_OBJ_FLAG_SCROLLABLE);
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
         lv_obj_add_flag(s_content, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(s_content, menuTouchPressed, LV_EVENT_PRESSED, nullptr);
         lv_obj_add_event_cb(s_content, menuTouchReleased, LV_EVENT_RELEASED, nullptr);
@@ -1609,7 +1703,7 @@ lv_obj_t *prepareContent()
     return s_content;
 }
 
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
 struct MenuRowInfo { int y; int item_index; };
 constexpr size_t kMaxMenuRows = 12;
 MenuRowInfo s_menu_rows[kMaxMenuRows];
@@ -1724,7 +1818,7 @@ void menuRow(lv_obj_t *scr, int y, const char *text, bool selected,
     lv_obj_set_style_border_width(row, selected ? 1 : 0, 0);
     lv_obj_set_style_radius(row, 4, 0);
     lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE);
     if (item_index >= 0 && s_menu_row_count < kMaxMenuRows) {
         s_menu_rows[s_menu_row_count].y = y;
@@ -1849,7 +1943,7 @@ void buildMainMenu()
             case MainMenuAction::About: items[i] = menuText("ABOUT", "关于"); break;
             case MainMenuAction::Map: items[i] = menuText("MAP", "地图"); break;
             case MainMenuAction::Sstv:
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
                 items[i] = "SSTV";
 #else
                 items[i] = "SSTV RX";
@@ -1858,7 +1952,7 @@ void buildMainMenu()
         }
     }
     constexpr size_t kItemCount = kMainMenuActionCount;
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     buildBi4umdScrollableMenu(scr, items, kItemCount);
 #else
 #if NRL_BOARD == NRL_BOARD_GEZIPAI
@@ -1873,7 +1967,7 @@ void buildMainMenu()
                 nullptr, static_cast<int>(i));
     }
 #if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_GEZIPAI_4G || \
-    NRL_BOARD == NRL_BOARD_BI4UMD
+    NRL_BOARD_IS_BI4UMD_FAMILY
     menuScrollBar(scr, kItemCount, kVisibleRows, start);
 #endif
 #endif
@@ -1942,7 +2036,7 @@ void buildOtaMenu()
         return;
     }
     if (s_menu_index > ota->release_count) s_menu_index = 0u;
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     const bool scroll_releases = !ota->checking && !s_menu_ota_requested &&
                                  !ota->updating && ota->release_count > 0u;
     if (!scroll_releases) {
@@ -1990,7 +2084,7 @@ void buildOtaMenu()
         lv_label_set_text(lbl, ota->last_error[0] ? ota->last_error
                                                   : menuText("NO VERSIONS FOUND", "未找到版本"));
     } else {
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
         char version_lines[NRL_OTA_RELEASE_MAX][48] = {};
         const char *items[NRL_OTA_RELEASE_MAX + 1u] = {};
         items[0] = menuText("< BACK / OTA", "< 返回 / OTA");
@@ -2070,7 +2164,7 @@ void buildAprsSettingsMenu()
     AprsConfig cfg{};
     APRS_SERVICE_GetConfig(&cfg);
     constexpr size_t kItemCount = 17u;
-#if NRL_BOARD != NRL_BOARD_BI4UMD
+#if !NRL_BOARD_IS_BI4UMD_FAMILY
     constexpr size_t kVisibleRows = 5u;
     const size_t start = menuWindowStart(kItemCount, kVisibleRows);
     const size_t end = (start + kVisibleRows < kItemCount) ? start + kVisibleRows : kItemCount;
@@ -2090,7 +2184,7 @@ void buildAprsSettingsMenu()
                            cfg.fwd[APRS_FWD_IS_TO_RF], cfg.fwd[APRS_FWD_NRL_TO_IS],
                            cfg.fwd[APRS_FWD_IS_TO_NRL], cfg.fwd[APRS_FWD_RF_TO_NRL],
                            cfg.fwd[APRS_FWD_NRL_TO_RF]};
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     char lines[kItemCount][48] = {};
     const char *items[kItemCount] = {};
     for (size_t item = 0; item < kItemCount; ++item) {
@@ -2178,7 +2272,7 @@ void buildAprsListMenu()
                  s.name, dist, s.via_rf ? "RF" : "IS", age);
         menuRow(scr, 25 + static_cast<int>(i) * 22, line, false);
     }
-#if NRL_BOARD != NRL_BOARD_BI4UMD
+#if !NRL_BOARD_IS_BI4UMD_FAMILY
     // bi4umd draws a touch BACK button over the footer area instead.
     menuFooter(scr, menuText("PTT BACK", "PTT返回"));
 #endif
@@ -2267,7 +2361,7 @@ void buildGpsInfoMenu()
                  nmea_age, static_cast<unsigned>(gps.satellite_detail_count));
     }
     gpsInfoLine(scr, 133, line, kColorSub);
-#if NRL_BOARD != NRL_BOARD_BI4UMD
+#if !NRL_BOARD_IS_BI4UMD_FAMILY
     // bi4umd draws a touch BACK button over the footer area instead.
     menuFooter(scr, menuText("PTT BACK", "PTT返回"));
 #endif
@@ -2343,7 +2437,7 @@ void buildProtocolMenu(bool mdc)
     menuStatusFooter(scr, footer);
 }
 
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
 // Straight-key touch input: the large key area measures press duration; the
 // service classifies dit/dah and gates the sidetone. PRESS_LOST is treated as
 // release so a UI rebuild can never leave the tone stuck on.
@@ -2476,7 +2570,7 @@ void buildCwMenu()
     lv_obj_t *scr = prepareContent();
     CwSnapshot cw{};
     CW_SERVICE_GetSnapshot(&cw);
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     if (s_cw_show_score) {
         buildCwScoreView(scr, cw);
         return;
@@ -2486,7 +2580,7 @@ void buildCwMenu()
 
     lv_obj_t *title = makeLabel(scr, &lv_font_montserrat_16, kColorAccent);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     // Buttonless board: the PTT long-press exit is unavailable, so the title
     // row carries a touch EXIT button and the title shrinks to make room.
     lv_obj_t *exit_btn = lv_button_create(scr);
@@ -2565,7 +2659,7 @@ void buildCwMenu()
     }
     lv_label_set_text(score, line);
 
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     auto cw_button = [scr](int x, int y, int w, int h, const char *text,
                            lv_event_cb_t callback) {
         lv_obj_t *button = lv_button_create(scr);
@@ -2610,7 +2704,7 @@ void buildCwMenu()
 #endif
 }
 
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
 // ---- map page ---------------------------------------------------------------
 // Slippy-Map viewport fed by MAP_TILES (TF card first, HTTP download
 // otherwise): a kMapCols x kMapRows grid of 256 px lv_image widgets inside a
@@ -3292,7 +3386,7 @@ void buildSstvMenu()
     }
     s_sstv_rev = snap.revision;
 }
-#endif // NRL_BOARD == NRL_BOARD_BI4UMD
+#endif // NRL_BOARD_IS_BI4UMD_FAMILY
 
 #if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_GEZIPAI_4G
 void refreshGezipaiSstvRx()
@@ -3377,7 +3471,7 @@ void buildGezipaiSstvRxMenu()
 
 void buildMenuUi()
 {
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     s_menu_row_count = 0;
 #endif
     if (s_menu_page == MenuPage::Language) buildLanguageMenu();
@@ -3392,7 +3486,7 @@ void buildMenuUi()
     else if (s_menu_page == MenuPage::Mdc) buildProtocolMenu(true);
     else if (s_menu_page == MenuPage::Dtmf) buildProtocolMenu(false);
     else if (s_menu_page == MenuPage::Cw) buildCwMenu();
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     else if (s_menu_page == MenuPage::Map) buildMapMenu();
     else if (s_menu_page == MenuPage::Sstv) {
         if (s_sstv_rx_view) buildBi4umdSstvRxMenu();
@@ -3402,7 +3496,7 @@ void buildMenuUi()
     else if (s_menu_page == MenuPage::Sstv) buildGezipaiSstvRxMenu();
 #endif
     else buildMainMenu();
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     addBi4umdMenuButtons();
 #endif
 }
@@ -3527,7 +3621,7 @@ void buildWideUi()
 }
 #endif
 
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
 lv_obj_t *makeBi4umdMusicButton(lv_obj_t *parent, int x, const char *text,
                                 lv_event_cb_t callback)
 {
@@ -3593,7 +3687,9 @@ void rebuildBi4umdMusicList()
     lv_obj_clean(s_list_music);
 
     const size_t count = PLAYLIST_Count();
+#if NRL_BOARD != NRL_BOARD_BH4TDV_RF
     const int current = PLAYLIST_CurrentIndex();
+#endif
     if (count == 0u) {
         lv_obj_t *empty = makeLabel(s_list_music, &s_font_aprs_16, kColorSub);
         lv_obj_center(empty);
@@ -3601,11 +3697,18 @@ void rebuildBi4umdMusicList()
         return;
     }
 
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    if (s_music_hw_index >= count) s_music_hw_index = count - 1u;
+    const int selected = static_cast<int>(s_music_hw_index);
+#else
+    const int selected = current;
+#endif
+
     const size_t row_count = count < kBi4umdMusicListMaxRows
                                  ? count : kBi4umdMusicListMaxRows;
     size_t start = 0u;
-    if (current >= 0 && count > row_count) {
-        start = static_cast<size_t>(current);
+    if (selected >= 0 && count > row_count) {
+        start = static_cast<size_t>(selected);
         if (start > row_count / 2u) start -= row_count / 2u;
         else start = 0u;
         if (start + row_count > count) start = count - row_count;
@@ -3619,14 +3722,14 @@ void rebuildBi4umdMusicList()
         lv_obj_set_size(row, kWidth - 28, 29);
         lv_obj_set_style_radius(row, 4, 0);
         lv_obj_set_style_bg_color(row,
-                                  lv_color_hex(static_cast<int>(i) == current ? 0x14505A : 0x101A24), 0);
+                                  lv_color_hex(static_cast<int>(i) == selected ? 0x14505A : 0x101A24), 0);
         lv_obj_set_style_bg_color(row, lv_color_hex(0x087A82), LV_STATE_PRESSED);
         lv_obj_set_style_border_width(row, 0, 0);
         lv_obj_add_event_cb(row, bi4umdMusicSelect, LV_EVENT_SHORT_CLICKED,
                             reinterpret_cast<void *>(static_cast<uintptr_t>(i)));
 
         lv_obj_t *label = makeLabel(row, &s_font_aprs_16,
-                                    static_cast<int>(i) == current ? kColorCallIdle : kColorSub);
+                                    static_cast<int>(i) == selected ? kColorCallIdle : kColorSub);
         lv_obj_set_size(label, kWidth - 48, lv_font_get_line_height(&s_font_aprs_16));
         lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
         lv_obj_align(label, LV_ALIGN_LEFT_MID, 4, 0);
@@ -3664,7 +3767,9 @@ void refreshBi4umdMusic()
         lv_label_set_text(s_lbl_music_state, playing ? "PLAYING" : "STOPPED");
         lv_obj_set_style_text_color(s_lbl_music_state,
                                     lv_color_hex(playing ? kColorGood : kColorSub), 0);
-        lv_label_set_text(s_btn_music_play_label, playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+        if (s_btn_music_play_label != nullptr) {
+            lv_label_set_text(s_btn_music_play_label, playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+        }
 
         char source[96] = {};
         if (bi4umdIsRadioPath(path)) {
@@ -3848,6 +3953,9 @@ void buildBi4umdSettingsContent()
     sstv_button(8, menuText("SSTV RX", "SSTV接收"), bi4umdOpenSstvRxPage);
     sstv_button(124, menuText("SSTV TX", "SSTV发射"), bi4umdOpenSstvTxPage);
     nav_button(8, 142, 224, menuText("SERVER SWITCH", "服务器切换"), bi4umdShowRoomSwitch);
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    nav_button(8, 188, 108, menuText("SENSORS", "传感器"), bi4umdShowSensorsPage);
+#endif
 
     lv_obj_t *home = lv_button_create(content);
     lv_obj_set_pos(home, kWidth - 48, kContentHeight - 48);
@@ -3872,7 +3980,7 @@ void buildHomeContent()
     lv_obj_align(s_lbl_caption, LV_ALIGN_TOP_MID, 0, 8);
     lv_label_set_text(s_lbl_caption, menuText("STANDBY", "待机"));
 
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     // BI4UMD: 320px tall, generous spacing with 48px callsign and 28px clock.
     s_lbl_callsign = makeLabel(content, &lv_font_montserrat_48, kColorCallIdle);
     lv_obj_set_width(s_lbl_callsign, kWidth);
@@ -3950,7 +4058,14 @@ void buildHomeContent()
     lv_obj_set_style_bg_color(s_bar_ota, lv_color_hex(kColorTx), LV_PART_INDICATOR);
     lv_obj_add_flag(s_bar_ota, LV_OBJ_FLAG_HIDDEN);
 
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    lv_obj_t *key_hint = makeLabel(content, &lv_font_montserrat_14, kColorCaption);
+    lv_obj_set_width(key_hint, kWidth - 12);
+    lv_obj_set_style_text_align(key_hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(key_hint, LV_ALIGN_BOTTOM_MID, 0, -5);
+    lv_label_set_text(key_hint, "F2 MUSIC   UP/DN VOL   OK MENU   F3 SET");
+#else
     lv_obj_t *music = lv_button_create(content);
     lv_obj_set_pos(music, 8, kContentHeight - 48);
     lv_obj_set_size(music, 40, 40);
@@ -3994,6 +4109,7 @@ void buildHomeContent()
     lv_obj_t *label = makeLabel(ptt, &lv_font_montserrat_20, kColorCallIdle);
     lv_label_set_text(label, "PTT");
     lv_obj_center(label);
+#endif
 #endif
 }
 
@@ -4894,7 +5010,7 @@ void refreshOtaNotice()
     char decoded_signaling[sizeof(s_shown_signaling)] = {};
     SIGNALING_GetLastResult(decoded_signaling, sizeof(decoded_signaling));
     char signaling[sizeof(s_shown_signaling)] = {};
-#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD_IS_BI4UMD_FAMILY
     const uint32_t remote_dmr_id = NRLAudioBridge_GetRemoteDmrId();
     if (remote_dmr_id != 0u) {
         if (decoded_signaling[0] != '\0') {
@@ -4999,7 +5115,7 @@ void refreshOtaNotice()
 
 size_t menuItemCount()
 {
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     if (s_menu_page == MenuPage::Main) return kMainMenuActionCount;
     if (s_menu_page == MenuPage::Map) return 1u;
     if (s_menu_page == MenuPage::Sstv) return 1u;
@@ -5155,7 +5271,7 @@ void confirmMainMenu()
             buildMenuUi();
             break;
         case MainMenuAction::Map:
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
             s_bi4umd_map_from_settings = false;
             s_menu_page = MenuPage::Map;
             s_menu_index = 0u;
@@ -5165,7 +5281,7 @@ void confirmMainMenu()
         case MainMenuAction::Sstv:
             s_menu_page = MenuPage::Sstv;
             s_menu_index = 0u;
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
             s_bi4umd_sstv_from_settings = false;
             s_sstv_rx_view = false;
             sstvScanFiles();
@@ -5210,7 +5326,7 @@ void confirmAprsMenu()
         s_menu_index = 0u;
         buildMenuUi();
     } else if (s_menu_index == 2u) {
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
         s_bi4umd_aprs_from_settings = false;
 #endif
         s_menu_page = MenuPage::AprsList;
@@ -5219,7 +5335,7 @@ void confirmAprsMenu()
         s_menu_aprs_revision = APRS_SERVICE_GetStationRevision();
         buildMenuUi();
     } else if (s_menu_index == 3u) {
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
         s_bi4umd_aprs_from_settings = false;
 #endif
         s_menu_page = MenuPage::AprsGps;
@@ -5235,7 +5351,7 @@ void confirmAprsMenu()
 
 void leaveAprsDetailMenu()
 {
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     if (s_bi4umd_aprs_from_settings) {
         s_bi4umd_aprs_from_settings = false;
         s_menu_active = false;
@@ -5420,20 +5536,118 @@ void confirmOtaMenu()
     buildMenuUi();
 }
 
+void processBh4tdvRfHardwareKeys()
+{
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    const uint32_t pending = __atomic_exchange_n(&s_hw_key_pending, 0u, __ATOMIC_ACQ_REL);
+    if (pending == 0u) return;
+
+    const auto pressed = [pending](const DisplayHardwareKey key) {
+        return (pending & (1u << static_cast<unsigned>(key))) != 0u;
+    };
+
+    if (s_menu_active) {
+        if (pressed(DISPLAY_HW_KEY_UP)) Display_MenuNavigate(+1);
+        if (pressed(DISPLAY_HW_KEY_DOWN)) Display_MenuNavigate(-1);
+        if (pressed(DISPLAY_HW_KEY_CONFIRM)) Display_MenuConfirm();
+        if (pressed(DISPLAY_HW_KEY_SOFT_RIGHT)) {
+            if (s_menu_page == MenuPage::Sstv) (void)SSTV_SERVICE_StopRx();
+            STATUS_IO_SetSoftPtt(false);
+            s_menu_active = false;
+            s_menu_message[0] = '\0';
+            s_bi4umd_page = Bi4umdPage::Radio;
+            buildHomeContent();
+        } else if (pressed(DISPLAY_HW_KEY_SOFT_LEFT)) {
+            if (s_menu_page == MenuPage::Main) {
+                s_menu_active = false;
+                s_menu_message[0] = '\0';
+                s_bi4umd_page = Bi4umdPage::Radio;
+                buildHomeContent();
+            } else if (s_menu_page == MenuPage::Cw) {
+                s_cw_exit_requested = true;
+            } else if (s_menu_page == MenuPage::Map) {
+                s_map_exit_requested = true;
+            } else if (s_menu_page == MenuPage::Sstv) {
+                s_sstv_exit_requested = true;
+            } else if (s_menu_page == MenuPage::AprsList ||
+                       s_menu_page == MenuPage::AprsGps) {
+                leaveAprsDetailMenu();
+            } else {
+                activateMainMenu();
+            }
+        }
+        return;
+    }
+
+    if (s_bi4umd_page == Bi4umdPage::Radio) {
+        if (pressed(DISPLAY_HW_KEY_UP)) bi4umdSettingsVolumeUp(nullptr);
+        if (pressed(DISPLAY_HW_KEY_DOWN)) bi4umdSettingsVolumeDown(nullptr);
+        if (pressed(DISPLAY_HW_KEY_CONFIRM)) bi4umdOpenMainMenu(nullptr);
+        if (pressed(DISPLAY_HW_KEY_SOFT_LEFT)) bi4umdShowMusicPage(nullptr);
+        if (pressed(DISPLAY_HW_KEY_SOFT_RIGHT)) bi4umdShowSettingsPage(nullptr);
+    } else if (s_bi4umd_page == Bi4umdPage::Music) {
+        if (pressed(DISPLAY_HW_KEY_UP)) bi4umdMusicVolumeUp(nullptr);
+        if (pressed(DISPLAY_HW_KEY_DOWN)) bi4umdMusicVolumeDown(nullptr);
+        if (pressed(DISPLAY_HW_KEY_CONFIRM)) bi4umdMusicToggle(nullptr);
+        if (pressed(DISPLAY_HW_KEY_SOFT_LEFT)) bi4umdMusicPrev(nullptr);
+        if (pressed(DISPLAY_HW_KEY_SOFT_RIGHT)) bi4umdMusicNext(nullptr);
+    } else if (s_bi4umd_page == Bi4umdPage::MusicList) {
+        const size_t count = PLAYLIST_Count();
+        if (count > 0u && pressed(DISPLAY_HW_KEY_UP)) {
+            s_music_hw_index = s_music_hw_index == 0u ? count - 1u : s_music_hw_index - 1u;
+            rebuildBi4umdMusicList();
+        }
+        if (count > 0u && pressed(DISPLAY_HW_KEY_DOWN)) {
+            s_music_hw_index = (s_music_hw_index + 1u) % count;
+            rebuildBi4umdMusicList();
+        }
+        if (count > 0u && pressed(DISPLAY_HW_KEY_CONFIRM) &&
+            PLAYLIST_PlayIndex(s_music_hw_index)) {
+            bi4umdShowMusicPage(nullptr);
+        }
+        if (pressed(DISPLAY_HW_KEY_SOFT_LEFT)) bi4umdShowMusicPage(nullptr);
+        if (pressed(DISPLAY_HW_KEY_SOFT_RIGHT)) {
+            (void)bi4umdScanSdMusic();
+            rebuildBi4umdMusicList();
+        }
+    } else if (s_bi4umd_page == Bi4umdPage::Sensors) {
+        if (pressed(DISPLAY_HW_KEY_SOFT_LEFT)) bi4umdShowSettingsPage(nullptr);
+        if (pressed(DISPLAY_HW_KEY_SOFT_RIGHT)) bi4umdShowRadioPage(nullptr);
+    } else if (s_bi4umd_page == Bi4umdPage::Settings) {
+        if (pressed(DISPLAY_HW_KEY_UP)) bi4umdSettingsVolumeUp(nullptr);
+        if (pressed(DISPLAY_HW_KEY_DOWN)) bi4umdSettingsVolumeDown(nullptr);
+        if (pressed(DISPLAY_HW_KEY_CONFIRM) || pressed(DISPLAY_HW_KEY_SOFT_LEFT)) {
+            bi4umdShowSensorsPage(nullptr);
+        }
+        if (pressed(DISPLAY_HW_KEY_SOFT_RIGHT)) bi4umdShowRadioPage(nullptr);
+    } else if (s_bi4umd_page == Bi4umdPage::Debug) {
+        if (pressed(DISPLAY_HW_KEY_SOFT_LEFT)) bi4umdShowSettingsPage(nullptr);
+        if (pressed(DISPLAY_HW_KEY_SOFT_RIGHT)) bi4umdShowRadioPage(nullptr);
+    } else {
+        if (pressed(DISPLAY_HW_KEY_UP)) bi4umdSettingsVolumeUp(nullptr);
+        if (pressed(DISPLAY_HW_KEY_DOWN)) bi4umdSettingsVolumeDown(nullptr);
+        if (pressed(DISPLAY_HW_KEY_CONFIRM)) bi4umdOpenMainMenu(nullptr);
+        if (pressed(DISPLAY_HW_KEY_SOFT_LEFT) || pressed(DISPLAY_HW_KEY_SOFT_RIGHT)) {
+            bi4umdShowRadioPage(nullptr);
+        }
+    }
+#endif
+}
+
 void processMenuInput(uint32_t now)
 {
     if (s_cw_exit_requested) {
         s_cw_exit_requested = false;
         s_menu_active = false;
         s_menu_message[0] = '\0';
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
         s_cw_show_score = false;
         s_bi4umd_page = Bi4umdPage::Radio;
 #endif
         buildHomeContent();
         return;
     }
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     if (s_map_exit_requested) {
         s_map_exit_requested = false;
         s_menu_message[0] = '\0';
@@ -5468,7 +5682,7 @@ void processMenuInput(uint32_t now)
 #endif
     if (s_menu_open_requested) {
         s_menu_open_requested = false;
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
         if (s_menu_page == MenuPage::Sstv) {
             (void)SSTV_SERVICE_StopRx();
             s_sstv_rx_view = false;
@@ -5618,7 +5832,7 @@ void processMenuInput(uint32_t now)
             buildMenuUi();
         }
     }
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     if (s_menu_page == MenuPage::Map) {
         refreshMapMenu();
     }
@@ -5668,7 +5882,7 @@ extern "C" void Display_MenuNavigate(const int direction)
     if (s_menu_page == MenuPage::Map) return;
     // BI4UMD SSTV is touch-driven. Gezipai queues VOL+/- here so the display
     // task can safely switch the MIC/NRL audio-router source.
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     if (s_menu_page == MenuPage::Sstv) return;
 #endif
     int pending = s_menu_nav_pending + (direction > 0 ? 1 : -1);
@@ -5683,6 +5897,12 @@ extern "C" void Display_MenuConfirm(void)
     if (s_menu_active && pending < 4u) {
         s_menu_confirm_pending = pending + 1u;
     }
+}
+
+extern "C" void Display_HardwareKeyPress(const enum DisplayHardwareKey key)
+{
+    if (key < DISPLAY_HW_KEY_UP || key > DISPLAY_HW_KEY_SOFT_RIGHT) return;
+    __atomic_fetch_or(&s_hw_key_pending, 1u << static_cast<unsigned>(key), __ATOMIC_RELEASE);
 }
 
 extern "C" bool Display_CwIsActive(void)
@@ -5710,13 +5930,13 @@ extern "C" void Display_Init(void)
     s_font_aprs_16 = lv_font_montserrat_16;
     s_font_aprs_16.fallback = &lv_font_cjk_16;
     loadMenuLanguage();
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     s_font_music_20 = lv_font_montserrat_20;
     s_font_music_20.fallback = &lv_font_cjk_16;
 #endif
 #if NRL_DISPLAY_BUS_RGB
     initTouch();
-#elif NRL_BOARD == NRL_BOARD_BI4UMD
+#elif NRL_BOARD_IS_BI4UMD_FAMILY
     initBi4umdTouch();
 #endif
 
@@ -5731,7 +5951,7 @@ extern "C" void Display_Init(void)
     }
     lv_refr_now(nullptr);  // paint the first frame before the backlight is lit
 
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     BI4UMD_Display_SetBacklight(true);
 #elif NRL_PIN_DISPLAY_BL >= 0
     gpio_set_level(static_cast<gpio_num_t>(NRL_PIN_DISPLAY_BL), 1);
@@ -5755,6 +5975,7 @@ extern "C" void Display_Poll(void)
         lv_timer_handler();
         return;
     }
+    processBh4tdvRfHardwareKeys();
     processMenuInput(now);
     if (s_last_battery_ms == 0u || (now - s_last_battery_ms) >= kBatteryIntervalMs) {
         s_last_battery_ms = now;
@@ -5776,10 +5997,14 @@ extern "C" void Display_Poll(void)
         return;
     }
 
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     if (s_bi4umd_page != Bi4umdPage::Radio) {
         if (s_bi4umd_page == Bi4umdPage::Music) {
             refreshBi4umdMusic();
+        } else if (s_bi4umd_page == Bi4umdPage::Sensors &&
+                   (s_last_refresh_ms == 0u ||
+                    (now - s_last_refresh_ms) >= kRefreshIntervalMs)) {
+            refreshBi4umdSensors();
         }
         if (s_bi4umd_page == Bi4umdPage::RoomSwitch) {
             refreshBi4umdRoomSwitch();
@@ -5863,6 +6088,7 @@ extern "C" void Display_MenuOpen(void) {}
 extern "C" bool Display_MenuIsActive(void) { return false; }
 extern "C" void Display_MenuNavigate(int) {}
 extern "C" void Display_MenuConfirm(void) {}
+extern "C" void Display_HardwareKeyPress(enum DisplayHardwareKey) {}
 extern "C" bool Display_CwIsActive(void) { return false; }
 extern "C" void Display_CwExit(void) {}
 extern "C" int Display_GetBatteryRawMv(void) { return 0; }

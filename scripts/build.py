@@ -55,6 +55,13 @@ BOARDS = {
         lvgl=True,
         extra=[],
     ),
+    "bh4tdv_rf": dict(
+        target="esp32s3",
+        macro="NRL_BOARD_BH4TDV_RF",
+        sdkconfig=["sdkconfig.bi4umd.defaults"],
+        lvgl=True,
+        extra=[],
+    ),
     "gezipai_4g": dict(
         target="esp32s3",
         macro="NRL_BOARD_GEZIPAI_4G",

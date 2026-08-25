@@ -14,6 +14,8 @@ bool I2C_MasterGetBus(i2c_master_bus_handle_t *out_bus);
 bool I2C_MasterProbe(uint8_t address, int timeout_ms);
 bool I2C_MasterTransmit(uint8_t address, const uint8_t *data, size_t size,
                         int timeout_ms);
+bool I2C_MasterReceive(uint8_t address, uint8_t *data, size_t size,
+                       int timeout_ms);
 bool I2C_MasterTransmitReceive(uint8_t address,
                                const uint8_t *write_data, size_t write_size,
                                uint8_t *read_data, size_t read_size,

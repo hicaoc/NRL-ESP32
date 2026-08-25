@@ -5,7 +5,7 @@
 #include "board_pins.h"
 
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && \
-    (NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD == NRL_BOARD_BI4UMD)
+    (NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD_IS_BI4UMD_FAMILY)
 
 #include "../lib/nrl_psram.h"
 #include "../lib/nrl_net_compat.h"
@@ -73,7 +73,7 @@ static const char *TAG = "MAP_TILES";
 
 namespace {
 
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
 // BI4UMD has substantially less free PSRAM after LVGL/AEC startup. Four
 // tiles (512 KiB) leave room for TLS and the JPEG/PNG decoder's transient
 // buffers; successful tiles are still reused and reloaded on pan.
@@ -94,7 +94,7 @@ constexpr size_t kTaskStackBytes = 8192u;
 
 // Default raster source, {z}/{x}/{y} substituted. Compile-time constant for
 // now; an NVS-backed override is planned (tile packing scripts must match).
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
 // The main .org endpoint is unreachable from some networks used by BI4UMD;
 // the German OSM tile mirror serves the same 256px raster format reliably.
 constexpr char kTileUrlTemplate[] = "https://tile.openstreetmap.de/{z}/{x}/{y}.png";
@@ -106,7 +106,7 @@ constexpr char kTileUserAgent[] = NRL_FIRMWARE_NAME "/" NRL_FIRMWARE_VERSION
 // v2 deliberately ignores files written before policy-block responses were
 // detected; OSM returns those error images with HTTP 200, so older firmware
 // could have cached them as ordinary JPEG tiles.
-#if NRL_BOARD == NRL_BOARD_BI4UMD
+#if NRL_BOARD_IS_BI4UMD_FAMILY
 constexpr char kTileCacheDir[] = "osm_tiles_v3";
 #else
 constexpr char kTileCacheDir[] = "osm_tiles_v2";

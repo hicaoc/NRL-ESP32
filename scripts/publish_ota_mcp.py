@@ -31,12 +31,13 @@ from pathlib import Path
 from typing import Any
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
-BOARDS = ("gezipai", "gezipai_4g", "bi4umd", "bh4tdv", "s31_korvo", "s31_function_coreboard")
+BOARDS = ("gezipai", "gezipai_4g", "bi4umd", "bh4tdv", "bh4tdv_rf", "s31_korvo", "s31_function_coreboard")
 DEFAULT_PUBLISH_BOARDS = (
     "gezipai",
     "gezipai_4g",
     "bi4umd",
     "bh4tdv",
+    "bh4tdv_rf",
     "s31_korvo",
     "s31_function_coreboard",
 )
@@ -212,7 +213,7 @@ def existing_release(
     return next(
         (
             release
-            for release in result.get("releases", [])
+            for release in (result.get("releases") or [])
             if release.get("version") == version
             and release.get("channel") == channel
         ),
