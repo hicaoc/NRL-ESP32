@@ -1,5 +1,7 @@
 #pragma once
 
+#include "driver/board_pins.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -46,6 +48,8 @@ struct CwSnapshot {
     bool sending;
 };
 
+#if defined(NRL_HAS_SIGNALING) && NRL_HAS_SIGNALING
+
 void CW_SERVICE_Init(void);
 void CW_SERVICE_RecordReceived(CwSource source, char character,
                                const char *pattern, uint16_t wpm);
@@ -80,3 +84,35 @@ size_t CW_SERVICE_GetLetterStats(CwLetterStat *out, size_t capacity);
 // The active custom set (empty string when unset).
 void CW_SERVICE_GetCustomCharset(char *out, size_t capacity);
 void CW_SERVICE_GetSnapshot(CwSnapshot *out);
+
+#else
+
+// Boards with NRL_HAS_SIGNALING 0 build without the CW keyer/practice stack;
+// every entry point compiles to a no-op so callers need no board guards.
+inline void CW_SERVICE_Init(void) {}
+inline void CW_SERVICE_RecordReceived(CwSource, char, const char *, uint16_t) {}
+inline void CW_SERVICE_InputElement(CwElement) {}
+inline void CW_SERVICE_KeyDown(void) {}
+inline void CW_SERVICE_KeyUp(void) {}
+inline void CW_SERVICE_PaddleStart(CwElement) {}
+inline void CW_SERVICE_PaddleStop(void) {}
+inline void CW_SERVICE_FinishCharacter(void) {}
+inline void CW_SERVICE_Delete(void) {}
+inline bool CW_SERVICE_Send(void) { return false; }
+inline void CW_SERVICE_Clear(void) {}
+inline void CW_SERVICE_SetPractice(bool) {}
+inline void CW_SERVICE_SetPracticeMode(CwPracticeMode) {}
+inline void CW_SERVICE_ReplayTarget(void) {}
+inline void CW_SERVICE_SetCharset(CwCharset, const char *) {}
+inline void CW_SERVICE_SetAdaptiveWpm(bool) {}
+inline size_t CW_SERVICE_GetLetterStats(CwLetterStat *, size_t) { return 0; }
+inline void CW_SERVICE_GetCustomCharset(char *out, size_t capacity)
+{
+    if (out != nullptr && capacity > 0u) out[0] = '\0';
+}
+inline void CW_SERVICE_GetSnapshot(CwSnapshot *out)
+{
+    if (out != nullptr) *out = CwSnapshot{};
+}
+
+#endif

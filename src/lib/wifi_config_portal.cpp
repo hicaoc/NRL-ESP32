@@ -1224,32 +1224,46 @@ static esp_err_t handleAudioPage(httpd_req_t *req)
     return ESP_OK;
 }
 
-static const char kFmoPage[] = R"FMO(<!doctype html><html lang="zh-CN"><head>
+static const char kFmoPage[] = R"FMO(<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>FMO 配置</title><style>
-body{font:16px system-ui,sans-serif;max-width:900px;margin:auto;padding:16px;background:#f4f6f8;color:#18222c}
-a{color:#1769aa}section{background:#fff;border:1px solid #d8dee4;border-radius:10px;padding:16px;margin:14px 0;box-shadow:0 2px 8px #0001}
-h1,h2{margin:.2em 0 .7em}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
-label{display:block}select,input,button{box-sizing:border-box;font:inherit;padding:9px;margin-top:5px;width:100%}
-button{background:#1769aa;color:white;border:0;border-radius:6px;font-weight:650;cursor:pointer}.row{display:flex;gap:8px;align-items:center}.row input{width:auto}
-.hint{color:#65717d;font-size:14px}.ok{color:#087d37}.bad{color:#b42318}.mono{font-family:ui-monospace,monospace;word-break:break-all}
-@media(max-width:650px){.grid{grid-template-columns:1fr}}
-</style></head><body><p><a href="/">&larr; 返回导航首页</a></p><h1>FMO‑V4 通联</h1>
-<p class="hint">服务器通过 APRS‑IS 自动发现（通常数分钟内出现）。FMO 身份证书不是 TLS 证书，三份 JSON 必须来自同一身份。</p>
-<section><h2>连接与发射</h2><form id="cfg"><div class="grid"><label>FMO 服务器<select name="server_index" id="servers"><option value="">等待发现…</option></select></label>
-<div><label class="row"><input type="checkbox" name="enabled" value="1" id="enabled">连接所选 FMO 服务器</label>
-<label class="row"><input type="checkbox" name="transmit" value="1" id="transmit">将 PTT/SQL 麦克风上行切换到 FMO</label>
-<label class="row" title="关闭后服务器会返回本客户端发布的消息，用于调试"><input type="checkbox" name="mqtt_no_local" value="1" id="mqtt_no_local">MQTT 5 No Local</label></div></div>
+<title>FMO</title>
+<link rel="stylesheet" href="/portal.css?v={{VERSION}}-assets1">
+<style>
+.fmo-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.mono{word-break:break-all}
+.ok{color:#087d37}.bad{color:#b42318}
+</style></head><body><main class="shell">
+<div class="topbar">
+<div>
+<h1 data-i18n="fmoHeadline">FMO-V4 Link</h1>
+<p class="sub" data-i18n="fmoIntro">Servers are discovered automatically via APRS-IS (usually within minutes). An FMO identity certificate is not a TLS certificate; all three JSON files must belong to the same identity.</p>
+</div>
+<div class="status">
+<div><span data-i18n="configAp">Config AP</span><strong class="mono">{{AP_IP}}</strong></div>
+<div><span data-i18n="stationIp">Station IP</span><strong class="mono">{{STA_IP}}</strong></div>
+<div class="language"><span class="lang-label" data-i18n="language">Language</span><div id="language-select" class="lang-radio"><label><input type="radio" name="lang" value="en">English</label><label><input type="radio" name="lang" value="zh">中文</label></div></div>
+</div>
+</div>
+<p class="back-home"><a href="/" data-i18n="backHome">&larr; Back to home</a></p>
+<section class="panel"><h2>连接与发射</h2><form id="cfg"><div class="grid"><label>FMO 服务器<select name="server_index" id="servers"><option value="">等待发现…</option></select></label>
+<div><label class="fmo-row"><input type="checkbox" name="enabled" value="1" id="enabled">连接所选 FMO 服务器</label>
+<label class="fmo-row"><input type="checkbox" name="transmit" value="1" id="transmit">将 PTT/SQL 麦克风上行切换到 FMO</label>
+<label class="fmo-row" title="关闭后服务器会返回本客户端发布的消息，用于调试"><input type="checkbox" name="mqtt_no_local" value="1" id="mqtt_no_local">MQTT 5 No Local</label></div></div>
 <input type="hidden" name="enabled_present" value="1"><button type="submit">保存并应用</button></form><p id="link" class="mono hint">加载中…</p></section>
-<section><h2>FMO 身份证书</h2><p id="cert" class="mono hint">加载中…</p><div class="grid">
+<section class="panel"><h2>FMO 身份证书</h2><p id="cert" class="mono hint">加载中…</p><div class="grid">
 <label>userCert JSON<input type="file" accept="application/json,.json" data-kind="user"></label>
 <label>intermediateCert JSON<input type="file" accept="application/json,.json" data-kind="intermediate"></label>
 <label>deviceKey JSON（含私钥种子）<input type="file" accept="application/json,.json" data-kind="devicekey"></label></div>
 <p class="hint">deviceKey 会写入板载 LittleFS，不会从网页读回。请妥善保管原始文件，不要上传到公共服务。</p></section>
-<section><h2>当前服务器</h2><div id="current" class="mono hint">未选择</div></section><section><h2>QSO 呼叫</h2><div class="grid"><label>对方呼号<input id="qso_peer" maxlength="9" placeholder="BG8LLD"></label><label>对方 UID（0=未知，QTHANS 自动学习）<input id="qso_uid" type="number" min="0" placeholder="0"></label></div><div class="row"><button type="button" id="qso_call">发起呼叫</button><button type="button" id="qso_answer">接听</button><button type="button" id="qso_reject">拒绝</button><button type="button" id="qso_cancel">取消/结束</button></div><p id="qso_stat" class="mono hint">加载中…</p><p class="hint">流程：QTHQRY 查询对方服务器 &rarr; 主叫自动跳台 &rarr; CALL &rarr; 对方人工接听。呼号可带 SSID；需要 APRS-IS 上行 verified。被叫振铃 60 秒无人接听自动结束。</p></section>
-<section><h2>服务器广播（FMO-V4 STATION）</h2><form id="bcfg"><div class="grid"><label class="row"><input type="checkbox" name="bcast_enabled" value="1" id="bc_enabled">启用 APRS-IS 周期广播</label><label>周期<select name="bcast_mode" id="bc_mode"><option value="2">5 分钟</option><option value="3">10 分钟</option><option value="4">60 分钟</option></select></label><label>国家码（2 字母，手填）<input name="bcast_country" id="bc_country" maxlength="2" placeholder="CN"></label><label>SSID（0-15，0=不带）<input name="bcast_ssid" id="bc_ssid" type="number" min="0" max="15" placeholder="0"></label><label>覆盖半径 km<input name="bcast_cover_km" id="bc_cover" type="number" min="0" max="5000"></label><label>服务器名称（线上 UTF-8）<input name="bcast_name" id="bc_name" maxlength="32" placeholder="留空=当前服务器名"></label><label>广播 host<input name="bcast_host" id="bc_host" maxlength="63" placeholder="留空=当前 FMO host"></label><label>广播端口<input name="bcast_port" id="bc_port" type="number" min="0" max="65535" placeholder="0=当前 FMO 端口"></label><label>在线/峰值（0=自动）<div class="row"><input name="bcast_online" id="bc_online" type="number" min="0"><input name="bcast_peak" id="bc_peak" type="number" min="0"></div><div class="hint" id="bc_auto">填 0 使用自动</div></label></div><input type="hidden" name="bcast_present" value="1"><button type="submit">保存广播配置</button></form><p id="bstat" class="mono hint">加载中…</p><p class="hint">门控：MQTT 已连接、实际登录角色为 super（admin 暂不等同）、服务器呼号==本机证书呼号、APRS-IS logresp verified、SNTP 已同步；另有 60 秒最小限速。坐标取当前位置（GPS 新鲜优先，否则默认坐标）。远程关停（SERVER_REMOTE_CONTROL）未实现。</p></section>
-<section><h2>个人信标（FMO-V4 BEACON）</h2><form id="ncfg"><div class="grid"><label class="row"><input type="checkbox" name="bcn_enabled" value="1" id="nb_enabled">启用个人信标（固定 10 分钟周期）</label><label>SSID（0-15，0=不带）<input name="bcn_ssid" id="nb_ssid" type="number" min="0" max="15" placeholder="0"></label><label>频率 MHz（20-500，4 位小数）<input name="bcn_freq" id="nb_freq" maxlength="10" placeholder="439.1625"></label><label>天线高度 m（0=不播 HEIGHT）<input name="bcn_height" id="nb_height" type="number" min="0" max="65535"></label><label>电台 RIG（≤16 字符，线上 UTF-8）<input name="bcn_rig" id="nb_rig" placeholder="留空=不播 RIG"></label><label>天线 ANT（≤16 字符，线上 UTF-8）<input name="bcn_ant" id="nb_ant" placeholder="留空=不播 ANT"></label><label>APRS 个性消息 APFMO2（≤64 字符）<input name="bcn_aprs_msg" id="nb_msg" placeholder="信标成功后跟发，留空=不发"></label><label>登录公告 APFMO1（≤128 字符）<input name="bcn_notice" id="nb_notice" placeholder="服务器广播成功后跟发，留空=不发"></label><label>QSO 消息（仅存储，≤128 字符）<input name="bcn_qso_msg" id="nb_qso" placeholder="传输机制待研究"></label></div><input type="hidden" name="bcn_present" value="1"><button type="submit">保存信标配置</button></form><p id="nstat" class="mono hint">加载中…</p><p class="hint">门控：APRS-IS logresp verified + 证书就绪 + 频率&gt;0；固定 10 分钟周期 + 60 秒最小限速，不依赖服务器/super 角色。文本禁英文逗号；线上 RIG/ANT/消息/公告为 UTF-8（与签名 TBS 内一致）。整条信标帧 ≤512 字符，超长放弃。APFMO1 公告的名称/在线/峰值沿用服务器广播生效值。</p></section>
+<section class="panel"><h2>当前服务器</h2><div id="current" class="mono hint">未选择</div></section><section class="panel"><h2>QSO 呼叫</h2><div class="grid"><label>对方呼号<input id="qso_peer" maxlength="9" placeholder="BG8LLD"></label><label>对方 UID（0=未知，QTHANS 自动学习）<input id="qso_uid" type="number" min="0" placeholder="0"></label></div><div class="fmo-row"><button type="button" id="qso_call">发起呼叫</button><button type="button" id="qso_answer">接听</button><button type="button" id="qso_reject">拒绝</button><button type="button" id="qso_cancel">取消/结束</button></div><p id="qso_stat" class="mono hint">加载中…</p><p class="hint">流程：QTHQRY 查询对方服务器 &rarr; 主叫自动跳台 &rarr; CALL &rarr; 对方人工接听。呼号可带 SSID；需要 APRS-IS 上行 verified。被叫振铃 60 秒无人接听自动结束。</p></section>
+<section class="panel"><h2>服务器广播（FMO-V4 STATION）</h2><form id="bcfg"><div class="grid"><label class="fmo-row"><input type="checkbox" name="bcast_enabled" value="1" id="bc_enabled">启用 APRS-IS 周期广播</label><label>周期<select name="bcast_mode" id="bc_mode"><option value="2">5 分钟</option><option value="3">10 分钟</option><option value="4">60 分钟</option></select></label><label>国家码（2 字母，手填）<input name="bcast_country" id="bc_country" maxlength="2" placeholder="CN"></label><label>SSID（0-15，0=不带）<input name="bcast_ssid" id="bc_ssid" type="number" min="0" max="15" placeholder="0"></label><label>覆盖半径 km<input name="bcast_cover_km" id="bc_cover" type="number" min="0" max="5000"></label><label>服务器名称（线上 UTF-8）<input name="bcast_name" id="bc_name" maxlength="32" placeholder="留空=当前服务器名"></label><label>广播 host<input name="bcast_host" id="bc_host" maxlength="63" placeholder="留空=当前 FMO host"></label><label>广播端口<input name="bcast_port" id="bc_port" type="number" min="0" max="65535" placeholder="0=当前 FMO 端口"></label><label>在线/峰值（0=自动）<div class="fmo-row"><input name="bcast_online" id="bc_online" type="number" min="0"><input name="bcast_peak" id="bc_peak" type="number" min="0"></div><div class="hint" id="bc_auto">填 0 使用自动</div></label></div><input type="hidden" name="bcast_present" value="1"><button type="submit">保存广播配置</button></form><p id="bstat" class="mono hint">加载中…</p><p class="hint">门控：MQTT 已连接、实际登录角色为 super（admin 暂不等同）、服务器呼号==本机证书呼号、APRS-IS logresp verified、SNTP 已同步；另有 60 秒最小限速。坐标取当前位置（GPS 新鲜优先，否则默认坐标）。远程关停（SERVER_REMOTE_CONTROL）未实现。</p></section>
+<section class="panel"><h2>个人信标（FMO-V4 BEACON）</h2><form id="ncfg"><div class="grid"><label class="fmo-row"><input type="checkbox" name="bcn_enabled" value="1" id="nb_enabled">启用个人信标（固定 10 分钟周期）</label><label>SSID（0-15，0=不带）<input name="bcn_ssid" id="nb_ssid" type="number" min="0" max="15" placeholder="0"></label><label>频率 MHz（20-500，4 位小数）<input name="bcn_freq" id="nb_freq" maxlength="10" placeholder="439.1625"></label><label>天线高度 m（0=不播 HEIGHT）<input name="bcn_height" id="nb_height" type="number" min="0" max="65535"></label><label>电台 RIG（≤16 字符，线上 UTF-8）<input name="bcn_rig" id="nb_rig" placeholder="留空=不播 RIG"></label><label>天线 ANT（≤16 字符，线上 UTF-8）<input name="bcn_ant" id="nb_ant" placeholder="留空=不播 ANT"></label><label>APRS 个性消息 APFMO2（≤64 字符）<input name="bcn_aprs_msg" id="nb_msg" placeholder="信标成功后跟发，留空=不发"></label><label>登录公告 APFMO1（≤128 字符）<input name="bcn_notice" id="nb_notice" placeholder="服务器广播成功后跟发，留空=不发"></label><label>QSO 消息（仅存储，≤128 字符）<input name="bcn_qso_msg" id="nb_qso" placeholder="传输机制待研究"></label></div><input type="hidden" name="bcn_present" value="1"><button type="submit">保存信标配置</button></form><p id="nstat" class="mono hint">加载中…</p><p class="hint">门控：APRS-IS logresp verified + 证书就绪 + 频率&gt;0；固定 10 分钟周期 + 60 秒最小限速，不依赖服务器/super 角色。文本禁英文逗号；线上 RIG/ANT/消息/公告为 UTF-8（与签名 TBS 内一致）。整条信标帧 ≤512 字符，超长放弃。APFMO1 公告的名称/在线/峰值沿用服务器广播生效值。</p></section>
 <script>
+const fmoI18n={en:{language:'Language',configAp:'Config AP',stationIp:'Station IP',backHome:'← Back to home',fmoHeadline:'FMO-V4 Link',fmoIntro:'Servers are discovered automatically via APRS-IS (usually within minutes). An FMO identity certificate is not a TLS certificate; all three JSON files must belong to the same identity.'},zh:{language:'语言',configAp:'配置热点',stationIp:'联网地址',backHome:'← 返回导航首页',fmoHeadline:'FMO‑V4 通联',fmoIntro:'服务器通过 APRS‑IS 自动发现（通常数分钟内出现）。FMO 身份证书不是 TLS 证书，三份 JSON 必须来自同一身份。'}};
+function fmoLang(){const s=localStorage.getItem('nrl_lang');if(s==='zh'||s==='en')return s;return navigator.language&&navigator.language.toLowerCase().startsWith('zh')?'zh':'en';}
+function fmoApply(l){document.documentElement.lang=l==='zh'?'zh-CN':'en';document.querySelectorAll('input[name="lang"]').forEach(r=>{r.checked=r.value===l;});document.querySelectorAll('[data-i18n]').forEach(el=>{const k=el.getAttribute('data-i18n');if(fmoI18n[l]&&fmoI18n[l][k])el.textContent=fmoI18n[l][k];});const h=document.querySelector('h1');if(h)document.title=h.textContent;}
+document.querySelectorAll('input[name="lang"]').forEach(r=>{r.addEventListener('change',()=>{localStorage.setItem('nrl_lang',r.value);fmoApply(r.value);});});
+fmoApply(fmoLang());
 const esc=s=>String(s??'');let loaded=false;
 async function refresh(){try{const r=await fetch('/fmo/status',{cache:'no-store'}),j=await r.json();
 enabled.checked=j.config.enabled;transmit.checked=j.config.transmit;mqtt_no_local.checked=j.config.mqtt_no_local;
@@ -1268,12 +1282,32 @@ document.querySelectorAll('input[type=file]').forEach(el=>el.onchange=async()=>{
 async function qsoAct(a){const body=new URLSearchParams({action:a,peer:qso_peer.value,uid:qso_uid.value||'0'});try{const r=await fetch('/fmo/qso',{method:'POST',body});const t=await r.text();if(!r.ok)throw Error(t);refresh()}catch(e){alert('操作失败：'+e)}};
 qso_call.onclick=()=>qsoAct('call');qso_answer.onclick=()=>qsoAct('answer');qso_reject.onclick=()=>qsoAct('reject');qso_cancel.onclick=()=>qsoAct('cancel');
 refresh();setInterval(refresh,3000);
-</script></body></html>)FMO";
+</script></main></body></html>)FMO";
+
+static void replaceFmoToken(std::string &html, const char *token, const std::string &value)
+{
+    const size_t pos = html.find(token);
+    if (pos != std::string::npos) {
+        html.replace(pos, strlen(token), value);
+    }
+}
 
 static esp_err_t handleFmoPage(httpd_req_t *req)
 {
     s_server.bind(req);
-    s_server.send(200, "text/html; charset=utf-8", kFmoPage);
+    std::string html = kFmoPage;
+    char ip_buf[16] = {};
+    nrlIpToString(nrlWifiApIp(), ip_buf, sizeof(ip_buf));
+    replaceFmoToken(html, "{{AP_IP}}", ip_buf);
+    const uint32_t sta_ip = nrlNetworkIp();
+    if (sta_ip != 0u) {
+        nrlIpToString(sta_ip, ip_buf, sizeof(ip_buf));
+    } else {
+        snprintf(ip_buf, sizeof(ip_buf), "not connected");
+    }
+    replaceFmoToken(html, "{{STA_IP}}", ip_buf);
+    replaceFmoToken(html, "{{VERSION}}", NRL_FIRMWARE_VERSION);
+    sendChunkedHtml(200, html);
     return ESP_OK;
 }
 
@@ -1698,6 +1732,7 @@ static esp_err_t handleMediaPage(httpd_req_t *req)
 
 static bool parseUIntArg(const std::string &text, unsigned long *out_value);
 
+#if NRL_HAS_SIGNALING
 static bool parseHexArg(const std::string &text, unsigned long *out_value)
 {
     if (out_value == nullptr || text.empty()) return false;
@@ -1707,6 +1742,7 @@ static bool parseHexArg(const std::string &text, unsigned long *out_value)
     *out_value = value;
     return true;
 }
+#endif // NRL_HAS_SIGNALING
 
 static esp_err_t handleAprsPage(httpd_req_t *req)
 {
@@ -1727,6 +1763,7 @@ static esp_err_t handleAprsPage(httpd_req_t *req)
     return ESP_OK;
 }
 
+#if NRL_HAS_SIGNALING
 static esp_err_t handleSignalingPage(httpd_req_t *req)
 {
     s_server.bind(req);
@@ -1830,6 +1867,7 @@ static esp_err_t handleSaveSignaling(httpd_req_t *req)
     sendSignalingSavedJson(ok);
     return ESP_OK;
 }
+#endif // NRL_HAS_SIGNALING
 
 static void sendSerialSavedJson(const bool ok)
 {
@@ -3631,8 +3669,10 @@ static void ensureServerRunning()
         { "/aprs",                 HTTP_GET,  handleAprsPage },
         { "/save_aprs",            HTTP_POST, handleSaveAprs },
         { "/aprs/stations",        HTTP_GET,  handleAprsStations },
+#if NRL_HAS_SIGNALING
         { "/signaling",            HTTP_GET,  handleSignalingPage },
         { "/save_signaling",       HTTP_POST, handleSaveSignaling },
+#endif
         { "/save_serial",          HTTP_POST, handleSaveSerial },
         { "/update",               HTTP_GET,  handleUpdatePage },
         { "/update",               HTTP_POST, handleUpdate },
