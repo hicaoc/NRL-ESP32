@@ -20,5 +20,12 @@ bool I2C_MasterTransmitReceive(uint8_t address,
                                const uint8_t *write_data, size_t write_size,
                                uint8_t *read_data, size_t read_size,
                                int timeout_ms);
+// Single-shot variant used by full-bus scans: creates a temporary device
+// handle and removes it right after the transfer, so sweeping many addresses
+// cannot exhaust the cached device slots the runtime drivers rely on.
+bool I2C_MasterTransmitReceiveOnce(uint8_t address,
+                                   const uint8_t *write_data, size_t write_size,
+                                   uint8_t *read_data, size_t read_size,
+                                   int timeout_ms);
 
 #endif // DRIVER_I2C_H

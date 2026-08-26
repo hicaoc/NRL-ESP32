@@ -13,6 +13,10 @@ struct EnvironmentSensorSnapshot {
     bool aht20_available;
     bool aht20_valid;
     float humidity_percent;
+    float aht20_temperature_c;  // stays 0 while the AHT20 is disabled (0x38 conflict)
+    // True when humidity_percent comes from the baro chip (BME280, id 0x60)
+    // instead of the disabled AHT20.
+    bool bme280_humidity_valid;
 
     bool bh1750_present;
     bool bh1750_valid;

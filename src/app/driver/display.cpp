@@ -66,6 +66,9 @@
 #include "fonts/lv_font_cjk.h"
 #include "status_io.h"
 #include "environment_sensors.h"
+#include "i2c_device_discovery.h"
+#include "bh4tdv_rf_io.h"
+#include "sr110u.h"
 
 #include "../../lib/nrl_net_compat.h"
 
@@ -190,13 +193,16 @@ lv_obj_t *s_lbl_batt = nullptr;
 lv_obj_t *s_lbl_ip = nullptr;
 lv_obj_t *s_lbl_cpu = nullptr;
 lv_obj_t *s_lbl_gps = nullptr;
+lv_obj_t *s_lbl_rf_rssi = nullptr;
 lv_obj_t *s_lbl_hint = nullptr;
 lv_obj_t *s_lbl_ota = nullptr;
 lv_obj_t *s_bar_ota = nullptr;
 lv_obj_t *s_content = nullptr;
 lv_obj_t *s_lbl_signaling = nullptr;
 #if NRL_BOARD_IS_BI4UMD_FAMILY
-enum class Bi4umdPage : uint8_t { Radio, Music, MusicList, Settings, Debug, Sensors };
+enum class Bi4umdPage : uint8_t {
+    Radio, Music, MusicList, Settings, Debug, Sensors, I2cScan
+};
 Bi4umdPage s_bi4umd_page = Bi4umdPage::Radio;
 lv_obj_t *s_lbl_music_title = nullptr;
 lv_obj_t *s_lbl_music_artist = nullptr;
@@ -209,7 +215,10 @@ lv_obj_t *s_btn_music_repeat_label = nullptr;
 lv_obj_t *s_lbl_settings_mic = nullptr;
 lv_obj_t *s_lbl_settings_volume = nullptr;
 lv_obj_t *s_lbl_sensors = nullptr;
+lv_obj_t *s_lbl_i2c_scan = nullptr;
 char s_shown_sensors[256] = {};
+char s_shown_i2c_scan[1024] = {};
+uint32_t s_i2c_scan_revision = UINT32_MAX;
 char s_shown_music_path[256] = {};
 bool s_shown_music_playing = false;
 size_t s_music_tap_index = SIZE_MAX;
@@ -480,6 +489,7 @@ char s_shown_batt[20] = {};
 char s_shown_ip[96] = {};
 char s_shown_cpu[12] = {};
 char s_shown_gps[16] = {};
+char s_shown_rf_rssi[12] = {};
 char s_shown_ota[160] = {}; // sized for a scrolling APRS monitor line
 char s_shown_signaling[160] = {};
 int s_shown_state = -1;  // caption: -1 unset, 0 standby, 1 last heard, 2 rx, 3 tx
@@ -509,7 +519,9 @@ void buildBi4umdMusicListContent();
 void buildBi4umdSettingsContent();
 void buildBi4umdDebugContent();
 void buildBi4umdSensorsContent();
+void buildBi4umdI2cScanContent();
 void refreshBi4umdSensors();
+void refreshBi4umdI2cScan();
 void refreshBi4umdMusic();
 void rebuildBi4umdMusicList();
 #endif
@@ -862,6 +874,30 @@ void bi4umdShowSensorsPage(lv_event_t *)
     buildBi4umdSensorsContent();
 }
 
+void bi4umdShowI2cScanPage(lv_event_t *)
+{
+    STATUS_IO_SetSoftPtt(false);
+    s_bi4umd_page = Bi4umdPage::I2cScan;
+    buildBi4umdI2cScanContent();
+}
+
+void bi4umdRunI2cScan(lv_event_t *)
+{
+    if (s_lbl_i2c_scan != nullptr) {
+        lv_label_set_text(s_lbl_i2c_scan, "Scanning raw 0x00-0xFF...");
+        lv_refr_now(nullptr);
+    }
+    if (!I2C_DEVICE_DISCOVERY_Scan()) {
+        if (s_lbl_i2c_scan != nullptr) lv_label_set_text(s_lbl_i2c_scan, "SCAN FAILED");
+        return;
+    }
+    // Rebind the safety-critical expander immediately. The sensor worker
+    // observes the discovery revision and reinitializes itself asynchronously.
+    (void)BH4TDV_RF_IO_Init();
+    s_i2c_scan_revision = UINT32_MAX;
+    refreshBi4umdI2cScan();
+}
+
 void bi4umdOpenMainMenu(lv_event_t *)
 {
     s_bi4umd_aprs_from_settings = false;
@@ -1072,23 +1108,31 @@ void refreshBi4umdSensors()
     (void)ENV_SENSORS_GetSnapshot(&sensor);
     char text[sizeof(s_shown_sensors)] = {};
     char temp[20] = "--";
+    char temp2[24] = "--";
     char pressure[24] = "--";
     char lux[24] = "--";
+    char humidity[24] = "AHT20 CONFLICT";
     char heading[24] = "--";
     char magnetic[64] = "-- / -- / -- uT";
+    if (sensor.aht20_valid) {
+        snprintf(temp2, sizeof(temp2), "%.1f C", sensor.aht20_temperature_c);
+    }
     if (sensor.bmp280_valid) {
         snprintf(temp, sizeof(temp), "%.1f C", sensor.temperature_c);
         snprintf(pressure, sizeof(pressure), "%.1f hPa", sensor.pressure_hpa);
     }
-    if (sensor.bh1750_valid) snprintf(lux, sizeof(lux), "%.1f lx", sensor.illuminance_lux);
+    if (sensor.bh1750_valid) snprintf(lux, sizeof(lux), "%.0f lx", sensor.illuminance_lux);
+    if (sensor.bme280_humidity_valid || sensor.aht20_valid) {
+        snprintf(humidity, sizeof(humidity), "%.0f %%RH", sensor.humidity_percent);
+    }
     if (sensor.qmc5883l_valid) {
         snprintf(heading, sizeof(heading), "%.1f deg (UNCAL)", sensor.heading_deg);
         snprintf(magnetic, sizeof(magnetic), "%.1f / %.1f / %.1f uT",
                  sensor.magnetic_x_ut, sensor.magnetic_y_ut, sensor.magnetic_z_ut);
     }
     snprintf(text, sizeof(text),
-             "TEMP   %s\nPRESS  %s\nHUM    AHT20 ADDR CONFLICT\nLIGHT  %s\nHEAD   %s\nMAG    %s",
-             temp, pressure, lux, heading, magnetic);
+             "TEMP   %s\nTEMP2  %s\nPRESS  %s\nHUM    %s\nLIGHT  %s\nHEAD   %s\nMAG    %s",
+             temp, temp2, pressure, humidity, lux, heading, magnetic);
     setLabel(s_lbl_sensors, s_shown_sensors, sizeof(s_shown_sensors), text);
 }
 
@@ -1123,6 +1167,86 @@ void buildBi4umdSensorsContent()
     lv_obj_set_style_text_line_space(s_lbl_sensors, 7, 0);
     s_shown_sensors[0] = '\0';
     refreshBi4umdSensors();
+}
+
+void refreshBi4umdI2cScan()
+{
+    if (s_lbl_i2c_scan == nullptr) return;
+    I2CDiscoveredDevice devices[32] = {};
+    uint32_t revision = 0u;
+    const size_t count = I2C_DEVICE_DISCOVERY_GetSnapshot(
+        devices, sizeof(devices) / sizeof(devices[0]), &revision);
+    if (revision == s_i2c_scan_revision) return;
+    s_i2c_scan_revision = revision;
+
+    char text[sizeof(s_shown_i2c_scan)] = {};
+    int used = snprintf(text, sizeof(text),
+                        "RAW 00-FF / 7-bit 00-7F\nFound %u device(s)\n7b   W/R     MODEL",
+                        static_cast<unsigned>(count));
+    const size_t shown = count < (sizeof(devices) / sizeof(devices[0]))
+                             ? count : (sizeof(devices) / sizeof(devices[0]));
+    for (size_t i = 0u; i < shown && used > 0 &&
+                        static_cast<size_t>(used) < sizeof(text); ++i) {
+        const I2CDiscoveredDevice &device = devices[i];
+        const int added = device.identity_valid
+            ? snprintf(text + used, sizeof(text) - static_cast<size_t>(used),
+                       "\n%02X   %02X/%02X   %s ID=%02X",
+                       device.address_7bit, device.write_address_8bit,
+                       device.read_address_8bit,
+                       I2C_DEVICE_DISCOVERY_ModelName(device.model),
+                       device.identity)
+            : snprintf(text + used, sizeof(text) - static_cast<size_t>(used),
+                       "\n%02X   %02X/%02X   %s",
+                       device.address_7bit, device.write_address_8bit,
+                       device.read_address_8bit,
+                       I2C_DEVICE_DISCOVERY_ModelName(device.model));
+        if (added < 0) break;
+        used += added;
+    }
+    setLabel(s_lbl_i2c_scan, s_shown_i2c_scan,
+             sizeof(s_shown_i2c_scan), text);
+}
+
+void buildBi4umdI2cScanContent()
+{
+    lv_obj_t *content = prepareContent();
+
+    lv_obj_t *back = lv_button_create(content);
+    lv_obj_set_pos(back, 8, 4);
+    lv_obj_set_size(back, 40, 36);
+    lv_obj_set_style_radius(back, 6, 0);
+    lv_obj_add_event_cb(back, bi4umdShowSettingsPage, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *back_label = makeLabel(back, &lv_font_montserrat_16, kColorCallIdle);
+    lv_label_set_text(back_label, LV_SYMBOL_LEFT);
+    lv_obj_center(back_label);
+
+    lv_obj_t *heading = makeLabel(content, &lv_font_montserrat_16, kColorAccent);
+    lv_obj_set_pos(heading, 54, 13);
+    lv_label_set_text(heading, "I2C DEVICES");
+
+    lv_obj_t *scan = lv_button_create(content);
+    lv_obj_set_pos(scan, kWidth - 72, 4);
+    lv_obj_set_size(scan, 64, 36);
+    lv_obj_set_style_radius(scan, 6, 0);
+    lv_obj_add_event_cb(scan, bi4umdRunI2cScan, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *scan_label = makeLabel(scan, &lv_font_montserrat_14, kColorCallIdle);
+    lv_label_set_text(scan_label, "SCAN");
+    lv_obj_center(scan_label);
+
+    lv_obj_t *list = lv_obj_create(content);
+    lv_obj_set_pos(list, 6, 44);
+    lv_obj_set_size(list, kWidth - 12, kContentHeight - 50);
+    lv_obj_set_style_bg_color(list, lv_color_hex(0x09151C), 0);
+    lv_obj_set_style_border_color(list, lv_color_hex(0x1C6B73), 0);
+    lv_obj_set_style_border_width(list, 1, 0);
+    lv_obj_set_style_pad_all(list, 5, 0);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    s_lbl_i2c_scan = makeLabel(list, &lv_font_montserrat_14, kColorCallIdle);
+    lv_obj_set_width(s_lbl_i2c_scan, kWidth - 28);
+    lv_obj_set_style_text_line_space(s_lbl_i2c_scan, 4, 0);
+    s_shown_i2c_scan[0] = '\0';
+    s_i2c_scan_revision = UINT32_MAX;
+    refreshBi4umdI2cScan();
 }
 #endif
 
@@ -1374,6 +1498,7 @@ void resetCenterWidgets()
     s_lbl_settings_mic = nullptr;
     s_lbl_settings_volume = nullptr;
     s_lbl_sensors = nullptr;
+    s_lbl_i2c_scan = nullptr;
     s_shown_sensors[0] = '\0';
     s_sstv_rx_image = nullptr;
     s_sstv_rx_status = nullptr;
@@ -1405,6 +1530,8 @@ void resetHomeWidgets()
     s_shown_ip[0] = '\0';
     s_shown_cpu[0] = '\0';
     s_shown_gps[0] = '\0';
+    s_shown_rf_rssi[0] = '\0';
+    s_lbl_rf_rssi = nullptr;
 }
 
 lv_obj_t *prepareScreen()
@@ -1751,10 +1878,27 @@ void buildAboutMenu()
     lv_obj_align(version, LV_ALIGN_TOP_MID, 0, 72);
     lv_label_set_text(version, version_text);
 
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    // SR-110U module firmware, next to the radio firmware version.
+    char rf_version_text[48] = {};
+    snprintf(rf_version_text, sizeof(rf_version_text), "RF %s",
+             SR110U_GetVersion()[0] != '\0' ? SR110U_GetVersion() : "OFFLINE");
+    lv_obj_t *rf_version = makeLabel(scr, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(rf_version, kWidth);
+    lv_obj_set_style_text_align(rf_version, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(rf_version, LV_ALIGN_TOP_MID, 0, 100);
+    lv_label_set_text(rf_version, rf_version_text);
+#endif
+
     lv_obj_t *board = makeLabel(scr, &lv_font_montserrat_16, kColorSub);
     lv_obj_set_width(board, kWidth);
     lv_obj_set_style_text_align(board, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(board, LV_ALIGN_TOP_MID, 0, 108);
+    lv_obj_align(board, LV_ALIGN_TOP_MID, 0,
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+                 126);
+#else
+                 108);
+#endif
     lv_label_set_text(board, "GEZIPAI");
     menuFooter(scr, menuText("PTT BACK", "PTT返回"));
 }
@@ -3288,7 +3432,7 @@ void buildWideUi()
 
     s_lbl_wifi = makeLabel(top, &lv_font_montserrat_20, kColorSub);
     lv_obj_align(s_lbl_wifi, LV_ALIGN_LEFT_MID, 22, 0);
-    lv_label_set_text(s_lbl_wifi, LV_SYMBOL_WIFI "  --");
+    lv_label_set_text(s_lbl_wifi, "--");
 
     s_lbl_time = makeLabel(top, &lv_font_montserrat_28, kColorTime);
     lv_obj_center(s_lbl_time);
@@ -3296,7 +3440,7 @@ void buildWideUi()
 
     s_lbl_vol = makeLabel(top, &lv_font_montserrat_20, kColorSub);
     lv_obj_align(s_lbl_vol, LV_ALIGN_RIGHT_MID, -22, 0);
-    lv_label_set_text(s_lbl_vol, LV_SYMBOL_VOLUME_MID " --");
+    lv_label_set_text(s_lbl_vol, "--");
 
     lv_obj_t *accent = lv_obj_create(scr);
     lv_obj_remove_style_all(accent);
@@ -3342,7 +3486,7 @@ void buildWideUi()
 
     s_lbl_batt = makeLabel(right, &lv_font_montserrat_20, kColorSub);
     lv_obj_align(s_lbl_batt, LV_ALIGN_TOP_LEFT, 0, 138);
-    lv_label_set_text(s_lbl_batt, "--  " LV_SYMBOL_BATTERY_EMPTY);
+    lv_label_set_text(s_lbl_batt, "--");
 
     makeTouchButton(scr, 22, 362, 180, 78, "VOL-", -1);
     makeTouchButton(scr, 222, 362, 356, 78, "CONFIG", 0);
@@ -3696,6 +3840,7 @@ void buildBi4umdSettingsContent()
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
     nav_button(8, 142, 108, menuText("SENSORS", "传感器"), bi4umdShowSensorsPage);
     nav_button(124, 142, 108, menuText("MAP", "地图"), bi4umdOpenMapPage);
+    nav_button(86, kContentHeight - 48, 98, "I2C SCAN", bi4umdShowI2cScanPage);
 #else
     nav_button(66, 142, 108, menuText("MAP", "地图"), bi4umdOpenMapPage);
 #endif
@@ -3951,15 +4096,24 @@ void buildUi()
 
     s_lbl_wifi = makeLabel(top, &lv_font_montserrat_14, kColorSub);
     lv_obj_align(s_lbl_wifi, LV_ALIGN_LEFT_MID, 10, 0);
-    lv_label_set_text(s_lbl_wifi, LV_SYMBOL_WIFI "  --");
+    lv_label_set_text(s_lbl_wifi, "--");
 
     s_lbl_vol = makeLabel(top, &lv_font_montserrat_14, kColorSub);
-    lv_obj_align(s_lbl_vol, LV_ALIGN_CENTER, 0, 0);
-    lv_label_set_text(s_lbl_vol, LV_SYMBOL_VOLUME_MID " --");
+    lv_obj_align(s_lbl_vol, LV_ALIGN_RIGHT_MID, -56, 0);
+    lv_label_set_text(s_lbl_vol, "--");
 
     s_lbl_batt = makeLabel(top, &lv_font_montserrat_14, kColorSub);
     lv_obj_align(s_lbl_batt, LV_ALIGN_RIGHT_MID, -10, 0);
-    lv_label_set_text(s_lbl_batt, "--  " LV_SYMBOL_BATTERY_EMPTY);
+    lv_label_set_text(s_lbl_batt, "--");
+
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    // SR-110U RF RSSI between the WiFi and volume readouts; a compact
+    // "R87"-style readout is all the 240 px bar has room for. Empty while
+    // the module is offline or powered down.
+    s_lbl_rf_rssi = makeLabel(top, &lv_font_montserrat_14, kColorWeak);
+    lv_obj_align(s_lbl_rf_rssi, LV_ALIGN_LEFT_MID, 84, 0);
+    lv_label_set_text(s_lbl_rf_rssi, "");
+#endif
 
     // ---- Centre content ----
     buildHomeContent();
@@ -4192,7 +4346,7 @@ void refreshWifi()
         // Bare channel number after the RSSI (no "CH" prefix -- the narrow
         // gezipai top bar can't fit it). Shown because ESP-NOW peers only hear
         // each other on the same WiFi channel, which STA inherits from the AP.
-        snprintf(wifi_text, sizeof(wifi_text), LV_SYMBOL_WIFI "  %ddB %u",
+        snprintf(wifi_text, sizeof(wifi_text), "%ddB %u",
                  rssi, have_ap ? static_cast<unsigned>(ap_info.primary) : 0u);
         if (rssi >= -65) {
             color = kColorGood;
@@ -4205,12 +4359,30 @@ void refreshWifi()
         uint8_t channel = 0;
         wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
         (void)esp_wifi_get_channel(&channel, &second);
-        snprintf(wifi_text, sizeof(wifi_text), LV_SYMBOL_WIFI "  AP %u",
+        snprintf(wifi_text, sizeof(wifi_text), "AP %u",
                  static_cast<unsigned>(channel));
         color = kColorApWarn;
     }
     if (setLabel(s_lbl_wifi, s_shown_wifi, sizeof(s_shown_wifi), wifi_text)) {
         lv_obj_set_style_text_color(s_lbl_wifi, lv_color_hex(color), 0);
+    }
+}
+
+// SR-110U RF receive signal strength (0..127 from AT+DMORSSI, polled and
+// cached by the sensor worker). Top-bar readout exists only on BH4TDV-RF.
+void refreshRadioRssi()
+{
+    if (s_lbl_rf_rssi == nullptr) return;
+    const int rssi = SR110U_GetCachedRssi();
+    char text[12] = "";
+    uint32_t color = kColorWeak;
+    if (rssi >= 0) {
+        const int dbm = SR110U_RssiToDbm(rssi);
+        snprintf(text, sizeof(text), "%ddB", dbm);
+        color = dbm >= -70 ? kColorGood : (dbm >= -90 ? kColorApWarn : kColorWeak);
+    }
+    if (setLabel(s_lbl_rf_rssi, s_shown_rf_rssi, sizeof(s_shown_rf_rssi), text)) {
+        lv_obj_set_style_text_color(s_lbl_rf_rssi, lv_color_hex(color), 0);
     }
 }
 
@@ -4222,16 +4394,12 @@ void refreshVolume()
     if (cfg != nullptr) {
         // line_out_volume is the ES8311 speaker volume, stored 0..255.
         const int pct = (static_cast<int>(cfg->line_out_volume) * 100 + 127) / 255;
-        const char *symbol = LV_SYMBOL_VOLUME_MAX;
         if (pct == 0) {
-            symbol = LV_SYMBOL_MUTE;
             color = kColorWeak;
-        } else if (pct < 55) {
-            symbol = LV_SYMBOL_VOLUME_MID;
         }
-        snprintf(vol_text, sizeof(vol_text), "%s %d%%", symbol, pct);
+        snprintf(vol_text, sizeof(vol_text), "%d%%", pct);
     } else {
-        snprintf(vol_text, sizeof(vol_text), LV_SYMBOL_VOLUME_MID " --");
+        snprintf(vol_text, sizeof(vol_text), "--");
     }
     if (setLabel(s_lbl_vol, s_shown_vol, sizeof(s_shown_vol), vol_text)) {
         lv_obj_set_style_text_color(s_lbl_vol, lv_color_hex(color), 0);
@@ -4249,21 +4417,11 @@ void refreshBattery()
         } else if (pct > 100) {
             pct = 100;
         }
-        const char *symbol = LV_SYMBOL_BATTERY_EMPTY;
-        if (pct >= 80) {
-            symbol = LV_SYMBOL_BATTERY_FULL;
-        } else if (pct >= 55) {
-            symbol = LV_SYMBOL_BATTERY_3;
-        } else if (pct >= 30) {
-            symbol = LV_SYMBOL_BATTERY_2;
-        } else if (pct >= 12) {
-            symbol = LV_SYMBOL_BATTERY_1;
-        }
-        snprintf(batt_text, sizeof(batt_text), "%d.%02dV  %s",
-                 s_battery_mv / 1000, (s_battery_mv % 1000) / 10, symbol);
+        snprintf(batt_text, sizeof(batt_text), "%d.%02dV",
+                 s_battery_mv / 1000, (s_battery_mv % 1000) / 10);
         color = (pct <= 15) ? kColorWeak : kColorSub;
     } else {
-        snprintf(batt_text, sizeof(batt_text), "--  %s", LV_SYMBOL_BATTERY_EMPTY);
+        snprintf(batt_text, sizeof(batt_text), "--");
     }
     if (setLabel(s_lbl_batt, s_shown_batt, sizeof(s_shown_batt), batt_text)) {
         lv_obj_set_style_text_color(s_lbl_batt, lv_color_hex(color), 0);
@@ -5113,6 +5271,10 @@ void processBh4tdvRfHardwareKeys()
     } else if (s_bi4umd_page == Bi4umdPage::Sensors) {
         if (pressed(DISPLAY_HW_KEY_SOFT_LEFT)) bi4umdShowSettingsPage(nullptr);
         if (pressed(DISPLAY_HW_KEY_SOFT_RIGHT)) bi4umdShowRadioPage(nullptr);
+    } else if (s_bi4umd_page == Bi4umdPage::I2cScan) {
+        if (pressed(DISPLAY_HW_KEY_CONFIRM)) bi4umdRunI2cScan(nullptr);
+        if (pressed(DISPLAY_HW_KEY_SOFT_LEFT)) bi4umdShowSettingsPage(nullptr);
+        if (pressed(DISPLAY_HW_KEY_SOFT_RIGHT)) bi4umdShowRadioPage(nullptr);
     } else if (s_bi4umd_page == Bi4umdPage::Settings) {
         if (pressed(DISPLAY_HW_KEY_UP)) bi4umdSettingsVolumeUp(nullptr);
         if (pressed(DISPLAY_HW_KEY_DOWN)) bi4umdSettingsVolumeDown(nullptr);
@@ -5553,6 +5715,7 @@ extern "C" void Display_Poll(void)
         if (s_last_refresh_ms == 0u || (now - s_last_refresh_ms) >= kRefreshIntervalMs) {
             s_last_refresh_ms = now;
             refreshWifi();
+            refreshRadioRssi();
             refreshBattery();
             refreshCpu();
             refreshGpsStatus();
@@ -5569,12 +5732,15 @@ extern "C" void Display_Poll(void)
                    (s_last_refresh_ms == 0u ||
                     (now - s_last_refresh_ms) >= kRefreshIntervalMs)) {
             refreshBi4umdSensors();
+        } else if (s_bi4umd_page == Bi4umdPage::I2cScan) {
+            refreshBi4umdI2cScan();
         }
         refreshIp();
         refreshVolume();
         if (s_last_refresh_ms == 0u || (now - s_last_refresh_ms) >= kRefreshIntervalMs) {
             s_last_refresh_ms = now;
             refreshWifi();
+            refreshRadioRssi();
             refreshBattery();
             refreshCpu();
             refreshGpsStatus();
@@ -5596,6 +5762,7 @@ extern "C" void Display_Poll(void)
         s_last_refresh_ms = now;
         refreshClock();
         refreshWifi();
+        refreshRadioRssi();
         refreshBattery();
         refreshCpu();
         refreshGpsStatus();

@@ -788,6 +788,7 @@ std::string WifiConfigPortalView_BuildHomeCards(void)
 #endif
     html += navCard("/fmo", "fmoConfig", "FMO");
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    html += navCard("/radio", "radioConfig", "RF Module");
     html += navCard("/sensors", "sensorStatus", "Sensors");
 #endif
     html += navCard("/update", "firmwareUpdate", "Firmware Update");

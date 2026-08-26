@@ -23,6 +23,7 @@
 #include "../services/music_playlist.h"
 #include "../services/nanny.h"
 #include "../services/ota_service.h"
+#include "../services/radio_config.h"
 #include "../services/radio_favorites.h"
 #include "../services/storage_service.h"
 #include "../services/sstv_service.h"
@@ -48,6 +49,7 @@
 #include "driver/external_radio.h"
 #include "driver/status_io.h"
 #include "driver/environment_sensors.h"
+#include "driver/i2c_device_discovery.h"
 #include "driver/sr110u.h"
 #include "main_loop_profile.h"
 
@@ -323,8 +325,10 @@ static bool initFullApp()
     if (!ENV_SENSORS_Init()) {
         ESP_LOGE(TAG, "BH4TDV-RF sensor worker initialization failed.");
     }
-    if (!SR110U_Init()) {
-        ESP_LOGE(TAG, "SR-110U initialization failed.");
+    // Powers the SR-110U per the persisted radio config (down when
+    // disabled) and pushes frequency/CTCSS/squelch/etc. to the module.
+    if (!RADIO_CONFIG_ApplyToModule()) {
+        ESP_LOGE(TAG, "SR-110U configuration failed.");
     }
 #endif
 
@@ -371,7 +375,15 @@ static bool initFullApp()
     logDramMark("ai+video");
 
 #if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
-    if (ES8311_Init()) {
+    // Retry a few times: the boot I2C scan and the sensor worker share
+    // the codec bus, and a transient failure here otherwise stays dead
+    // until the first received voice packet.
+    bool es8311_ready = false;
+    for (int attempt = 0; attempt < 3 && !es8311_ready; ++attempt) {
+        if (attempt > 0) vTaskDelay(pdMS_TO_TICKS(500));
+        es8311_ready = ES8311_Init();
+    }
+    if (es8311_ready) {
         ESP_LOGI(TAG, "ES8311 ready.");
     } else {
         ESP_LOGE(TAG, "ES8311 initialization failed.");
@@ -452,6 +464,12 @@ static void initApp()
 {
     logDramMark("boot");
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    // Discover the complete shared bus before binding the expander and sensor
+    // drivers. The scan covers every 7-bit address (all raw write/read address
+    // bytes 0x00-0xFF) and publishes the recognized runtime addresses.
+    if (!I2C_DEVICE_DISCOVERY_Scan()) {
+        ESP_LOGE(TAG, "BH4TDV-RF startup I2C scan failed.");
+    }
     if (!BH4TDV_RF_IO_Init()) {
         ESP_LOGE(TAG, "BH4TDV-RF PCA9555 initialization failed.");
     } else {

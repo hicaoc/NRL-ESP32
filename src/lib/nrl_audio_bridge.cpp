@@ -1283,6 +1283,7 @@ static void pollSerialAtConsole(void)
 static void bridgeTask(void *)
 {
     bool previous_nrl_ptt = NRLAudioBridge_PttActive();
+    uint32_t last_codec_retry_ms = 0;
     if (previous_nrl_ptt) {
         AudioFocus_NotifyVoiceStart();
     }
@@ -1442,6 +1443,18 @@ static void bridgeTask(void *)
             SIGNALING_OnLocalPttReleased();
             AudioFocus_NotifyVoiceEnd();
         }
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
+        // If the codec failed to initialize at boot, the passthrough task never
+        // started: the mic uplink sends nothing and the RF module's RX audio
+        // never reaches the speaker. The first received voice packet retries
+        // via startDownlinkPlayback(); keep retrying here unconditionally so
+        // listen-only and PTT-first sessions recover as well.
+        if (!ES8311_IsReady() && (now - last_codec_retry_ms) >= 1000u) {
+            last_codec_retry_ms = now;
+            ESP_LOGW(TAG, "codec offline; retrying ES8311 init");
+            (void)ES8311_SetReceiveMode();
+        }
+#endif
         previous_nrl_ptt = current_nrl_ptt;
 
         vTaskDelay(pdMS_TO_TICKS(10));

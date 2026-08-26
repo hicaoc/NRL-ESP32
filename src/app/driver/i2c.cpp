@@ -21,13 +21,21 @@ struct CachedDevice {
 
 i2c_master_bus_handle_t s_bus = nullptr;
 SemaphoreHandle_t s_init_mutex = nullptr;
+StaticSemaphore_t s_init_mutex_buffer = {};
+portMUX_TYPE s_init_mutex_lock = portMUX_INITIALIZER_UNLOCKED;
 CachedDevice s_devices[kMaxDevices] = {};
 size_t s_device_count = 0u;
 
 bool ensureInitMutex()
 {
     if (s_init_mutex != nullptr) return true;
-    s_init_mutex = xSemaphoreCreateMutex();
+    // Serialize the lazy allocation: concurrent first callers must not each
+    // create (and leak) their own mutex.
+    portENTER_CRITICAL(&s_init_mutex_lock);
+    if (s_init_mutex == nullptr) {
+        s_init_mutex = xSemaphoreCreateMutexStatic(&s_init_mutex_buffer);
+    }
+    portEXIT_CRITICAL(&s_init_mutex_lock);
     return s_init_mutex != nullptr;
 }
 
@@ -144,4 +152,29 @@ bool I2C_MasterTransmitReceive(const uint8_t address,
     return getDevice(address, &device) &&
            i2c_master_transmit_receive(device, write_data, write_size,
                                        read_data, read_size, timeout_ms) == ESP_OK;
+}
+
+bool I2C_MasterTransmitReceiveOnce(const uint8_t address,
+                                   const uint8_t *write_data, const size_t write_size,
+                                   uint8_t *read_data, const size_t read_size,
+                                   const int timeout_ms)
+{
+    if (address > 0x7Fu || write_data == nullptr || write_size == 0u ||
+        read_data == nullptr || read_size == 0u) {
+        return false;
+    }
+    i2c_master_bus_handle_t bus = nullptr;
+    if (!I2C_MasterGetBus(&bus)) return false;
+    i2c_device_config_t device_config = {};
+    device_config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    device_config.device_address = address;
+    device_config.scl_speed_hz = kBusSpeedHz;
+    i2c_master_dev_handle_t device = nullptr;
+    if (i2c_master_bus_add_device(bus, &device_config, &device) != ESP_OK) {
+        return false;
+    }
+    const esp_err_t err = i2c_master_transmit_receive(
+        device, write_data, write_size, read_data, read_size, timeout_ms);
+    i2c_master_bus_rm_device(device);
+    return err == ESP_OK;
 }

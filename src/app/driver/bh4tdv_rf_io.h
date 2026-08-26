@@ -18,6 +18,8 @@ bool BH4TDV_RF_IO_Read(uint8_t *keys, bool *sql_active);
 bool BH4TDV_RF_IO_SetGpsPower(bool enabled);
 bool BH4TDV_RF_IO_SetRadioPower(bool enabled);
 bool BH4TDV_RF_IO_SetRadioPtt(bool transmit);
+// Current radio PTT output state (driven from the PCA9555 output latch).
+bool BH4TDV_RF_IO_IsTransmitting(void);
 bool BH4TDV_RF_IO_SetLowPower(bool low_power);
 
 #endif // DRIVER_BH4TDV_RF_IO_H

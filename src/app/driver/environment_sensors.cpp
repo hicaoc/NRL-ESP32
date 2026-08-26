@@ -2,6 +2,9 @@
 
 #include "board_pins.h"
 #include "i2c1.h"
+#include "i2c_device_discovery.h"
+#include "sr110u.h"
+#include "../../services/radio_config.h"
 
 #include <esp_log.h>
 #include <esp_timer.h>
@@ -17,11 +20,14 @@ namespace {
 
 constexpr const char *TAG = "ENV";
 constexpr uint8_t kBmpIdRegister = 0xD0u;
-constexpr uint8_t kBmpExpectedId = 0x58u;
-constexpr uint8_t kQmcAddress = NRL_QMC5883L_I2C_ADDR;
-constexpr uint8_t kBhAddress = NRL_BH1750_I2C_ADDR;
 constexpr uint32_t kCompassPeriodMs = 100u;
 constexpr uint32_t kEnvironmentPeriodMs = 2000u;
+constexpr uint32_t kSensorRetryPeriodMs = 5000u;
+constexpr uint32_t kRssiPollPeriodMs = 1000u;
+// When the boot-time module handshake fails (e.g. the radio was still in its
+// ~1 s power-up window), re-run the full apply every so often. Each attempt
+// can block ~2.5 s, so the period stays well above the sensor cadence.
+constexpr uint32_t kRadioRetryPeriodMs = 15000u;
 
 struct BmpCalibration {
     uint16_t t1;
@@ -36,12 +42,23 @@ struct BmpCalibration {
     int16_t p7;
     int16_t p8;
     int16_t p9;
+    // BME280 only: humidity coefficients (id 0x60).
+    uint8_t h1;
+    int16_t h2;
+    uint8_t h3;
+    int16_t h4;
+    int16_t h5;
+    int8_t h6;
 };
 
 EnvironmentSensorSnapshot s_snapshot = {};
 portMUX_TYPE s_snapshot_lock = portMUX_INITIALIZER_UNLOCKED;
 BmpCalibration s_bmp_cal = {};
+bool s_bme280 = false;
 bool s_started = false;
+uint8_t s_bmp_address = NRL_BMP280_I2C_ADDR;
+uint8_t s_qmc_address = NRL_QMC5883L_I2C_ADDR;
+uint8_t s_bh_address = NRL_BH1750_I2C_ADDR;
 
 uint16_t u16le(const uint8_t *p)
 {
@@ -66,13 +83,17 @@ bool writeRegister(const uint8_t address, const uint8_t reg, const uint8_t value
     return I2C_MasterTransmit(address, data, sizeof(data), 100);
 }
 
-bool initBmp280()
+bool initBmp280At(const uint8_t address)
 {
-    const uint8_t address = NRL_BMP280_I2C_ADDR;
     uint8_t id = 0u;
     if (!I2C_MasterProbe(address, 100) ||
-        !readRegisters(address, kBmpIdRegister, &id, 1u) || id != kBmpExpectedId) {
-        ESP_LOGW(TAG, "BMP280 not found at 0x%02X (id=0x%02X)", address, id);
+        !readRegisters(address, kBmpIdRegister, &id, 1u)) {
+        return false;
+    }
+    // 0x58 = BMP280, 0x60 = BME280. Both share the temperature/pressure
+    // registers and compensation math used below (BME280 humidity is not
+    // configured, so it stays in skip mode).
+    if (id != 0x58u && id != 0x60u) {
         return false;
     }
 
@@ -92,15 +113,54 @@ bool initBmp280()
     s_bmp_cal.p9 = s16le(raw + 22);
     if (s_bmp_cal.t1 == 0u || s_bmp_cal.p1 == 0u) return false;
 
+    s_bme280 = id == 0x60u;
+    if (s_bme280) {
+        // BME280 humidity calibration: H1 at 0xA1, H2..H6 at 0xE1-0xE7.
+        uint8_t hcal[8] = {};
+        if (!readRegisters(address, 0xA1u, hcal, 1u) ||
+            !readRegisters(address, 0xE1u, hcal + 1, 7u)) return false;
+        s_bmp_cal.h1 = hcal[0];
+        s_bmp_cal.h2 = s16le(hcal + 1);
+        s_bmp_cal.h3 = hcal[3];
+        s_bmp_cal.h4 = static_cast<int16_t>((hcal[4] << 4) | (hcal[5] & 0x0Fu));
+        s_bmp_cal.h5 = static_cast<int16_t>((hcal[6] << 4) | (hcal[5] >> 4u));
+        s_bmp_cal.h6 = static_cast<int8_t>(hcal[7]);
+        // osrs_h x1. ctrl_hum only takes effect when ctrl_meas is written
+        // afterwards, which the normal-mode write below does.
+        if (!writeRegister(address, 0xF2u, 0x01u)) return false;
+    }
+
     // 1 s standby, IIR x4; temperature x1, pressure x4, normal mode.
-    return writeRegister(address, 0xF5u, 0xA8u) &&
-           writeRegister(address, 0xF4u, 0x2Fu);
+    if (!writeRegister(address, 0xF5u, 0xA8u) ||
+        !writeRegister(address, 0xF4u, 0x2Fu)) {
+        return false;
+    }
+    s_bmp_address = address;
+    ESP_LOGI(TAG, "BMP280/BME280 ready at 0x%02X (id=0x%02X)", address, id);
+    return true;
 }
 
-bool readBmp280(float *temperature_c, float *pressure_hpa)
+bool initBmp280()
 {
-    uint8_t raw[6] = {};
-    if (!readRegisters(NRL_BMP280_I2C_ADDR, 0xF7u, raw, sizeof(raw))) return false;
+    const uint8_t discovered = I2C_DEVICE_DISCOVERY_GetAddress(
+        I2CDeviceModel::Bmp280, NRL_BMP280_I2C_ADDR);
+    // Try the discovered/default strap first, then the other one: a scan that
+    // ACKed the chip but failed the chip-ID read must not lock the driver
+    // onto a dead address until the next manual rescan.
+    const uint8_t alternate = discovered == 0x76u ? 0x77u : 0x76u;
+    if (initBmp280At(discovered)) return true;
+    if (alternate != discovered && initBmp280At(alternate)) return true;
+    ESP_LOGW(TAG, "BMP280 not found at 0x%02X or 0x%02X", discovered, alternate);
+    return false;
+}
+
+bool readBmp280(float *temperature_c, float *pressure_hpa,
+                float *humidity_percent)
+{
+    // BME280 appends the humidity ADC at 0xFD-0xFE, so burst 8 bytes there.
+    uint8_t raw[8] = {};
+    const size_t burst = s_bme280 ? sizeof(raw) : 6u;
+    if (!readRegisters(s_bmp_address, 0xF7u, raw, burst)) return false;
     const int32_t adc_p = (static_cast<int32_t>(raw[0]) << 12) |
                           (static_cast<int32_t>(raw[1]) << 4) |
                           (static_cast<int32_t>(raw[2]) >> 4);
@@ -136,6 +196,20 @@ bool readBmp280(float *temperature_c, float *pressure_hpa)
     pressure = ((pressure + var1 + var2) >> 8) +
                (static_cast<int64_t>(s_bmp_cal.p7) << 4);
 
+    if (s_bme280 && humidity_percent != nullptr) {
+        // BME280 datasheet fixed-point humidity compensation.
+        const int32_t adc_h = (static_cast<int32_t>(raw[6]) << 8) | raw[7];
+        int32_t v = t_fine - 76800;
+        v = (((((adc_h << 14) - (static_cast<int32_t>(s_bmp_cal.h4) << 20) -
+                (static_cast<int32_t>(s_bmp_cal.h5) * v)) + 16384) >> 15) *
+             (((((((v * static_cast<int32_t>(s_bmp_cal.h6)) >> 10) *
+                  (((v * static_cast<int32_t>(s_bmp_cal.h3)) >> 11) + 32768)) >> 10) +
+                2097152) * static_cast<int32_t>(s_bmp_cal.h2) + 8192) >> 14));
+        v = v - (((((v >> 15) * (v >> 15)) >> 7) *
+                  static_cast<int32_t>(s_bmp_cal.h1)) >> 4);
+        v = v < 0 ? 0 : (v > 419430400 ? 419430400 : v);
+        *humidity_percent = static_cast<float>(v >> 12) / 1024.0f;
+    }
     *temperature_c = static_cast<float>(temp_x100) / 100.0f;
     *pressure_hpa = static_cast<float>(pressure) / 25600.0f;
     return isfinite(*temperature_c) && isfinite(*pressure_hpa) &&
@@ -145,24 +219,27 @@ bool readBmp280(float *temperature_c, float *pressure_hpa)
 
 bool initQmc5883l()
 {
-    if (!I2C_MasterProbe(kQmcAddress, 100)) return false;
+    const uint8_t address = I2C_DEVICE_DISCOVERY_GetAddress(
+        I2CDeviceModel::Qmc5883l, NRL_QMC5883L_I2C_ADDR);
+    if (!I2C_MasterProbe(address, 100)) return false;
     uint8_t id = 0u;
-    if (!readRegisters(kQmcAddress, 0x0Du, &id, 1u)) return false;
-    ESP_LOGI(TAG, "QMC5883L address=0x%02X id=0x%02X", kQmcAddress, id);
+    if (!readRegisters(address, 0x0Du, &id, 1u)) return false;
+    s_qmc_address = address;
+    ESP_LOGI(TAG, "QMC5883L address=0x%02X id=0x%02X", address, id);
     // Soft reset, set/reset period, then continuous 50 Hz, 2 G, OSR 512.
-    if (!writeRegister(kQmcAddress, 0x0Au, 0x80u)) return false;
+    if (!writeRegister(address, 0x0Au, 0x80u)) return false;
     vTaskDelay(pdMS_TO_TICKS(10));
-    return writeRegister(kQmcAddress, 0x0Bu, 0x01u) &&
-           writeRegister(kQmcAddress, 0x09u, 0x09u);
+    return writeRegister(address, 0x0Bu, 0x01u) &&
+           writeRegister(address, 0x09u, 0x09u);
 }
 
 bool readQmc5883l(float *x_ut, float *y_ut, float *z_ut, float *heading_deg)
 {
     uint8_t status = 0u;
-    if (!readRegisters(kQmcAddress, 0x06u, &status, 1u) ||
+    if (!readRegisters(s_qmc_address, 0x06u, &status, 1u) ||
         (status & 0x01u) == 0u || (status & 0x02u) != 0u) return false;
     uint8_t raw[6] = {};
-    if (!readRegisters(kQmcAddress, 0x00u, raw, sizeof(raw))) return false;
+    if (!readRegisters(s_qmc_address, 0x00u, raw, sizeof(raw))) return false;
     const int16_t x = s16le(raw + 0);
     const int16_t y = s16le(raw + 2);
     const int16_t z = s16le(raw + 4);
@@ -180,17 +257,29 @@ bool readQmc5883l(float *x_ut, float *y_ut, float *z_ut, float *heading_deg)
 
 bool initBh1750()
 {
-    if (!I2C_MasterProbe(kBhAddress, 100)) return false;
+    const uint8_t address = I2C_DEVICE_DISCOVERY_GetAddress(
+        I2CDeviceModel::Bh1750, NRL_BH1750_I2C_ADDR);
+    // Never poke an address whose model is still an unresolved conflict:
+    // BH1750 opcodes sent to a PCA9555 strapped at 0x23 would be interpreted
+    // as its command/register byte.
+    if (I2C_DEVICE_DISCOVERY_GetModelAt(address) ==
+        I2CDeviceModel::Pca9555OrBh1750) {
+        ESP_LOGW(TAG, "BH1750 init skipped: 0x%02X is an unresolved "
+                      "BH1750/PCA9555 conflict", address);
+        return false;
+    }
+    if (!I2C_MasterProbe(address, 100)) return false;
+    s_bh_address = address;
     const uint8_t power_on = 0x01u;
     const uint8_t continuous_high_resolution = 0x10u;
-    return I2C_MasterTransmit(kBhAddress, &power_on, 1u, 100) &&
-           I2C_MasterTransmit(kBhAddress, &continuous_high_resolution, 1u, 100);
+    return I2C_MasterTransmit(address, &power_on, 1u, 100) &&
+           I2C_MasterTransmit(address, &continuous_high_resolution, 1u, 100);
 }
 
 bool readBh1750(float *lux)
 {
     uint8_t raw[2] = {};
-    if (!I2C_MasterReceive(kBhAddress, raw, sizeof(raw), 100)) return false;
+    if (!I2C_MasterReceive(s_bh_address, raw, sizeof(raw), 100)) return false;
     const uint16_t value = static_cast<uint16_t>(raw[0] << 8u) | raw[1];
     *lux = static_cast<float>(value) / 1.2f;
     return isfinite(*lux) && *lux >= 0.0f;
@@ -199,16 +288,36 @@ bool readBh1750(float *lux)
 void sensorTask(void *)
 {
     EnvironmentSensorSnapshot local = {};
-    local.bmp280_present = initBmp280();
-    local.qmc5883l_present = initQmc5883l();
-    local.bh1750_present = initBh1750();
-    // AHT20 is physically unsafe on this board while touch remains at 0x38.
-    local.aht20_available = false;
-    ESP_LOGW(TAG, "AHT20 disabled: I2C address 0x38 conflicts with touch");
-
+    uint32_t discovery_revision = UINT32_MAX;
     uint32_t last_environment_ms = 0u;
+    uint32_t last_retry_ms = 0u;
+    uint32_t last_rssi_ms = 0u;
+    uint32_t last_radio_retry_ms = 0u;
     for (;;) {
         const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+        const uint32_t current_revision = I2C_DEVICE_DISCOVERY_GetRevision();
+        if (current_revision != discovery_revision) {
+            discovery_revision = current_revision;
+            local = {};
+            local.bmp280_present = initBmp280();
+            local.qmc5883l_present = initQmc5883l();
+            local.bh1750_present = initBh1750();
+            // AHT20 is physically unsafe while the touch controller remains
+            // on the same fixed 0x38 address.
+            local.aht20_available = false;
+            last_environment_ms = 0u;
+            last_retry_ms = now;
+            ESP_LOGW(TAG, "AHT20 disabled: I2C address 0x38 conflicts with touch");
+        } else if ((!local.bmp280_present || !local.qmc5883l_present ||
+                    !local.bh1750_present) &&
+                   now - last_retry_ms >= kSensorRetryPeriodMs) {
+            // A sensor that failed init at boot (bus contention, slow power-up)
+            // previously stayed dead until the next manual rescan.
+            last_retry_ms = now;
+            if (!local.bmp280_present) local.bmp280_present = initBmp280();
+            if (!local.qmc5883l_present) local.qmc5883l_present = initQmc5883l();
+            if (!local.bh1750_present) local.bh1750_present = initBh1750();
+        }
         if (local.qmc5883l_present) {
             local.qmc5883l_valid = readQmc5883l(
                 &local.magnetic_x_ut, &local.magnetic_y_ut,
@@ -218,12 +327,30 @@ void sensorTask(void *)
             last_environment_ms = now;
             if (local.bmp280_present) {
                 local.bmp280_valid = readBmp280(&local.temperature_c,
-                                                 &local.pressure_hpa);
+                                                 &local.pressure_hpa,
+                                                 &local.humidity_percent);
+                local.bme280_humidity_valid = s_bme280 && local.bmp280_valid;
             }
             if (local.bh1750_present) {
                 local.bh1750_valid = readBh1750(&local.illuminance_lux);
             }
             local.updated_ms = now;
+        }
+        // Feed the cached RF RSSI shown in the status bar and web portal.
+        // PollRssi() never powers the module up, so this is safe while the
+        // radio is configured off.
+        if (now - last_rssi_ms >= kRssiPollPeriodMs) {
+            last_rssi_ms = now;
+            SR110U_PollRssi();
+        }
+        // The radio module may have missed its boot-time configuration
+        // (handshake raced the power-up window) or rejected a group;
+        // dirty groups stay pending, so keep retrying the apply.
+        if (RADIO_CONFIG_Get()->enabled &&
+            (!SR110U_IsReady() || RADIO_CONFIG_PendingApply()) &&
+            now - last_radio_retry_ms >= kRadioRetryPeriodMs) {
+            last_radio_retry_ms = now;
+            (void)RADIO_CONFIG_ApplyToModule();
         }
         portENTER_CRITICAL(&s_snapshot_lock);
         s_snapshot = local;
@@ -237,7 +364,7 @@ void sensorTask(void *)
 bool ENV_SENSORS_Init(void)
 {
     if (s_started) return true;
-    s_started = xTaskCreate(sensorTask, "env_sensors", 4096, nullptr, 3, nullptr) == pdPASS;
+    s_started = xTaskCreate(sensorTask, "env_sensors", 3072, nullptr, 3, nullptr) == pdPASS;
     if (!s_started) ESP_LOGE(TAG, "failed to create sensor task");
     return s_started;
 }

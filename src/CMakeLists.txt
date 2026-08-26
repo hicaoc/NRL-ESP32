@@ -37,6 +37,7 @@ set(app_sources
     services/ota_service.cpp
     services/radio_favorites.cpp
     services/server_list_store.cpp
+    services/radio_config.cpp
     services/signaling_service.cpp
     services/smb_stream.cpp
     services/smb_vfs.cpp
@@ -61,6 +62,7 @@ set(app_sources
     app/driver/external_radio.cpp
     app/driver/gps_serial.cpp
     app/driver/i2c.cpp
+    app/driver/i2c_device_discovery.cpp
     app/driver/sci_serial.cpp
     app/driver/serial_port_config.cpp
     app/driver/status_io.cpp

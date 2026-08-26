@@ -18,6 +18,10 @@
 #include "../app/driver/board_pins.h"
 #include "../app/driver/display.h"
 #include "../app/driver/environment_sensors.h"
+#include "../app/driver/i2c_device_discovery.h"
+#include "../app/driver/bh4tdv_rf_io.h"
+#include "../app/driver/sr110u.h"
+#include "../services/radio_config.h"
 #include "../services/ai_assistant.h"
 #include "../services/aprs_service.h"
 #include "../services/signaling_service.h"
@@ -3483,6 +3487,7 @@ static esp_err_t handlePing(httpd_req_t *req)
     return ESP_OK;
 }
 
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
 static esp_err_t handleSensorStatus(httpd_req_t *req)
 {
     s_server.bind(req);
@@ -3496,20 +3501,49 @@ static esp_err_t handleSensorStatus(httpd_req_t *req)
     cJSON_AddNumberToObject(root, "updated_ms", sensor.updated_ms);
     cJSON_AddBoolToObject(root, "aht20_available", sensor.aht20_available);
     cJSON_AddStringToObject(root, "aht20_status",
-                            sensor.aht20_available ? "ready" : "address_conflict_with_touch");
+                            sensor.bme280_humidity_valid
+                                ? "humidity_from_bme280"
+                                : sensor.aht20_available
+                                      ? "ready"
+                                      : "address_conflict_with_touch");
     auto addValue = [root](const char *name, const bool valid, const double value) {
         if (valid) cJSON_AddNumberToObject(root, name, value);
         else cJSON_AddNullToObject(root, name);
     };
     addValue("temperature_c", sensor.bmp280_valid, sensor.temperature_c);
+    addValue("aht20_temperature_c", sensor.aht20_valid, sensor.aht20_temperature_c);
     addValue("pressure_hpa", sensor.bmp280_valid, sensor.pressure_hpa);
-    addValue("humidity_percent", sensor.aht20_valid, sensor.humidity_percent);
+    addValue("humidity_percent", sensor.aht20_valid || sensor.bme280_humidity_valid,
+           sensor.humidity_percent);
     addValue("illuminance_lux", sensor.bh1750_valid, sensor.illuminance_lux);
     addValue("magnetic_x_ut", sensor.qmc5883l_valid, sensor.magnetic_x_ut);
     addValue("magnetic_y_ut", sensor.qmc5883l_valid, sensor.magnetic_y_ut);
     addValue("magnetic_z_ut", sensor.qmc5883l_valid, sensor.magnetic_z_ut);
     addValue("heading_deg", sensor.qmc5883l_valid, sensor.heading_deg);
     cJSON_AddBoolToObject(root, "compass_calibrated", sensor.compass_calibrated);
+    I2CDiscoveredDevice devices[32] = {};
+    uint32_t i2c_revision = 0u;
+    const size_t i2c_count = I2C_DEVICE_DISCOVERY_GetSnapshot(
+        devices, sizeof(devices) / sizeof(devices[0]), &i2c_revision);
+    cJSON_AddNumberToObject(root, "i2c_revision", i2c_revision);
+    cJSON *i2c_devices = cJSON_AddArrayToObject(root, "i2c_devices");
+    const size_t shown = i2c_count < (sizeof(devices) / sizeof(devices[0]))
+                             ? i2c_count : (sizeof(devices) / sizeof(devices[0]));
+    for (size_t i = 0u; i < shown && i2c_devices != nullptr; ++i) {
+        cJSON *item = cJSON_CreateObject();
+        if (item == nullptr) break;
+        cJSON_AddNumberToObject(item, "address_7bit", devices[i].address_7bit);
+        cJSON_AddNumberToObject(item, "write_address_8bit", devices[i].write_address_8bit);
+        cJSON_AddNumberToObject(item, "read_address_8bit", devices[i].read_address_8bit);
+        cJSON_AddStringToObject(item, "model",
+                                I2C_DEVICE_DISCOVERY_ModelName(devices[i].model));
+        if (devices[i].identity_valid) {
+            cJSON_AddNumberToObject(item, "identity", devices[i].identity);
+        } else {
+            cJSON_AddNullToObject(item, "identity");
+        }
+        cJSON_AddItemToArray(i2c_devices, item);
+    }
     char *body = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (body == nullptr) {
@@ -3522,6 +3556,20 @@ static esp_err_t handleSensorStatus(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t handleI2cScan(httpd_req_t *req)
+{
+    s_server.bind(req);
+    if (!I2C_DEVICE_DISCOVERY_Scan()) {
+        // esp_http_server's httpd_resp_send_err() has no 409 enum value;
+        // set the status line explicitly so the page JS still sees !r.ok.
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_send(req, "I2C scan is already running",
+                               HTTPD_RESP_USE_STRLEN);
+    }
+    (void)BH4TDV_RF_IO_Init();
+    return handleSensorStatus(req);
+}
+
 static esp_err_t handleSensorsPage(httpd_req_t *req)
 {
     s_server.bind(req);
@@ -3530,26 +3578,234 @@ static esp_err_t handleSensorsPage(httpd_req_t *req)
 <title>BH4TDV-RF 传感器</title><link rel="stylesheet" href="/portal.css"></head><body><main class="shell">
 <p class="back-home"><a href="/">&larr; 返回首页</a></p><section class="panel">
 <div class="section-head"><h2>传感器实时数据</h2><span class="hint mono" id="stamp">--</span></div>
-<div class="status"><div><span>温度</span><strong id="temp">--</strong></div>
+<div class="status"><div><span>温度·气压模块</span><strong id="temp">--</strong></div>
+<div><span>温度·温湿度模块</span><strong id="temp2">--</strong></div>
 <div><span>气压</span><strong id="pressure">--</strong></div>
 <div><span>湿度</span><strong id="humidity">--</strong></div>
 <div><span>照度</span><strong id="lux">--</strong></div>
 <div><span>航向</span><strong id="heading">--</strong></div>
 <div><span>磁场 X/Y/Z</span><strong class="mono" id="mag">--</strong></div></div>
 <p class="notice" id="aht">AHT20：正在读取状态</p>
-<p class="hint">罗盘航向未完成安装方向及硬铁/软铁校准前仅供调试。</p></section></main>
+<p class="hint">罗盘航向未完成安装方向及硬铁/软铁校准前仅供调试。</p></section>
+<section class="panel"><div class="section-head"><h2>I2C Devices</h2>
+<button type="button" id="i2c-scan">Scan 0x00-0xFF</button></div>
+<p class="hint">Shows 7-bit address and the corresponding 8-bit write/read bytes.</p>
+<pre class="mono" id="i2c-list">Loading...</pre></section></main>
 <script>const f=(v,d,u)=>v==null?'--':Number(v).toFixed(d)+u;
+const hx=v=>'0x'+Number(v).toString(16).toUpperCase().padStart(2,'0');
+function showI2c(s){const a=Array.isArray(s.i2c_devices)?s.i2c_devices:[];
+i2cList.textContent=a.length?a.map(d=>hx(d.address_7bit)+'  '+hx(d.write_address_8bit)+'/'+hx(d.read_address_8bit)+'  '+d.model+(d.identity==null?'':'  ID='+hx(d.identity))).join('\n'):'No I2C devices found';}
 async function refresh(){try{const r=await fetch('/sensors/status',{cache:'no-store'});const s=await r.json();
-temp.textContent=f(s.temperature_c,1,' °C');pressure.textContent=f(s.pressure_hpa,1,' hPa');
-humidity.textContent=f(s.humidity_percent,1,' %RH');lux.textContent=f(s.illuminance_lux,1,' lx');
+temp2.textContent=f(s.aht20_temperature_c,1,' °C');temp.textContent=f(s.temperature_c,1,' °C');pressure.textContent=f(s.pressure_hpa,1,' hPa');
+humidity.textContent=f(s.humidity_percent,1,' %RH');lux.textContent=f(s.illuminance_lux,0,' lx');
 heading.textContent=f(s.heading_deg,1,'°');mag.textContent=[s.magnetic_x_ut,s.magnetic_y_ut,s.magnetic_z_ut].map(v=>f(v,1,'')).join(' / ')+' µT';
-aht.textContent=s.aht20_available?'AHT20：可用':'AHT20：与触摸屏地址 0x38 冲突，已安全禁用';
-stamp.textContent='更新 '+new Date().toLocaleTimeString();}catch(e){stamp.textContent='读取失败';}}
+aht.textContent=s.aht20_status==='humidity_from_bme280'?'湿度来自 BME280（AHT20 与触摸 0x38 冲突，仍禁用）':(s.aht20_available?'AHT20：可用':'AHT20：与触摸屏地址 0x38 冲突，已安全禁用');
+showI2c(s);stamp.textContent='更新 '+new Date().toLocaleTimeString();}catch(e){stamp.textContent='读取失败';}}
+i2cScan.onclick=async()=>{i2cScan.disabled=true;i2cList.textContent='Scanning...';try{const r=await fetch('/sensors/i2c-scan',{method:'POST'});if(!r.ok)throw new Error();showI2c(await r.json());}catch(e){i2cList.textContent='Scan failed or already running';}finally{i2cScan.disabled=false;}};
 refresh();setInterval(refresh,2000);</script></body></html>)HTML";
     s_server.sendHeader("Cache-Control", "no-store");
     s_server.send(200, "text/html; charset=utf-8", page);
     return ESP_OK;
 }
+
+#endif // NRL_BOARD == NRL_BOARD_BH4TDV_RF
+
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+static void addRadioToneJson(cJSON *root, const char *name, const RadioTone *tone)
+{
+    char text[16] = {};
+    RADIO_CONFIG_FormatTone(tone, text, sizeof(text));
+    cJSON_AddStringToObject(root, name, text);
+}
+
+static esp_err_t handleRadioStatus(httpd_req_t *req)
+{
+    s_server.bind(req);
+    const RadioModuleConfig *config = RADIO_CONFIG_Get();
+    cJSON *root = cJSON_CreateObject();
+    if (root == nullptr) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "radio JSON allocation failed");
+    }
+    cJSON_AddBoolToObject(root, "ready", SR110U_IsReady());
+    cJSON_AddNumberToObject(root, "rssi", SR110U_GetCachedRssi());
+    cJSON_AddNumberToObject(root, "rssi_dbm",
+                            SR110U_RssiToDbm(SR110U_GetCachedRssi()));
+    cJSON_AddStringToObject(root, "version", SR110U_GetVersion());
+    cJSON_AddBoolToObject(root, "en", config->enabled);
+    char text[16] = {};
+    RADIO_CONFIG_FormatFreqMHz(config->rx_freq_hz, text, sizeof(text));
+    cJSON_AddStringToObject(root, "rxf", text);
+    RADIO_CONFIG_FormatFreqMHz(config->tx_freq_hz, text, sizeof(text));
+    cJSON_AddStringToObject(root, "txf", text);
+    addRadioToneJson(root, "rxct", &config->rx_tone);
+    addRadioToneJson(root, "txct", &config->tx_tone);
+    cJSON_AddNumberToObject(root, "sql", config->squelch);
+    cJSON_AddNumberToObject(root, "mic", config->mic_level);
+    cJSON_AddNumberToObject(root, "tot", config->tot);
+    cJSON_AddNumberToObject(root, "scram", config->scramble);
+    cJSON_AddBoolToObject(root, "comp", config->compander);
+    cJSON_AddNumberToObject(root, "vol", config->volume);
+    cJSON_AddBoolToObject(root, "sav", config->power_save);
+    cJSON_AddNumberToObject(root, "vox", config->vox);
+    cJSON_AddBoolToObject(root, "bclo", config->busy_lockout);
+    cJSON_AddBoolToObject(root, "nb", config->narrowband);
+    cJSON_AddBoolToObject(root, "lp", config->low_power);
+    char *body = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (body == nullptr) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "radio JSON serialization failed");
+    }
+    s_server.sendHeader("Cache-Control", "no-store");
+    s_server.send(200, "application/json; charset=utf-8", body);
+    cJSON_free(body);
+    return ESP_OK;
+}
+
+static esp_err_t handleSaveRadio(httpd_req_t *req)
+{
+    s_server.bind(req);
+    if (!s_server.bindPost(req)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "form parse failed");
+        return ESP_OK;
+    }
+    RadioModuleConfig config = *RADIO_CONFIG_Get();
+    bool ok = true;
+    const char *bad_field = "";
+    if (s_server.hasArg("en_present")) {
+        config.enabled = s_server.hasArg("en");
+    }
+    if (ok && s_server.hasArg("rxf")) {
+        ok = RADIO_CONFIG_ParseFreqMHz(s_server.arg("rxf").c_str(),
+                                       &config.rx_freq_hz);
+        if (!ok) bad_field = "rxf";
+    }
+    if (ok && s_server.hasArg("txf")) {
+        ok = RADIO_CONFIG_ParseFreqMHz(s_server.arg("txf").c_str(),
+                                       &config.tx_freq_hz);
+        if (!ok) bad_field = "txf";
+    }
+    if (ok && s_server.hasArg("rxct")) {
+        ok = RADIO_CONFIG_ParseTone(s_server.arg("rxct").c_str(),
+                                    &config.rx_tone);
+        if (!ok) bad_field = "rxct";
+    }
+    if (ok && s_server.hasArg("txct")) {
+        ok = RADIO_CONFIG_ParseTone(s_server.arg("txct").c_str(),
+                                    &config.tx_tone);
+        if (!ok) bad_field = "txct";
+    }
+    auto uintField = [&](const char *name, uint8_t RadioModuleConfig::*member,
+                         const unsigned long hi) {
+        if (!ok || !s_server.hasArg(name)) return;
+        unsigned long value = 0u;
+        ok = parseUIntArg(s_server.arg(name), &value) && value <= hi;
+        if (ok) config.*member = static_cast<uint8_t>(value);
+        else bad_field = name;
+    };
+    uintField("sql", &RadioModuleConfig::squelch, 8u);
+    uintField("mic", &RadioModuleConfig::mic_level, 8u);
+    uintField("tot", &RadioModuleConfig::tot, 9u);
+    uintField("scram", &RadioModuleConfig::scramble, 7u);
+    uintField("vox", &RadioModuleConfig::vox, 8u);
+    if (ok && s_server.hasArg("vol")) {
+        unsigned long value = 0u;
+        ok = parseUIntArg(s_server.arg("vol"), &value) &&
+             value >= 1u && value <= 9u;
+        if (ok) config.volume = static_cast<uint8_t>(value);
+        else bad_field = "vol";
+    }
+    if (s_server.hasArg("comp_present")) {
+        config.compander = s_server.hasArg("comp");
+    }
+    if (s_server.hasArg("sav_present")) {
+        config.power_save = s_server.hasArg("sav");
+    }
+    if (s_server.hasArg("bclo_present")) {
+        config.busy_lockout = s_server.hasArg("bclo");
+    }
+    if (ok && s_server.hasArg("nb")) {
+        config.narrowband = s_server.arg("nb") == "1";
+    }
+    if (ok && s_server.hasArg("lp")) {
+        config.low_power = s_server.arg("lp") == "1";
+    }
+
+    if (!ok || !RADIO_CONFIG_Set(&config, true)) {
+        if (bad_field[0] == '\0') bad_field = "config";
+        char detail[64] = {};
+        snprintf(detail, sizeof(detail), "invalid radio config: %s", bad_field);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, detail);
+        return ESP_OK;
+    }
+    const bool applied = RADIO_CONFIG_ApplyToModule();
+    s_server.sendHeader("Cache-Control", "no-store");
+    s_server.send(200, "text/plain; charset=utf-8",
+                  applied ? "saved+applied" : "saved (module apply deferred)");
+    return ESP_OK;
+}
+
+static esp_err_t handleRadioPage(httpd_req_t *req)
+{
+    s_server.bind(req);
+    static const char page[] = R"HTML(<!doctype html><html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BH4TDV-RF 射频模块</title><link rel="stylesheet" href="/portal.css"></head><body><main class="shell">
+<p class="back-home"><a href="/">&larr; 返回首页</a></p><section class="panel">
+<div class="section-head"><h2>SR-110U 射频模块</h2><span class="hint mono" id="state">--</span></div>
+<form id="cfg"><div class="grid">
+<label class="fmo-row"><input type="checkbox" name="en" value="1" id="en">启用射频模块（关闭即断电）</label>
+<label>接收频率 MHz<input name="rxf" id="rxf" maxlength="9" placeholder="450.02500"></label>
+<label>发射频率 MHz<input name="txf" id="txf" maxlength="9" placeholder="450.02500"></label>
+<label>接收哑音<input name="rxct" id="rxct" list="tonelist" maxlength="6" placeholder="OFF / 67.0 / D023N"></label>
+<label>发射哑音<input name="txct" id="txct" list="tonelist" maxlength="6" placeholder="OFF / 88.5 / D023I"></label>
+<label>静噪等级 SQL<select name="sql" id="sql"></select></label>
+<label>MIC 灵敏度<select name="mic" id="mic"></select></label>
+<label>发射定时 TOT<select name="tot" id="tot"></select></label>
+<label>扰频<select name="scram" id="scram"></select></label>
+<label>音量<select name="vol" id="vol"></select></label>
+<label>VOX<select name="vox" id="vox"></select></label>
+<label>带宽<select name="nb" id="nb"><option value="0">宽带</option><option value="1">窄带</option></select></label>
+<label>发射功率<select name="lp" id="lp"><option value="0">高功率</option><option value="1">低功率</option></select></label>
+<label class="fmo-row"><input type="checkbox" name="comp" value="1" id="comp">压扩</label>
+<label class="fmo-row"><input type="checkbox" name="sav" value="1" id="sav">接收省电</label>
+<label class="fmo-row"><input type="checkbox" name="bclo" value="1" id="bclo">遇忙禁发</label>
+</div>
+<input type="hidden" name="en_present" value="1"><input type="hidden" name="comp_present" value="1">
+<input type="hidden" name="sav_present" value="1"><input type="hidden" name="bclo_present" value="1">
+<button type="submit">保存并下发到模块</button></form>
+<p class="hint" id="msg"></p>
+<p class="hint">哑音格式：OFF 关闭；CTCSS 填频率如 67.0；CDCSS 填 D023N（正极性）/D023I（负极性）。
+频率范围 400.00000-480.00000 MHz，2.5/6.25 kHz 步进。参数写入模块断电记忆；保存时若模块不可达，会在下次开机时应用。</p></section>
+<script>
+const $=id=>document.getElementById(id);let loaded=false;
+function fill(id,lo,hi,label){const e=$(id);for(let i=lo;i<=hi;i++){const o=document.createElement('option');o.value=i;o.textContent=label?label(i):i;e.appendChild(o);}}
+fill('sql',0,8);fill('mic',0,8);
+fill('tot',0,9,i=>i===0?'关闭':i+' 分钟');
+fill('scram',0,7,i=>i===0?'关闭':i);
+fill('vol',1,9);
+fill('vox',0,8,i=>i===0?'关闭':i);
+async function refresh(){try{const r=await fetch('/radio/status',{cache:'no-store'});const s=await r.json();
+$('state').textContent=(s.ready?'模块在线':'模块离线')+(s.version?' '+s.version:'')+' / RSSI '+(s.rssi>=0?s.rssi_dbm+'dBm ('+s.rssi+')':'--');
+if(loaded)return;loaded=true;
+$('en').checked=s.en;$('rxf').value=s.rxf;$('txf').value=s.txf;$('rxct').value=s.rxct;$('txct').value=s.txct;
+$('sql').value=s.sql;$('mic').value=s.mic;$('tot').value=s.tot;$('scram').value=s.scram;
+$('vol').value=s.vol;$('vox').value=s.vox;$('nb').value=s.nb?'1':'0';$('lp').value=s.lp?'1':'0';
+$('comp').checked=s.comp;$('sav').checked=s.sav;$('bclo').checked=s.bclo;}catch(e){$('state').textContent='读取失败';}}
+const CTCSS=['67.0','69.3','71.9','74.4','77.0','79.7','82.5','85.4','88.5','91.5','94.8','97.4','100.0','103.5','107.2','110.9','114.8','118.8','123.0','127.3','131.8','136.5','141.3','146.2','151.4','156.7','159.8','162.2','167.9','173.8','179.9','183.5','186.2','189.9','192.8','196.6','199.5','203.5','206.5','210.7','218.1','225.7','229.1','233.6','241.8','250.3','254.1'];
+const CDCSS=['023','025','026','031','032','036','043','047','051','053','054','065','071','072','073','074','114','115','116','122','125','131','132','134','143','145','152','155','156','162','165','172','174','205','212','223','225','226','243','244','245','246','251','252','255','261','263','265','266','271','274','306','311','315','325','331','332','343','346','351','356','364','365','371','411','412','413','423','431','432','445','446','452','454','455','462','464','465','466','503','506','516','523','526','532','546','565','606','612','624','627','631','632','654','662','664','703','712','723','731','732','734','743','754'];
+{const dl=document.createElement('datalist');dl.id='tonelist';['OFF',...CTCSS,...CDCSS.map(c=>'D'+c+'N'),...CDCSS.map(c=>'D'+c+'I')].forEach(v=>{const o=document.createElement('option');o.value=v;dl.appendChild(o);});document.body.appendChild(dl);}
+$('cfg').onsubmit=async e=>{e.preventDefault();const body=new URLSearchParams(new FormData(e.target));
+try{const r=await fetch('/save_radio',{method:'POST',body});const t=await r.text();
+$('msg').textContent=r.ok?'已保存：'+t:'保存失败：'+t;if(r.ok)loaded=false;}catch(err){$('msg').textContent='保存失败：'+err;}refresh();};
+refresh();setInterval(refresh,3000);
+</script></main></body></html>)HTML";
+    s_server.sendHeader("Cache-Control", "no-store");
+    s_server.send(200, "text/html; charset=utf-8", page);
+    return ESP_OK;
+}
+#endif // NRL_BOARD == NRL_BOARD_BH4TDV_RF
 
 // Machine-readable local AT endpoint used by the mini program. This avoids
 // scraping the device's HTML UI and executes the same command parser as the
@@ -3682,8 +3938,14 @@ static void ensureServerRunning()
         { "/ota/install",          HTTP_POST, handleOtaInstall },
         { "/portal.css",           HTTP_GET,  handlePortalCss },
         { "/portal.js",            HTTP_GET,  handlePortalJs },
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
         { "/sensors",             HTTP_GET,  handleSensorsPage },
         { "/sensors/status",      HTTP_GET,  handleSensorStatus },
+        { "/sensors/i2c-scan",    HTTP_POST, handleI2cScan },
+        { "/radio",               HTTP_GET,  handleRadioPage },
+        { "/radio/status",        HTTP_GET,  handleRadioStatus },
+        { "/save_radio",          HTTP_POST, handleSaveRadio },
+#endif
         { "/update.css",           HTTP_GET,  handleUpdateCss },
         { "/update.js",            HTTP_GET,  handleUpdateJs },
         { "/ping",                 HTTP_GET,  handlePing },

@@ -27,11 +27,13 @@
 #include "services/radio_favorites.h"
 #include "services/nanny.h"
 #include "services/ota_service.h"
+#include "services/radio_config.h"
 #include "services/storage_service.h"
 #include "services/signaling_service.h"
 #include "services/cw_service.h"
 #include "services/sstv_service.h"
 #include "driver/sci_serial.h"
+#include "driver/sr110u.h"
 #include "app/main_loop_profile.h"
 
 #include <esp_log.h>
@@ -668,6 +670,156 @@ static bool applyCurrentAudioConfig(void)
 #endif
 }
 
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+// SR-110U RF module: "AT+RADIO=?" dumps everything; each RADIO_* writer
+// validates through RADIO_CONFIG_Set (which persists) and then pushes the
+// whole set to the module over its UART. When the module cannot be reached
+// the value is still stored and applies on the next boot; the reply says so.
+bool handleRadioAtCommand(const AtCommand &command, const bool is_query,
+                          NrlAtCommandResult *result)
+{
+    const char *name = command.command;
+    // "RADIO" or "RADIO_..." only -- the network-radio favourites commands
+    // (RADIOLIST/RADIOADD/...) share the prefix and keep their own handlers.
+    if (strncasecmp(name, "RADIO", 5u) != 0 ||
+        (name[5] != '\0' && name[5] != '_')) {
+        return false;
+    }
+
+    RadioModuleConfig config = *RADIO_CONFIG_Get();
+    char text[24] = {};
+
+    auto err = [&]() {
+        appendKeyValueLine(result->payload, sizeof(result->payload),
+                           &result->payload_size, "ERR", name);
+    };
+    auto store = [&]() {
+        if (!RADIO_CONFIG_Set(&config, true)) {
+            err();
+            return false;
+        }
+        if (!RADIO_CONFIG_ApplyToModule()) {
+            appendKeyValueLine(result->payload, sizeof(result->payload),
+                               &result->payload_size, "RADIO_APPLY", "DEFERRED");
+        }
+        return true;
+    };
+
+    if (stringEqualsIgnoreCase(name, "RADIO")) {
+        auto line = [&](const char *key, const char *value) {
+            appendKeyValueLine(result->payload, sizeof(result->payload),
+                               &result->payload_size, key, value);
+        };
+        line("RADIO_EN", config.enabled ? "ON" : "OFF");
+        RADIO_CONFIG_FormatFreqMHz(config.rx_freq_hz, text, sizeof(text));
+        line("RADIO_RXF", text);
+        RADIO_CONFIG_FormatFreqMHz(config.tx_freq_hz, text, sizeof(text));
+        line("RADIO_TXF", text);
+        RADIO_CONFIG_FormatTone(&config.rx_tone, text, sizeof(text));
+        line("RADIO_RXCT", text);
+        RADIO_CONFIG_FormatTone(&config.tx_tone, text, sizeof(text));
+        line("RADIO_TXCT", text);
+        snprintf(text, sizeof(text), "%u", config.squelch); line("RADIO_SQL", text);
+        snprintf(text, sizeof(text), "%u", config.mic_level); line("RADIO_MIC", text);
+        snprintf(text, sizeof(text), "%u", config.tot); line("RADIO_TOT", text);
+        snprintf(text, sizeof(text), "%u", config.scramble); line("RADIO_SCRAM", text);
+        line("RADIO_COMP", config.compander ? "ON" : "OFF");
+        snprintf(text, sizeof(text), "%u", config.volume); line("RADIO_VOL", text);
+        line("RADIO_SAV", config.power_save ? "ON" : "OFF");
+        snprintf(text, sizeof(text), "%u", config.vox); line("RADIO_VOX", text);
+        line("RADIO_BCLO", config.busy_lockout ? "ON" : "OFF");
+        line("RADIO_NB", config.narrowband ? "ON" : "OFF");
+        line("RADIO_LP", config.low_power ? "ON" : "OFF");
+        return true;
+    }
+
+    auto boolField = [&](const char *key, bool RadioModuleConfig::*member) {
+        if (!is_query) {
+            bool value = false;
+            if (!parseBoolValue(command.value, &value)) {
+                err();
+                return true;
+            }
+            config.*member = value;
+            if (!store()) return true;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload),
+                           &result->payload_size, key,
+                           config.*member ? "ON" : "OFF");
+        return true;
+    };
+    if (stringEqualsIgnoreCase(name, "RADIO_EN")) return boolField("RADIO_EN", &RadioModuleConfig::enabled);
+    if (stringEqualsIgnoreCase(name, "RADIO_COMP")) return boolField("RADIO_COMP", &RadioModuleConfig::compander);
+    if (stringEqualsIgnoreCase(name, "RADIO_SAV")) return boolField("RADIO_SAV", &RadioModuleConfig::power_save);
+    if (stringEqualsIgnoreCase(name, "RADIO_BCLO")) return boolField("RADIO_BCLO", &RadioModuleConfig::busy_lockout);
+    if (stringEqualsIgnoreCase(name, "RADIO_NB")) return boolField("RADIO_NB", &RadioModuleConfig::narrowband);
+    if (stringEqualsIgnoreCase(name, "RADIO_LP")) return boolField("RADIO_LP", &RadioModuleConfig::low_power);
+
+    auto uintField = [&](const char *key, uint8_t RadioModuleConfig::*member,
+                         const unsigned long lo, const unsigned long hi) {
+        if (!is_query) {
+            unsigned long value = 0u;
+            if (!parseUnsignedValue(command.value, &value) ||
+                value < lo || value > hi) {
+                err();
+                return true;
+            }
+            config.*member = static_cast<uint8_t>(value);
+            if (!store()) return true;
+        }
+        appendUnsignedLine(result->payload, sizeof(result->payload),
+                           &result->payload_size, key, config.*member);
+        return true;
+    };
+    if (stringEqualsIgnoreCase(name, "RADIO_SQL")) return uintField("RADIO_SQL", &RadioModuleConfig::squelch, 0u, 8u);
+    if (stringEqualsIgnoreCase(name, "RADIO_MIC")) return uintField("RADIO_MIC", &RadioModuleConfig::mic_level, 0u, 8u);
+    if (stringEqualsIgnoreCase(name, "RADIO_TOT")) return uintField("RADIO_TOT", &RadioModuleConfig::tot, 0u, 9u);
+    if (stringEqualsIgnoreCase(name, "RADIO_SCRAM")) return uintField("RADIO_SCRAM", &RadioModuleConfig::scramble, 0u, 7u);
+    if (stringEqualsIgnoreCase(name, "RADIO_VOL")) return uintField("RADIO_VOL", &RadioModuleConfig::volume, 1u, 9u);
+    if (stringEqualsIgnoreCase(name, "RADIO_VOX")) return uintField("RADIO_VOX", &RadioModuleConfig::vox, 0u, 8u);
+
+    auto freqField = [&](const char *key, uint32_t RadioModuleConfig::*member) {
+        if (!is_query) {
+            uint32_t hz = 0u;
+            if (!RADIO_CONFIG_ParseFreqMHz(command.value, &hz)) {
+                err();
+                return true;
+            }
+            config.*member = hz;
+            if (!store()) return true;
+        }
+        RADIO_CONFIG_FormatFreqMHz(config.*member, text, sizeof(text));
+        appendKeyValueLine(result->payload, sizeof(result->payload),
+                           &result->payload_size, key, text);
+        return true;
+    };
+    if (stringEqualsIgnoreCase(name, "RADIO_RXF")) return freqField("RADIO_RXF", &RadioModuleConfig::rx_freq_hz);
+    if (stringEqualsIgnoreCase(name, "RADIO_TXF")) return freqField("RADIO_TXF", &RadioModuleConfig::tx_freq_hz);
+
+    auto toneField = [&](const char *key, RadioTone RadioModuleConfig::*member) {
+        if (!is_query) {
+            RadioTone tone = {};
+            if (!RADIO_CONFIG_ParseTone(command.value, &tone)) {
+                err();
+                return true;
+            }
+            config.*member = tone;
+            if (!store()) return true;
+        }
+        RADIO_CONFIG_FormatTone(&(config.*member), text, sizeof(text));
+        appendKeyValueLine(result->payload, sizeof(result->payload),
+                           &result->payload_size, key, text);
+        return true;
+    };
+    if (stringEqualsIgnoreCase(name, "RADIO_RXCT")) return toneField("RADIO_RXCT", &RadioModuleConfig::rx_tone);
+    if (stringEqualsIgnoreCase(name, "RADIO_TXCT")) return toneField("RADIO_TXCT", &RadioModuleConfig::tx_tone);
+
+    // "RADIO"-prefixed but unknown.
+    err();
+    return true;
+}
+#endif // NRL_BOARD == NRL_BOARD_BH4TDV_RF
+
 } // namespace
 
 void NRL_AT_HandlePayload(const uint8_t *payload,
@@ -1064,6 +1216,14 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "TAIL_SUPPRESS", EXTERNAL_RADIO_GetConfig()->tail_suppress_ms);
         return;
     }
+
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    // SR-110U RF module configuration (frequency, CTCSS/CDCSS, squelch,
+    // scramble, compander, TOT, MIC level, volume, power save, VOX).
+    if (handleRadioAtCommand(command, is_query, result)) {
+        return;
+    }
+#endif
 
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY
     // Read-only: the current calibrated battery voltage in millivolts. Always
@@ -3028,6 +3188,28 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
                            &result->payload_size, "SSTV", started ? "STARTED" : "BUSY");
         return;
     }
+
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    // Bare SR-110U module commands (AT+DMO...) forward straight to the module
+    // and echo its reply, so format/band questions can be settled from the
+    // console (serial and NRL remote alike) without a USB-serial tool.
+    if (strncasecmp(command.command, "DMO", 3u) == 0) {
+        char wire[320] = {};
+        snprintf(wire, sizeof(wire), "AT+%s%s%s", command.command,
+                 command.value[0] != 0 ? "=" : "", command.value);
+        char response[96] = {};
+        if (!SR110U_Command(wire, response, sizeof(response), 800u)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload),
+                               &result->payload_size, "ERR", command.command);
+            return;
+        }
+        char *end = response + strlen(response);
+        while (end > response && (end[-1] == 13 || end[-1] == 10)) *--end = 0;
+        appendKeyValueLine(result->payload, sizeof(result->payload),
+                           &result->payload_size, command.command, response);
+        return;
+    }
+#endif
 
     ESP_LOGI(TAG, "unknown AT command: %s=%s, returning command list",
              command.command,
