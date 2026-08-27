@@ -48,6 +48,7 @@ static const uint8_t kBroadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static volatile bool s_enabled = false;
 static volatile bool s_rx_enabled = true;     // RX switch; defaults ON
 static volatile uint8_t s_ptt_mode = 0;       // 0 = NRL, 1 = ESP-NOW, 2 = FMO
+static volatile uint8_t s_f2_ptt_target = 0;  // BH4TDV-RF F2 key: 0 = FMO, 1 = ESP-NOW
 static volatile uint8_t s_tx_codec = 0;       // 0 = G.711, 1 = Opus; independent of NRL
 static bool s_espnow_inited = false;
 static uint8_t s_tx_packet[kPacketBytes];
@@ -101,6 +102,27 @@ static uint8_t load_ptt_mode(void)
         nvs_close(nvs);
     }
     return mode <= 2u ? mode : 0u;
+}
+
+static void save_f2_ptt_target(const uint8_t target)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(kNvsNamespace, NVS_READWRITE, &nvs) == ESP_OK) {
+        (void)nvs_set_u8(nvs, "f2ptt", target != 0u ? 1u : 0u);
+        (void)nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+}
+
+static uint8_t load_f2_ptt_target(void)
+{
+    nvs_handle_t nvs;
+    uint8_t target = 0;
+    if (nvs_open(kNvsNamespace, NVS_READONLY, &nvs) == ESP_OK) {
+        (void)nvs_get_u8(nvs, "f2ptt", &target);
+        nvs_close(nvs);
+    }
+    return target != 0u ? 1u : 0u;
 }
 
 static void save_rx_enabled(const bool enabled)
@@ -489,6 +511,7 @@ static void espnow_deferred_enable_task(void *)
 extern "C" void ESPNOW_LINK_Init(void)
 {
     s_ptt_mode = load_ptt_mode();
+    s_f2_ptt_target = load_f2_ptt_target();
     s_rx_enabled = load_rx_enabled();
     // Restore the persisted TX codec; if boot-time RAM cannot hold the Opus
     // codecs, run this session as G.711 (NVS keeps the user's choice).
@@ -587,6 +610,21 @@ extern "C" void ESPNOW_LINK_SetPttMode(const uint8_t mode)
 extern "C" uint8_t ESPNOW_LINK_GetPttMode(void)
 {
     return s_ptt_mode;
+}
+
+extern "C" void ESPNOW_LINK_SetF2PttTarget(const uint8_t target)
+{
+    s_f2_ptt_target = target != 0u ? 1u : 0u;
+    if (s_f2_ptt_target != 1u) {
+        s_ptt_held = false;
+    }
+    save_f2_ptt_target(s_f2_ptt_target);
+    CONFIG_NOTIFY_Bump();
+}
+
+extern "C" uint8_t ESPNOW_LINK_GetF2PttTarget(void)
+{
+    return s_f2_ptt_target;
 }
 
 extern "C" void ESPNOW_LINK_SetPtt(const bool held)

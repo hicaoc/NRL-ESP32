@@ -46,6 +46,7 @@
 #include "../../services/aprs_service.h"
 #include "../../services/espnow_link.h"
 #include "../../services/fmo_service.h"
+#include "../../services/server_list_store.h"
 #include "../../services/fmo_cert_store.h"
 #include "../../services/fmo_qso.h"
 #include "../../services/fmo_qso_core.h"
@@ -145,6 +146,10 @@ constexpr uint32_t kColorFmo      = 0xF5B453;  // FMO caller / link
 // APRS packets may contain Chinese comments. Keep the normal Latin UI font,
 // but fall back to the bundled 16px GB2312 font for the ticker only.
 lv_font_t s_font_aprs_16;
+// 14 px UI font with the CJK fallback: full GB2312 coverage like
+// s_font_aprs_16 but montserrat_14's 16 px line height, so the NRL/FMO
+// server rows can be packed tighter on the BH4TDV-RF home page.
+lv_font_t s_font_server_14;
 #if NRL_BOARD_IS_BI4UMD_FAMILY
 lv_font_t s_font_music_20;
 constexpr size_t kBi4umdMusicListMaxRows = 48u;
@@ -192,6 +197,9 @@ lv_obj_t *s_lbl_wifi = nullptr;
 lv_obj_t *s_lbl_vol = nullptr;
 lv_obj_t *s_lbl_batt = nullptr;
 lv_obj_t *s_lbl_ip = nullptr;
+// BH4TDV_RF home: current NRL / FMO server name lines under the IP row.
+lv_obj_t *s_lbl_nrl_server = nullptr;
+lv_obj_t *s_lbl_fmo_server = nullptr;
 lv_obj_t *s_lbl_cpu = nullptr;
 lv_obj_t *s_lbl_gps = nullptr;
 lv_obj_t *s_lbl_rf_rssi = nullptr;
@@ -326,6 +334,7 @@ enum class MenuPage : uint8_t {
 enum class MainMenuAction : uint8_t {
     Back,
     PttMode,
+    F2Ptt,
     Fmo,
     FmoBcast,
     NrlCodec,
@@ -360,6 +369,9 @@ constexpr MainMenuAction kMainMenuActions[] = {
     MainMenuAction::About,
 #else
     MainMenuAction::PttMode,
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    MainMenuAction::F2Ptt,
+#endif
     MainMenuAction::Fmo,
     MainMenuAction::FmoBcast,
     MainMenuAction::NrlCodec,
@@ -489,6 +501,8 @@ char s_shown_wifi[28] = {};
 char s_shown_vol[16] = {};
 char s_shown_batt[20] = {};
 char s_shown_ip[96] = {};
+char s_shown_nrl_server[128] = {};
+char s_shown_fmo_server[128] = {};
 char s_shown_cpu[12] = {};
 char s_shown_gps[16] = {};
 char s_shown_rf_rssi[12] = {};
@@ -498,6 +512,7 @@ char s_shown_signaling[160] = {};
 int s_shown_state = -1;  // caption: -1 unset, 0 standby, 1 last heard, 2 rx, 3 tx
 char s_shown_caption[32] = {};
 uint32_t s_shown_caption_color = UINT32_MAX;
+uint32_t s_shown_call_color = UINT32_MAX;
 bool s_shown_media = false;
 char s_cached_radio_path[256] = {};
 char s_cached_radio_name[RADIO_FAV_NAME_SIZE] = {};
@@ -515,6 +530,8 @@ size_t menuItemCount();
 #if NRL_BOARD_IS_BI4UMD_FAMILY
 void menuTouchPressed(lv_event_t *event);
 void menuTouchReleased(lv_event_t *event);
+void attachSwipeNav(lv_obj_t *root);
+void processSwipeNav();
 #endif
 #if NRL_BOARD_IS_BI4UMD_FAMILY
 void buildBi4umdMusicContent();
@@ -1486,9 +1503,24 @@ void resetCenterWidgets()
     s_shown_state = -1;
     s_shown_caption[0] = '\0';
     s_shown_caption_color = UINT32_MAX;
+    s_shown_call_color = UINT32_MAX;
     s_shown_media = false;
     s_lbl_signaling = nullptr;
     s_shown_signaling[0] = '\0';
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    // On this board the IP line and the two server-name lines live in the
+    // CONTENT area (created by buildHomeContent, not in the bottom bar), so
+    // lv_obj_clean(s_content) just destroyed them. Mirror that here: without
+    // it the dangling labels are written by refreshers on other pages, and
+    // the stale caches suppress the redraw when the home page rebuilds the
+    // labels ("---" forever after any menu visit).
+    s_lbl_ip = nullptr;
+    s_shown_ip[0] = '\0';
+    s_lbl_nrl_server = nullptr;
+    s_lbl_fmo_server = nullptr;
+    s_shown_nrl_server[0] = '\0';
+    s_shown_fmo_server[0] = '\0';
+#endif
 #if NRL_BOARD_IS_BI4UMD_FAMILY
     s_lbl_music_title = nullptr;
     s_lbl_music_artist = nullptr;
@@ -1784,6 +1816,11 @@ void buildMainMenu()
     const uint8_t ptt_mode = ESPNOW_LINK_GetPttMode();
     snprintf(ptt, sizeof(ptt), menuText("PTT: %s", "PTT模式: %s"),
              ptt_mode == 2u ? "FMO" : ptt_mode == 1u ? "ESP-NOW" : "NRL");
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    char f2_ptt[28] = {};
+    snprintf(f2_ptt, sizeof(f2_ptt), menuText("F2 PTT: %s", "F2发射: %s"),
+             ESPNOW_LINK_GetF2PttTarget() == 1u ? "ESP-NOW" : "FMO");
+#endif
     FmoConfig fmo_config = {};
     FMO_GetConfig(&fmo_config);
     snprintf(fmo_item, sizeof(fmo_item), "FMO: %s", fmo_config.enabled ? "ON" : "OFF");
@@ -1800,6 +1837,9 @@ void buildMainMenu()
         switch (kMainMenuActions[i]) {
             case MainMenuAction::Back: items[i] = menuText("< BACK", "< 返回"); break;
             case MainMenuAction::PttMode: items[i] = ptt; break;
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+            case MainMenuAction::F2Ptt: items[i] = f2_ptt; break;
+#endif
             case MainMenuAction::Fmo: items[i] = fmo_item; break;
             case MainMenuAction::FmoBcast: items[i] = fmo_bcast; break;
             case MainMenuAction::NrlCodec: items[i] = nrl_codec; break;
@@ -2163,6 +2203,8 @@ void buildAprsListMenu()
 #if !NRL_BOARD_IS_BI4UMD_FAMILY
     // bi4umd draws a touch BACK button over the footer area instead.
     menuFooter(scr, menuText("PTT BACK", "PTT返回"));
+#else
+    attachSwipeNav(scr);
 #endif
 }
 
@@ -2697,8 +2739,8 @@ void layoutMapMarkers()
         return;
     }
     // Static: the station struct carries a 220-byte comment, so a snapshot
-    // array would eat the UI task's stack.
-    static AprsStationInfo stations[kMapMarkerMax];
+    // array would eat the UI task's stack. PSRAM: display-task context only.
+    NRL_PSRAM_BSS static AprsStationInfo stations[kMapMarkerMax];
     const size_t count = APRS_SERVICE_GetStations(stations, kMapMarkerMax);
     const double left = s_map_cx - kWidth / 2.0;
     const double top = s_map_cy - kMapViewH / 2.0;
@@ -3025,7 +3067,7 @@ void buildBi4umdSstvRxMenu()
     button(5, 90, s_sstv_rx_source == SSTV_SOURCE_MIC ? "MIC" : "NRL", sstvRxSourceClicked);
     button(100, 60, "CLR", sstvRxClearClicked);
     button(kWidth - 45, 40, LV_SYMBOL_LEFT, sstvExitClicked);
-
+    attachSwipeNav(content);
 }
 
 void sstvScanFiles()
@@ -3273,6 +3315,7 @@ void buildSstvMenu()
         lv_obj_set_style_bg_color(s_sstv_btn_send, lv_color_hex(0x7A2A2A), 0);
     }
     s_sstv_rev = snap.revision;
+    attachSwipeNav(scr);
 }
 #endif // NRL_BOARD_IS_BI4UMD_FAMILY
 
@@ -3940,6 +3983,108 @@ void buildBi4umdDebugContent()
 }
 #endif
 
+#if NRL_BOARD_IS_BI4UMD_FAMILY
+// ---------------------------------------------------------------------------
+// Swipe navigation across the four touch pages. Linear page order:
+//   SSTV TX | SSTV RX | home | APRS station list
+// A left finger swipe always walks right in that row (TX->RX->home->APRS),
+// a right swipe walks left (APRS->home->RX->TX).
+// LVGL delivers LV_EVENT_GESTURE to the pressed widget; GESTURE_BUBBLE on
+// every descendant funnels it up to the page root carrying the handler.
+// Swipes starting on a scrollable list are consumed by scrolling (LVGL core).
+void flagGestureBubble(lv_obj_t *obj)
+{
+    const uint32_t count = lv_obj_get_child_count(obj);
+    for (uint32_t i = 0; i < count; ++i) {
+        lv_obj_t *child = lv_obj_get_child(obj, static_cast<int32_t>(i));
+        lv_obj_add_flag(child, LV_OBJ_FLAG_GESTURE_BUBBLE);
+        // Labels/buttons/images carry the SCROLLABLE flag by default, which
+        // makes the indev treat a swipe as a (no-op) scroll and suppress the
+        // gesture event entirely. Strip it from those widgets; only real
+        // containers (e.g. the SSTV file list) keep touch scrolling.
+        if (lv_obj_check_type(child, &lv_label_class) ||
+            lv_obj_check_type(child, &lv_button_class) ||
+            lv_obj_check_type(child, &lv_image_class)) {
+            lv_obj_remove_flag(child, LV_OBJ_FLAG_SCROLLABLE);
+        }
+        flagGestureBubble(child);
+    }
+}
+
+// Set by the gesture callback, executed by the next Display_Poll. Rebuilding
+// the page tree inside the gesture event (mid indev-processing, finger still
+// down) left the indev press state pointing at deleted widgets and wedged
+// touch input; deferring the switch avoids that entirely.
+// 0 = none, 1 = forward (finger left), -1 = back (finger right).
+int s_swipe_nav_pending = 0;
+
+void bi4umdSwipeGesture(lv_event_t *)
+{
+    lv_indev_t *indev = lv_indev_active();
+    if (indev == nullptr) {
+        return;
+    }
+    const lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+    if (dir == LV_DIR_LEFT) {
+        s_swipe_nav_pending = 1;
+    } else if (dir == LV_DIR_RIGHT) {
+        s_swipe_nav_pending = -1;
+    }
+}
+
+void processSwipeNav()
+{
+    if (s_swipe_nav_pending == 0) {
+        return;
+    }
+    const bool forward = s_swipe_nav_pending > 0;
+    s_swipe_nav_pending = 0;
+    if (!s_menu_active) {
+        if (s_bi4umd_page == Bi4umdPage::Radio) {
+            if (forward) {
+                bi4umdOpenAprsPage(MenuPage::AprsList);
+                s_bi4umd_aprs_from_settings = false;
+            } else {
+                bi4umdOpenSstvPage(true);
+                s_bi4umd_sstv_from_settings = false;
+            }
+        }
+        return;
+    }
+    if (s_menu_page == MenuPage::AprsList && !forward) {
+        s_menu_active = false;
+        bi4umdShowRadioPage(nullptr);
+        return;
+    }
+    if (s_menu_page == MenuPage::Sstv) {
+        // Linear page order: SSTV TX | SSTV RX | home | APRS. A left finger
+        // swipe always walks right in that row, a right swipe walks left.
+        if (s_sstv_rx_view && !forward) {
+            bi4umdOpenSstvPage(false); // RX -> TX
+            s_bi4umd_sstv_from_settings = false;
+        } else if (!s_sstv_rx_view && forward) {
+            bi4umdOpenSstvPage(true); // TX -> RX
+            s_bi4umd_sstv_from_settings = false;
+        } else if (s_sstv_rx_view && forward) {
+            (void)SSTV_SERVICE_StopRx(); // RX -> home
+            s_menu_active = false;
+            bi4umdShowRadioPage(nullptr);
+        }
+    }
+}
+
+void attachSwipeNav(lv_obj_t *root)
+{
+    // LVGL 9.5 gives GESTURE_BUBBLE to every object that has a parent, so by
+    // default a gesture bubbles all the way to the SCREEN and any handler on
+    // the page root never sees it. Drop the flag on the page root: the swipe
+    // then stops bubbling here and lands on our handler.
+    lv_obj_remove_flag(root, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_event_cb(root, bi4umdSwipeGesture, LV_EVENT_GESTURE, nullptr);
+    flagGestureBubble(root);
+}
+#endif
+
 void buildHomeContent()
 {
     lv_obj_t *content = prepareContent();
@@ -3964,35 +4109,64 @@ void buildHomeContent()
     lv_label_set_text(s_lbl_ssid, "SSID -");
 
     s_lbl_time = makeLabel(content, &lv_font_montserrat_28, kColorTime);
-    lv_obj_align(s_lbl_time, LV_ALIGN_TOP_MID, 0, 100);
+    lv_obj_align(s_lbl_time, LV_ALIGN_TOP_MID, 0, 98);
     lv_label_set_text(s_lbl_time, "--:--:--");
 
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
     // The bottom bar now carries the RF channel line, so the IP/call-status
-    // readout moves into the content area, right below the clock.
-    s_lbl_ip = makeLabel(content, &lv_font_montserrat_16, kColorIp);
+    // readout moves into the content area, right below the clock. The three
+    // network rows share one 14 px CJK-capable font on an even 20 px pitch,
+    // visually grouped apart from the message rows at the bottom.
+    s_lbl_ip = makeLabel(content, &s_font_server_14, kColorIp);
     lv_obj_set_width(s_lbl_ip, kWidth - 16);
     lv_obj_set_style_text_align(s_lbl_ip, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(s_lbl_ip, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    lv_obj_align(s_lbl_ip, LV_ALIGN_TOP_MID, 0, 132);
+    lv_obj_align(s_lbl_ip, LV_ALIGN_TOP_MID, 0, 134);
     lv_label_set_text(s_lbl_ip, "---");
+
+    // Current NRL / FMO server names; colour marks the link state
+    // (green = linked, amber = configured but offline, gray = unconfigured).
+    // LONG_DOT, not scroll: an infinitely-scrolling CJK strip re-renders and
+    // re-flushes every frame, which was the bulk of core0 load on this page.
+    // s_font_aprs_16 carries the GB2312 glyphs (server names are Chinese);
+    // the montserrat fonts would render them as boxes.
+    s_lbl_nrl_server = makeLabel(content, &s_font_server_14, kColorSub);
+    lv_obj_set_width(s_lbl_nrl_server, kWidth - 16);
+    lv_obj_set_style_text_align(s_lbl_nrl_server, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_lbl_nrl_server, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_lbl_nrl_server, LV_ALIGN_TOP_MID, 0, 154);
+    lv_label_set_text(s_lbl_nrl_server, "NRL ---");
+
+    s_lbl_fmo_server = makeLabel(content, &s_font_server_14, kColorSub);
+    lv_obj_set_width(s_lbl_fmo_server, kWidth - 16);
+    lv_obj_set_style_text_align(s_lbl_fmo_server, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_lbl_fmo_server, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_lbl_fmo_server, LV_ALIGN_TOP_MID, 0, 174);
+    lv_label_set_text(s_lbl_fmo_server, "FMO ---");
 #endif
 
     // Keep decoded MDC/DTMF/CTCSS signaling on its own row so it never
-    // displaces the APRS monitor.
-    s_lbl_signaling = makeLabel(content, &s_font_aprs_16, kColorAccent);
+    // displaces the APRS monitor. On BH4TDV-RF both message rows use the
+    // 16 px-line-height CJK font to fit above the key hint.
+    s_lbl_signaling = makeLabel(content,
+                                NRL_BOARD == NRL_BOARD_BH4TDV_RF
+                                    ? &s_font_server_14 : &s_font_aprs_16,
+                                kColorAccent);
     lv_obj_set_width(s_lbl_signaling, kWidth);
     lv_obj_set_style_text_align(s_lbl_signaling, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(s_lbl_signaling, LV_ALIGN_TOP_MID, 0,
-                   NRL_BOARD == NRL_BOARD_BH4TDV_RF ? 158 : 136);
+                   NRL_BOARD == NRL_BOARD_BH4TDV_RF ? 196 : 136);
     lv_label_set_long_mode(s_lbl_signaling, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_label_set_text(s_lbl_signaling, "");
 
-    s_lbl_ota = makeLabel(content, &s_font_aprs_16, kColorApWarn);
+    s_lbl_ota = makeLabel(content,
+                          NRL_BOARD == NRL_BOARD_BH4TDV_RF
+                              ? &s_font_server_14 : &s_font_aprs_16,
+                          kColorApWarn);
     lv_obj_set_width(s_lbl_ota, kWidth);
     lv_obj_set_style_text_align(s_lbl_ota, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(s_lbl_ota, LV_ALIGN_TOP_MID, 0,
-                   NRL_BOARD == NRL_BOARD_BH4TDV_RF ? 186 : 164);
+                   NRL_BOARD == NRL_BOARD_BH4TDV_RF ? 212 : 164);
     lv_label_set_long_mode(s_lbl_ota, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_label_set_text(s_lbl_ota, "");
 #else
@@ -4044,8 +4218,11 @@ void buildHomeContent()
     lv_obj_t *key_hint = makeLabel(content, &lv_font_montserrat_14, kColorCaption);
     lv_obj_set_width(key_hint, kWidth - 12);
     lv_obj_set_style_text_align(key_hint, LV_TEXT_ALIGN_CENTER, 0);
+    // One line only: the default WRAP mode made the longer F2 text two lines
+    // tall, and the top line collided with the APRS monitor row above.
+    lv_label_set_long_mode(key_hint, LV_LABEL_LONG_CLIP);
     lv_obj_align(key_hint, LV_ALIGN_BOTTOM_MID, 0, -5);
-    lv_label_set_text(key_hint, "F2 MUSIC   UP/DN VOL   OK MENU   F3 SET");
+    lv_label_set_text(key_hint, "F2 PTT UP/DN VOL OK MENU F3 SET");
 #else
     lv_obj_t *music = lv_button_create(content);
     lv_obj_set_pos(music, 8, kContentHeight - 48);
@@ -4091,6 +4268,9 @@ void buildHomeContent()
     lv_label_set_text(label, "PTT");
     lv_obj_center(label);
 #endif
+#endif
+#if NRL_BOARD_IS_BI4UMD_FAMILY
+    attachSwipeNav(content);
 #endif
 }
 
@@ -4360,7 +4540,13 @@ void refreshCaller()
         s_shown_caption_color = caption_color;
         lv_obj_set_style_text_color(s_lbl_caption, lv_color_hex(caption_color), 0);
     }
-    lv_obj_set_style_text_color(s_lbl_callsign, lv_color_hex(call_color), 0);
+    // Gate this like the caption colour above: an unconditional style set
+    // invalidates the 48px callsign label and forced a full-width redraw of
+    // the whole callsign/SSID block on EVERY poll (the bulk of core0 load).
+    if (call_color != s_shown_call_color) {
+        s_shown_call_color = call_color;
+        lv_obj_set_style_text_color(s_lbl_callsign, lv_color_hex(call_color), 0);
+    }
 }
 
 void refreshClock()
@@ -4665,6 +4851,12 @@ void refreshGpsStatus()
 
 void refreshIp()
 {
+    // BH4TDV_RF keeps the IP line in the content area, so it only exists on
+    // the Radio home page; on menu/music/settings pages there is nothing to
+    // update (and the pointer is null after resetCenterWidgets).
+    if (s_lbl_ip == nullptr) {
+        return;
+    }
     char ip_text[96];
     uint32_t color;
     // The bar shows the bare address only -- no icon, no prefix label -- so a
@@ -4728,6 +4920,77 @@ void refreshIp()
         lv_obj_set_style_text_color(s_lbl_ip, lv_color_hex(color), 0);
     }
 }
+
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+// NRL / FMO server name rows under the IP line. Text colour marks the link
+// state: green = linked, amber = configured but offline, gray = unconfigured
+// (NRL) or disabled (FMO). The NRL friendly name comes from the cached
+// platform list; the LittleFS lookup is re-done only when the endpoint
+// changes or once a minute, never on every poll.
+void refreshServerLines()
+{
+    if (s_lbl_nrl_server == nullptr || s_lbl_fmo_server == nullptr) {
+        return;
+    }
+
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    const char *host = (cfg != nullptr) ? cfg->server_host : "";
+    const uint16_t port = (cfg != nullptr) ? cfg->server_port : 0u;
+
+    static char s_friendly[96] = {};
+    static char s_friendly_host[65] = {};
+    static uint16_t s_friendly_port = 0u;
+    static uint32_t s_friendly_refresh_ms = 0u;
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+    if (strncmp(host, s_friendly_host, sizeof(s_friendly_host)) != 0 ||
+        port != s_friendly_port || now - s_friendly_refresh_ms >= 60000u) {
+        s_friendly_refresh_ms = now;
+        snprintf(s_friendly_host, sizeof(s_friendly_host), "%s", host);
+        s_friendly_port = port;
+        s_friendly[0] = '\0';
+        if (host[0] != '\0') {
+            (void)SERVER_LIST_STORE_FindNrlServerName(host, port, s_friendly,
+                                                      sizeof(s_friendly));
+        }
+    }
+
+    char nrl_text[128];
+    uint32_t nrl_color;
+    if (host[0] == '\0') {
+        snprintf(nrl_text, sizeof(nrl_text), "NRL ---");
+        nrl_color = kColorSub;
+    } else {
+        snprintf(nrl_text, sizeof(nrl_text), "NRL %s",
+                 s_friendly[0] != '\0' ? s_friendly : host);
+        nrl_color = STATUS_IO_NrlServerLinked() ? kColorGood : kColorApWarn;
+    }
+    if (setLabel(s_lbl_nrl_server, s_shown_nrl_server, sizeof(s_shown_nrl_server),
+                 nrl_text)) {
+        lv_obj_set_style_text_color(s_lbl_nrl_server, lv_color_hex(nrl_color), 0);
+    }
+
+    FmoConfig fmo_cfg = {};
+    FMO_GetConfig(&fmo_cfg);
+    FmoLinkStatus fmo = {};
+    FMO_GetLinkStatus(&fmo);
+    char fmo_text[128];
+    uint32_t fmo_color;
+    if (!fmo_cfg.enabled) {
+        snprintf(fmo_text, sizeof(fmo_text), "FMO OFF");
+        fmo_color = kColorSub;
+    } else {
+        const char *name = fmo_cfg.server.name[0] != '\0' ? fmo_cfg.server.name
+                           : fmo_cfg.server.host[0] != '\0' ? fmo_cfg.server.host
+                           : "---";
+        snprintf(fmo_text, sizeof(fmo_text), "FMO %s", name);
+        fmo_color = fmo.connected ? kColorGood : kColorApWarn;
+    }
+    if (setLabel(s_lbl_fmo_server, s_shown_fmo_server, sizeof(s_shown_fmo_server),
+                 fmo_text)) {
+        lv_obj_set_style_text_color(s_lbl_fmo_server, lv_color_hex(fmo_color), 0);
+    }
+}
+#endif
 
 void refreshOtaNotice()
 {
@@ -4800,10 +5063,15 @@ void refreshOtaNotice()
                  status->latest_version);
         color = kColorGood;
     } else {
+        bool show_aprs_summary = APRS_SERVICE_IsEnabled();
+#if NRL_BOARD != NRL_BOARD_BH4TDV_RF
         // Keep the selected FMO relay visible whenever FMO is enabled. This
         // full-width scrolling row fits both its friendly name and host:port
         // on the Gezipai and BI4UMD screens. Transient notices and OTA
         // progress above deliberately take priority, then the relay returns.
+        // BH4TDV-RF shows the same info on its dedicated (non-scrolling) FMO
+        // server line; the endlessly scrolling row here was the dominant
+        // core0 consumer on the home page, so it is skipped on that board.
         FmoConfig fmo_config = {};
         FmoLinkStatus fmo_link = {};
         FMO_GetConfig(&fmo_config);
@@ -4819,7 +5087,10 @@ void refreshOtaNotice()
             snprintf(text, sizeof(text), "FMO %.64s | %.64s:%u", name, host,
                      static_cast<unsigned>(fmo_config.server.port));
             color = fmo_link.connected ? kColorFmo : kColorSub;
-        } else if (APRS_SERVICE_IsEnabled()) {
+            show_aprs_summary = false;
+        }
+#endif
+        if (show_aprs_summary) {
             // Every parsed APRS packet gets a compact summary. Unlike the
             // station list, this also covers text/status packets that have no
             // position.
@@ -4914,6 +5185,16 @@ void confirmMainMenu()
             } else {
                 setMenuMessage("PTT MODE CHANGE FAILED");
             }
+            buildMenuUi();
+            break;
+        }
+        case MainMenuAction::F2Ptt: {
+            const uint8_t target = ESPNOW_LINK_GetF2PttTarget() == 1u ? 0u : 1u;
+            // Drop any live key before retargeting, then persist the choice.
+            FMO_SetPtt(false);
+            ESPNOW_LINK_SetPtt(false);
+            ESPNOW_LINK_SetF2PttTarget(target);
+            setMenuMessage(target == 1u ? "F2 -> ESP-NOW" : "F2 -> FMO");
             buildMenuUi();
             break;
         }
@@ -5743,6 +6024,8 @@ extern "C" void Display_Init(void)
     }
     s_font_aprs_16 = lv_font_montserrat_16;
     s_font_aprs_16.fallback = &lv_font_cjk_16;
+    s_font_server_14 = lv_font_montserrat_14;
+    s_font_server_14.fallback = &lv_font_cjk_16;
     loadMenuLanguage();
 #if NRL_BOARD_IS_BI4UMD_FAMILY
     s_font_music_20 = lv_font_montserrat_20;
@@ -5791,6 +6074,7 @@ extern "C" void Display_Poll(void)
         lv_timer_handler();
         return;
     }
+    processSwipeNav();
     processBh4tdvRfHardwareKeys();
     processMenuInput(now);
     updateFmoQsoOverlay();
@@ -5845,14 +6129,19 @@ extern "C" void Display_Poll(void)
 
     // The caller caption, IP bar and volume readout react to PTT / button
     // presses, so refresh them every poll for snappy feedback. setLabel()
-    // still only redraws when the text actually changed.
+    // still only redraws when the text actually changed. The server-name
+    // rows and the notice/APRS row are slow-moving status text; 1 Hz is
+    // plenty and keeps the per-poll cost down.
     refreshCaller();
     refreshIp();
     refreshVolume();
-    refreshOtaNotice();
 
     if (s_last_refresh_ms == 0u || (now - s_last_refresh_ms) >= kRefreshIntervalMs) {
         s_last_refresh_ms = now;
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+        refreshServerLines();
+#endif
+        refreshOtaNotice();
         refreshClock();
         refreshWifi();
         refreshRadioRssi();

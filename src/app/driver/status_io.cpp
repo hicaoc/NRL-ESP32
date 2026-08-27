@@ -12,7 +12,9 @@
 #include "es8311.h"
 #include "../../lib/nrl_bt_hfp.h"  // route the volume keys to a connected headset
 #include "../../services/cw_service.h"
+#include "../../services/espnow_link.h"
 #include "../../services/fmo_qso.h"
+#include "../../services/fmo_service.h"
 #if NRL_BOARD_IS_GEZIPAI_FAMILY
 #include "display.h"
 #endif
@@ -540,7 +542,6 @@ static void queueRfKey(const uint8_t key)
     if (key == BH4TDV_RF_KEY_UP) Display_HardwareKeyPress(DISPLAY_HW_KEY_UP);
     else if (key == BH4TDV_RF_KEY_DOWN) Display_HardwareKeyPress(DISPLAY_HW_KEY_DOWN);
     else if (key == BH4TDV_RF_KEY_CONFIRM) Display_HardwareKeyPress(DISPLAY_HW_KEY_CONFIRM);
-    else if (key == BH4TDV_RF_KEY_F2) Display_HardwareKeyPress(DISPLAY_HW_KEY_SOFT_LEFT);
     else if (key == BH4TDV_RF_KEY_F3) Display_HardwareKeyPress(DISPLAY_HW_KEY_SOFT_RIGHT);
 }
 
@@ -563,9 +564,25 @@ static void pollBh4tdvRfKeys(const unsigned long now)
     } else if (keys != s_rf_keys_stable &&
                now - s_rf_keys_changed_ms >= kButtonDebounceMs) {
         const uint8_t pressed = keys & static_cast<uint8_t>(~s_rf_keys_stable);
+        // F2 is a hold-to-talk key (level-driven), not a UI soft key. Its
+        // target is menu-configurable: FMO (default) or the ESP-NOW
+        // intercom. Both SetPtt implementations self-gate on their own
+        // enable/transmit config, so holding F2 with the target off is a
+        // no-op. On release clear BOTH targets: the menu may have flipped
+        // the target mid-hold.
+        if (((keys ^ s_rf_keys_stable) & BH4TDV_RF_KEY_F2) != 0u) {
+            const bool held = (keys & BH4TDV_RF_KEY_F2) != 0u;
+            if (held) {
+                if (ESPNOW_LINK_GetF2PttTarget() == 1u) ESPNOW_LINK_SetPtt(true);
+                else FMO_SetPtt(true);
+            } else {
+                ESPNOW_LINK_SetPtt(false);
+                FMO_SetPtt(false);
+            }
+        }
         s_rf_keys_stable = keys;
         constexpr uint8_t kKeys[] = {
-            BH4TDV_RF_KEY_F2, BH4TDV_RF_KEY_F3, BH4TDV_RF_KEY_DOWN,
+            BH4TDV_RF_KEY_F3, BH4TDV_RF_KEY_DOWN,
             BH4TDV_RF_KEY_UP, BH4TDV_RF_KEY_CONFIRM,
         };
         for (const uint8_t key : kKeys) {
@@ -819,6 +836,12 @@ extern "C" void STATUS_IO_NotifyHeartbeatReceived(void)
     s_last_heartbeat_rx_ms = nrl_millis_now();
 }
 
+extern "C" bool STATUS_IO_NrlServerLinked(void)
+{
+    return s_last_heartbeat_rx_ms != 0UL &&
+           (nrl_millis_now() - s_last_heartbeat_rx_ms) <= kHeartbeatMissedBlinkMs;
+}
+
 // Hold-to-talk from the LCD "network" panel: press = transmit, release = stop.
 // The PTT timeout still applies; releasing clears any timeout suppression so the
 // next hold can key up again.
@@ -1011,6 +1034,12 @@ extern "C" void STATUS_IO_SetFmoPttActive(const bool active)
 extern "C" void STATUS_IO_NotifyHeartbeatReceived(void)
 {
     s_last_heartbeat_rx_ms = nrl_millis_now();
+}
+
+extern "C" bool STATUS_IO_NrlServerLinked(void)
+{
+    return s_last_heartbeat_rx_ms != 0UL &&
+           (nrl_millis_now() - s_last_heartbeat_rx_ms) <= kHeartbeatMissedBlinkMs;
 }
 
 extern "C" void STATUS_IO_Poll(void)

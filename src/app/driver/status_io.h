@@ -14,6 +14,9 @@ void STATUS_IO_SetPttActive(bool active);
 // output remains asserted until both the NRL and FMO downlinks are idle.
 void STATUS_IO_SetFmoPttActive(bool active);
 void STATUS_IO_NotifyHeartbeatReceived(void);
+// True while NRL server traffic has arrived within the last few seconds (same
+// window as the white NET LED): the practical "NRL server link up" signal.
+bool STATUS_IO_NrlServerLinked(void);
 // Hold-to-talk from a touch UI region (S31): true = key up (transmit), false =
 // release. No-op on boards whose STATUS_IO build doesn't implement it.
 void STATUS_IO_SetSoftPtt(bool held);

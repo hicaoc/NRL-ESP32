@@ -53,6 +53,11 @@ uint8_t ESPNOW_LINK_GetTxCodec(void);
 void ESPNOW_LINK_SetPttMode(uint8_t mode);
 uint8_t ESPNOW_LINK_GetPttMode(void);
 
+// BH4TDV-RF F2 key's hold-to-talk target: 0 = FMO (default), 1 = ESP-NOW.
+// Persisted in NVS; switched from the on-device main menu.
+void ESPNOW_LINK_SetF2PttTarget(uint8_t target);
+uint8_t ESPNOW_LINK_GetF2PttTarget(void);
+
 // Dedicated hold-to-talk for the ESP-NOW link (S31 touch UI): while held,
 // mic audio broadcasts over ESP-NOW, independent of the NRL PTT. On boards
 // without a touch UI the link keys off the radio squelch instead and these
