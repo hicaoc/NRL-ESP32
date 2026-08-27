@@ -77,8 +77,16 @@ NRL_PSRAM_BSS OtaState s_ota;
 // before any HTTP/TLS frames were counted. The OTA task is the sole writer, so
 // a PSRAM scratch buffer is safe and keeps that cost off the task stack.
 NRL_PSRAM_BSS NrlOtaRelease s_manifest_releases[NRL_OTA_RELEASE_MAX];
-StaticTask_t s_ota_task_tcb;
-StackType_t s_ota_task_stack[kOtaTaskStackBytes / sizeof(StackType_t)];
+// The OTA task is created lazily by s_spawn_timer when a check/update is
+// due and the internal heap has room, and deletes itself when idle.
+// Boot-time WiFi/codec bring-up on tight boards (BH4TDV-RF) lost to
+// the old always-on 16 KB static stack. The stack still must be
+// internal RAM: flash writes can disable the cache, so a
+// PSRAM-backed task stack is not safe here.
+TaskHandle_t s_ota_task = nullptr;
+portMUX_TYPE s_task_lock = portMUX_INITIALIZER_UNLOCKED;
+esp_timer_handle_t s_spawn_timer = nullptr;
+uint32_t s_boot_ms = 0;
 
 uint32_t nowMs()
 {
@@ -454,9 +462,45 @@ bool installVersion(const char *version)
     return true;
 }
 
+void otaTask(void *);
+
+bool otaWorkPending()
+{
+    bool pending = false;
+    if (xSemaphoreTake(s_ota.lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        pending = s_ota.check_requested || s_ota.update_requested ||
+                  (s_ota.status.configured &&
+                   (nowMs() - s_ota.status.last_check_ms >= kCheckPeriodMs ||
+                    (s_ota.status.last_check_ms == 0u && nowMs() - s_boot_ms >= kBootCheckDelayMs)));
+        xSemaphoreGive(s_ota.lock);
+    }
+    return pending;
+}
+
+void otaSpawnTimerCb(void *)
+{
+    taskENTER_CRITICAL(&s_task_lock);
+    const bool running = s_ota_task != nullptr;
+    taskEXIT_CRITICAL(&s_task_lock);
+    if (running || !otaWorkPending()) return;
+    // Never compete with boot WiFi/codec bring-up or a busy audio
+    // pipeline for the 16 KB internal stack: stay pending and let the
+    // timer retry once the heap has room.
+    if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) <
+        kOtaTaskStackBytes + 8u * 1024u) {
+        return;
+    }
+    TaskHandle_t created = nullptr;
+    if (xTaskCreate(otaTask, "nrl_ota", kOtaTaskStackBytes, nullptr, 3,
+                    &created) == pdPASS) {
+        taskENTER_CRITICAL(&s_task_lock);
+        s_ota_task = created;
+        taskEXIT_CRITICAL(&s_task_lock);
+    }
+}
+
 void otaTask(void *)
 {
-    const uint32_t boot_ms = nowMs();
     bool s_low_mem_defer_logged = false;
     while (true) {
         bool do_check = false, do_update = false, update_after_check = false;
@@ -464,7 +508,7 @@ void otaTask(void *)
         xSemaphoreTake(s_ota.lock, portMAX_DELAY);
         const bool due = s_ota.status.configured &&
                          (nowMs() - s_ota.status.last_check_ms >= kCheckPeriodMs ||
-                          (s_ota.status.last_check_ms == 0u && nowMs() - boot_ms >= kBootCheckDelayMs));
+                          (s_ota.status.last_check_ms == 0u && nowMs() - s_boot_ms >= kBootCheckDelayMs));
         // A TLS handshake spikes tens of KB of internal RAM; running one
         // while music plays starves lwIP/GMF (SMB stalls, decode OOM, failed
         // DNS). Defer checks to an idle moment instead of failing mid-track.
@@ -533,9 +577,15 @@ void otaTask(void *)
         s_ota.status.updating = false;
         xSemaphoreGive(s_ota.lock);
         vTaskDelay(pdMS_TO_TICKS(1000));
+        if (!otaWorkPending()) {
+            break;  // return the 16 KB stack; the spawn timer re-creates us
+        }
     }
+    taskENTER_CRITICAL(&s_task_lock);
+    s_ota_task = nullptr;
+    taskEXIT_CRITICAL(&s_task_lock);
+    vTaskDelete(nullptr);
 }
-
 } // namespace
 
 bool OtaService_Init()
@@ -561,8 +611,18 @@ bool OtaService_Init()
     s_ota.status.configured = s_ota.status.server_url[0] != '\0';
     ESP_LOGI(TAG, "OTA config loaded: configured=%d server=%s",
              s_ota.status.configured, s_ota.status.server_url);
-    return xTaskCreateStatic(otaTask, "nrl_ota", kOtaTaskStackBytes, nullptr, 3,
-                             s_ota_task_stack, &s_ota_task_tcb) != nullptr;
+    s_boot_ms = nowMs();
+    const esp_timer_create_args_t timer_args = {
+        .callback = &otaSpawnTimerCb,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "nrl_ota_spawn",
+        .skip_unhandled_events = true,
+    };
+    if (esp_timer_create(&timer_args, &s_spawn_timer) != ESP_OK) {
+        return false;
+    }
+    return esp_timer_start_periodic(s_spawn_timer, 2000u * 1000u) == ESP_OK;
 }
 
 bool OtaService_SetConfig(const char *server_url, const char *device_token)

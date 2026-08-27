@@ -13,6 +13,10 @@ enum Bh4tdvRfKeyMask : uint8_t {
 };
 
 bool BH4TDV_RF_IO_Init(void);
+// Programs safe expander outputs (PTT/PD off, low power) at the default strap
+// address before the slow full-bus scan runs; Init re-binds afterwards if the
+// scan finds the expander at another address.
+bool BH4TDV_RF_IO_EarlySafeInit(void);
 bool BH4TDV_RF_IO_IsReady(void);
 bool BH4TDV_RF_IO_Read(uint8_t *keys, bool *sql_active);
 bool BH4TDV_RF_IO_SetGpsPower(bool enabled);

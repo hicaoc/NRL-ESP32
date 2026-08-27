@@ -27,6 +27,9 @@ struct I2CDiscoveredDevice {
 // Scans all 128 7-bit addresses. Together, their write/read address bytes
 // cover the raw 0x00-0xFF range requested by the diagnostic UI.
 bool I2C_DEVICE_DISCOVERY_Scan(void);
+// Probes only the pluggable sensor addresses (used at boot: the screen,
+// touch, ES8311 and PCA9555 are soldered down and never scanned).
+bool I2C_DEVICE_DISCOVERY_ScanSensors(void);
 size_t I2C_DEVICE_DISCOVERY_GetSnapshot(I2CDiscoveredDevice *devices,
                                         size_t capacity,
                                         uint32_t *revision);

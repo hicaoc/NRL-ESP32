@@ -113,6 +113,30 @@ bool BH4TDV_RF_IO_Init(void)
     return true;
 }
 
+bool BH4TDV_RF_IO_EarlySafeInit(void)
+{
+    // The PCA9555 powers up with every pin a floating input, so the radio
+    // PD/PTT lines drift (and can key the transmitter) until the outputs are
+    // programmed. That window used to last through the full 0x00-0x7F bus
+    // scan. Bind the default strap address immediately and latch safe levels;
+    // the scan-driven Init re-binds if the expander lives at another address.
+    if (s_ready) return true;
+    if (!ensureMutex() || !I2C_MasterProbe(kDefaultAddress, 100)) return false;
+    s_address = kDefaultAddress;
+    s_output0 = 0u;
+    s_output1 = kP1LowPower;
+    if (!writePair(kRegOutput0, s_output0, s_output1) ||
+        !writePair(kRegConfig0, kConfig0, kConfig1)) {
+        return false;
+    }
+    gpio_reset_pin(static_cast<gpio_num_t>(NRL_PIN_PCA9555_INT));
+    gpio_set_direction(static_cast<gpio_num_t>(NRL_PIN_PCA9555_INT), GPIO_MODE_INPUT);
+    gpio_set_pull_mode(static_cast<gpio_num_t>(NRL_PIN_PCA9555_INT), GPIO_PULLUP_ONLY);
+    s_ready = true;
+    ESP_LOGI(TAG, "PCA9555 early safe init at default 0x%02X", kDefaultAddress);
+    return true;
+}
+
 bool BH4TDV_RF_IO_IsReady(void) { return s_ready; }
 
 bool BH4TDV_RF_IO_Read(uint8_t *keys, bool *sql_active)
@@ -163,6 +187,7 @@ bool BH4TDV_RF_IO_SetLowPower(const bool low_power)
 #else
 
 bool BH4TDV_RF_IO_Init(void) { return true; }
+bool BH4TDV_RF_IO_EarlySafeInit(void) { return false; }
 bool BH4TDV_RF_IO_IsReady(void) { return false; }
 bool BH4TDV_RF_IO_Read(uint8_t *, bool *) { return false; }
 bool BH4TDV_RF_IO_SetGpsPower(bool) { return false; }

@@ -282,7 +282,7 @@ bool sendGroup(const RadioModuleConfig *config)
             dump[n++] = kHex[wire[i] & 0x0Fu];
             dump[n++] = ' ';
         }
-        ESP_LOGI(TAG, "DMOGRP tx %u bytes: %s", static_cast<unsigned>(used), dump);
+        ESP_LOGD(TAG, "DMOGRP tx %u bytes: %s", static_cast<unsigned>(used), dump);
     }
     bool ok = false;
     for (int attempt = 0; attempt < 2 && !ok; ++attempt) {
@@ -293,7 +293,7 @@ bool sendGroup(const RadioModuleConfig *config)
         ESP_LOGW(TAG, "DMOGRP no reply (attempt %d), retrying", attempt + 1);
     }
     vTaskDelay(pdMS_TO_TICKS(30));
-    ESP_LOGI(TAG, "DMOGRP rx: '%s'", response);
+    ESP_LOGD(TAG, "DMOGRP rx: '%s'", response);
     if (!ok) {
         ESP_LOGE(TAG, "DMOGRP rejected: '%s' (rfv=%s tfv=%s flag=%u flag1=%u)",
                  response, rx_freq, tx_freq, flag, flag1);
@@ -312,7 +312,7 @@ bool sendSimple(const char *verb, const unsigned a, const unsigned b,
         snprintf(command, sizeof(command), "AT+%s=%u", verb, a);
     }
     char response[48] = {};
-    ESP_LOGI(TAG, "tx: %s", command);
+    ESP_LOGD(TAG, "tx: %s", command);
     bool ok = false;
     for (int attempt = 0; attempt < 2 && !ok; ++attempt) {
         response[0] = 0;
@@ -322,7 +322,7 @@ bool sendSimple(const char *verb, const unsigned a, const unsigned b,
         ESP_LOGW(TAG, "%s no reply (attempt %d), retrying", verb, attempt + 1);
     }
     vTaskDelay(pdMS_TO_TICKS(30));
-    ESP_LOGI(TAG, "%s rx: '%s'", verb, response);
+    ESP_LOGD(TAG, "%s rx: '%s'", verb, response);
     if (!ok) ESP_LOGE(TAG, "%s rejected by module: '%s' (cmd %s)",
                       verb, response, command);
     return ok;

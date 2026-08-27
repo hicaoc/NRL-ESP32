@@ -549,6 +549,12 @@ static void pollBh4tdvRfKeys(const unsigned long now)
     uint8_t keys = 0u;
     bool sql = false;
     if (!BH4TDV_RF_IO_Read(&keys, &sql)) return;
+    // Edge log: tells a slow module squelch release (noise ends at
+    // SQL RELEASED) apart from a stuck uplink gate (noise continues
+    // afterwards).
+    if (sql != s_rf_sql_active) {
+        ESP_LOGD(TAG, "RF SQL %s", sql ? "ACTIVE" : "RELEASED");
+    }
     s_rf_sql_active = sql;
 
     if (keys != s_rf_keys_raw) {

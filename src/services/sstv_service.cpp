@@ -360,17 +360,17 @@ void SSTV_SERVICE_Init(void)
     if (s_req_jpeg == nullptr) {
         ESP_LOGW(TAG, "no camera request buffer, SendJpegBuffer disabled");
     }
+    // No internal-RAM fallback on purpose: 160 KB of DRAM here has starved
+    // WiFi/I2S init on tight boards. SSTV RX simply stays unavailable if the
+    // PSRAM alloc ever fails (boot would panic first if PSRAM were absent).
     s_rx_image = static_cast<uint16_t *>(heap_caps_malloc(
         kRxFrameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (s_rx_image == nullptr) {
-        s_rx_image = static_cast<uint16_t *>(heap_caps_malloc(
-            kRxFrameBytes, MALLOC_CAP_8BIT));
-    }
     if (s_rx_image == nullptr) {
         ESP_LOGE(TAG, "no RX frame buffer");
     } else {
         memset(s_rx_image, 0, kRxFrameBytes);
-        ESP_LOGI(TAG, "RX frame buffer ready: %u bytes", static_cast<unsigned>(kRxFrameBytes));
+        ESP_LOGI(TAG, "RX frame buffer ready: %u bytes (PSRAM)",
+                 static_cast<unsigned>(kRxFrameBytes));
     }
     memset(&s_snap, 0, sizeof(s_snap));
     s_snap.state = SSTV_STATE_IDLE;

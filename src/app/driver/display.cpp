@@ -69,6 +69,7 @@
 #include "i2c_device_discovery.h"
 #include "bh4tdv_rf_io.h"
 #include "sr110u.h"
+#include "../../services/radio_config.h"
 
 #include "../../lib/nrl_net_compat.h"
 
@@ -194,6 +195,7 @@ lv_obj_t *s_lbl_ip = nullptr;
 lv_obj_t *s_lbl_cpu = nullptr;
 lv_obj_t *s_lbl_gps = nullptr;
 lv_obj_t *s_lbl_rf_rssi = nullptr;
+lv_obj_t *s_lbl_rf_cfg = nullptr;
 lv_obj_t *s_lbl_hint = nullptr;
 lv_obj_t *s_lbl_ota = nullptr;
 lv_obj_t *s_bar_ota = nullptr;
@@ -490,6 +492,7 @@ char s_shown_ip[96] = {};
 char s_shown_cpu[12] = {};
 char s_shown_gps[16] = {};
 char s_shown_rf_rssi[12] = {};
+char s_shown_rf_cfg[64] = {};
 char s_shown_ota[160] = {}; // sized for a scrolling APRS monitor line
 char s_shown_signaling[160] = {};
 int s_shown_state = -1;  // caption: -1 unset, 0 standby, 1 last heard, 2 rx, 3 tx
@@ -1532,6 +1535,8 @@ void resetHomeWidgets()
     s_shown_gps[0] = '\0';
     s_shown_rf_rssi[0] = '\0';
     s_lbl_rf_rssi = nullptr;
+    s_shown_rf_cfg[0] = '\0';
+    s_lbl_rf_cfg = nullptr;
 }
 
 lv_obj_t *prepareScreen()
@@ -3962,19 +3967,32 @@ void buildHomeContent()
     lv_obj_align(s_lbl_time, LV_ALIGN_TOP_MID, 0, 100);
     lv_label_set_text(s_lbl_time, "--:--:--");
 
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    // The bottom bar now carries the RF channel line, so the IP/call-status
+    // readout moves into the content area, right below the clock.
+    s_lbl_ip = makeLabel(content, &lv_font_montserrat_16, kColorIp);
+    lv_obj_set_width(s_lbl_ip, kWidth - 16);
+    lv_obj_set_style_text_align(s_lbl_ip, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_lbl_ip, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_align(s_lbl_ip, LV_ALIGN_TOP_MID, 0, 132);
+    lv_label_set_text(s_lbl_ip, "---");
+#endif
+
     // Keep decoded MDC/DTMF/CTCSS signaling on its own row so it never
     // displaces the APRS monitor.
     s_lbl_signaling = makeLabel(content, &s_font_aprs_16, kColorAccent);
     lv_obj_set_width(s_lbl_signaling, kWidth);
     lv_obj_set_style_text_align(s_lbl_signaling, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_lbl_signaling, LV_ALIGN_TOP_MID, 0, 136);
+    lv_obj_align(s_lbl_signaling, LV_ALIGN_TOP_MID, 0,
+                   NRL_BOARD == NRL_BOARD_BH4TDV_RF ? 158 : 136);
     lv_label_set_long_mode(s_lbl_signaling, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_label_set_text(s_lbl_signaling, "");
 
     s_lbl_ota = makeLabel(content, &s_font_aprs_16, kColorApWarn);
     lv_obj_set_width(s_lbl_ota, kWidth);
     lv_obj_set_style_text_align(s_lbl_ota, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_lbl_ota, LV_ALIGN_TOP_MID, 0, 164);
+    lv_obj_align(s_lbl_ota, LV_ALIGN_TOP_MID, 0,
+                   NRL_BOARD == NRL_BOARD_BH4TDV_RF ? 186 : 164);
     lv_label_set_long_mode(s_lbl_ota, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_label_set_text(s_lbl_ota, "");
 #else
@@ -4099,7 +4117,12 @@ void buildUi()
     lv_label_set_text(s_lbl_wifi, "--");
 
     s_lbl_vol = makeLabel(top, &lv_font_montserrat_14, kColorSub);
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    // GPS sits in the top bar on this board; keep "100%" clear of it.
+    lv_obj_align(s_lbl_vol, LV_ALIGN_RIGHT_MID, -50, 0);
+#else
     lv_obj_align(s_lbl_vol, LV_ALIGN_RIGHT_MID, -56, 0);
+#endif
     lv_label_set_text(s_lbl_vol, "--");
 
     s_lbl_batt = makeLabel(top, &lv_font_montserrat_14, kColorSub);
@@ -4107,19 +4130,43 @@ void buildUi()
     lv_label_set_text(s_lbl_batt, "--");
 
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
-    // SR-110U RF RSSI between the WiFi and volume readouts; a compact
-    // "R87"-style readout is all the 240 px bar has room for. Empty while
-    // the module is offline or powered down.
+    // SR-110U RF RSSI between the WiFi and GPS readouts; bare dBm number
+    // (no "dB" suffix) is all the 240 px bar has room for. Empty while the
+    // module is offline or powered down. Bar budget (montserrat_14, worst
+    // case): wifi 10..67, rssi 70..99, gps 108..142, vol 155..190, batt
+    // 194..230.
     s_lbl_rf_rssi = makeLabel(top, &lv_font_montserrat_14, kColorWeak);
-    lv_obj_align(s_lbl_rf_rssi, LV_ALIGN_LEFT_MID, 84, 0);
+    lv_obj_align(s_lbl_rf_rssi, LV_ALIGN_LEFT_MID, 70, 0);
     lv_label_set_text(s_lbl_rf_rssi, "");
 #endif
 
     // ---- Centre content ----
     buildHomeContent();
 
-    // ---- Bottom IP bar: address on the left, per-core CPU load on the right ----
+    // ---- Bottom bar ----
     lv_obj_t *bottom = makeBar(scr, kHeight - kBottomBarHeight, kBottomBarHeight);
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    // RF channel line: freq/tone pair(s), or the module-off state. Width
+    // is capped left of the CPU readout; a split-channel CDCSS combo that
+    // still overflows scrolls inside its own box, never over the CPU text.
+    s_lbl_rf_cfg = makeLabel(bottom, &lv_font_montserrat_14, kColorSub);
+    lv_obj_set_width(s_lbl_rf_cfg, kWidth - 84);
+    lv_label_set_long_mode(s_lbl_rf_cfg, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_align(s_lbl_rf_cfg, LV_ALIGN_LEFT_MID, 8, 0);
+    lv_label_set_text(s_lbl_rf_cfg, "RF --");
+
+    // Per-core CPU load, bottom right (same as the other narrow boards).
+    s_lbl_cpu = makeLabel(bottom, &lv_font_montserrat_16, kColorSub);
+    lv_obj_align(s_lbl_cpu, LV_ALIGN_RIGHT_MID, -8, 0);
+    lv_label_set_text(s_lbl_cpu, "--/--");
+
+    // GPS (with satellite count) lives in the top status bar on this board;
+    // the IP/call-status line is created below the clock in the content area.
+    s_lbl_gps = makeLabel(top, &lv_font_montserrat_14, kColorWeak);
+    lv_obj_align(s_lbl_gps, LV_ALIGN_LEFT_MID, 108, 0);
+    lv_label_set_text(s_lbl_gps, LV_SYMBOL_GPS);
+#else
+    // IP address on the left, per-core CPU load on the right.
     s_lbl_ip = makeLabel(bottom, &lv_font_montserrat_16, kColorIp);
     lv_obj_set_width(s_lbl_ip, 124);
     lv_label_set_long_mode(s_lbl_ip, LV_LABEL_LONG_DOT);
@@ -4133,6 +4180,7 @@ void buildUi()
     s_lbl_cpu = makeLabel(bottom, &lv_font_montserrat_16, kColorSub);
     lv_obj_align(s_lbl_cpu, LV_ALIGN_RIGHT_MID, -8, 0);
     lv_label_set_text(s_lbl_cpu, "--/--");
+#endif
 }
 
 //================================ Refresh ====================================
@@ -4378,11 +4426,49 @@ void refreshRadioRssi()
     uint32_t color = kColorWeak;
     if (rssi >= 0) {
         const int dbm = SR110U_RssiToDbm(rssi);
-        snprintf(text, sizeof(text), "%ddB", dbm);
+        snprintf(text, sizeof(text), "%d", dbm);
         color = dbm >= -70 ? kColorGood : (dbm >= -90 ? kColorApWarn : kColorWeak);
     }
     if (setLabel(s_lbl_rf_rssi, s_shown_rf_rssi, sizeof(s_shown_rf_rssi), text)) {
         lv_obj_set_style_text_color(s_lbl_rf_rssi, lv_color_hex(color), 0);
+    }
+}
+
+// Bottom-bar RF channel line (BH4TDV-RF only): compact "<freq> <rxTone>"
+// ("<freq> <rxTone>/<txTone>" when tones differ, "<rxFreq> <rxTone> |
+// <txFreq> <txTone>" on split channels) while the module is enabled,
+// "RF OFF" otherwise. Scrolls only if a pathological combo overflows.
+void refreshRfConfig()
+{
+    if (s_lbl_rf_cfg == nullptr) return;
+    const RadioModuleConfig *cfg = RADIO_CONFIG_Get();
+    char text[64] = "RF OFF";
+    if (cfg->enabled) {
+        char rxf[16] = {};
+        char txf[16] = {};
+        char rxct[12] = {};
+        char txct[12] = {};
+        RADIO_CONFIG_FormatFreqMHz(cfg->rx_freq_hz, rxf, sizeof(rxf));
+        RADIO_CONFIG_FormatFreqMHz(cfg->tx_freq_hz, txf, sizeof(txf));
+        RADIO_CONFIG_FormatTone(&cfg->rx_tone, rxct, sizeof(rxct));
+        RADIO_CONFIG_FormatTone(&cfg->tx_tone, txct, sizeof(txct));
+        // 3 decimals (kHz) are enough for the bar; drop the rest.
+        rxf[7] = 0;
+        txf[7] = 0;
+        if (cfg->rx_freq_hz == cfg->tx_freq_hz) {
+            if (strcmp(rxct, txct) == 0) {
+                snprintf(text, sizeof(text), "%s %s", rxf, rxct);
+            } else {
+                snprintf(text, sizeof(text), "%s %s/%s", rxf, rxct, txct);
+            }
+        } else {
+            snprintf(text, sizeof(text), "%s %s | %s %s", rxf, rxct, txf, txct);
+        }
+    }
+    const uint32_t color =
+        cfg->enabled && !SR110U_IsReady() ? kColorApWarn : kColorSub;
+    if (setLabel(s_lbl_rf_cfg, s_shown_rf_cfg, sizeof(s_shown_rf_cfg), text)) {
+        lv_obj_set_style_text_color(s_lbl_rf_cfg, lv_color_hex(color), 0);
     }
 }
 
@@ -4563,6 +4649,11 @@ void refreshGpsStatus()
         const int satellites = gps.satellites >= 0 ? gps.satellites : 0;
         snprintf(text, sizeof(text), LV_SYMBOL_GPS " %d", satellites);
         color = kColorGood;
+    } else if (gps.visible_satellites > 0) {
+        // Still acquiring: show how many satellites are being tracked.
+        snprintf(text, sizeof(text), LV_SYMBOL_GPS " %d",
+                 static_cast<int>(gps.visible_satellites));
+        color = kColorWeak;
     } else {
         snprintf(text, sizeof(text), LV_SYMBOL_GPS);
         color = gps.uart_enabled ? kColorWeak : kColorSub;
@@ -5716,6 +5807,7 @@ extern "C" void Display_Poll(void)
             s_last_refresh_ms = now;
             refreshWifi();
             refreshRadioRssi();
+            refreshRfConfig();
             refreshBattery();
             refreshCpu();
             refreshGpsStatus();
@@ -5741,6 +5833,7 @@ extern "C" void Display_Poll(void)
             s_last_refresh_ms = now;
             refreshWifi();
             refreshRadioRssi();
+            refreshRfConfig();
             refreshBattery();
             refreshCpu();
             refreshGpsStatus();
@@ -5763,6 +5856,7 @@ extern "C" void Display_Poll(void)
         refreshClock();
         refreshWifi();
         refreshRadioRssi();
+        refreshRfConfig();
         refreshBattery();
         refreshCpu();
         refreshGpsStatus();

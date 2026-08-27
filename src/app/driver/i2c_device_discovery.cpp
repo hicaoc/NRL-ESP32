@@ -102,28 +102,19 @@ I2CDeviceModel identifyDevice(const uint8_t address,
     return I2CDeviceModel::Unknown;
 }
 
-} // namespace
-
-bool I2C_DEVICE_DISCOVERY_Scan(void)
+size_t probeAddresses(const uint8_t *addresses, const size_t address_count,
+                      I2CDiscoveredDevice *found, const size_t max_found)
 {
-    if (!ensureScanMutex() ||
-        xSemaphoreTake(s_scan_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-        ESP_LOGW(TAG, "scan already running or mutex allocation failed");
-        return false;
-    }
-
-    I2CDiscoveredDevice found[kMaxDevices] = {};
     size_t count = 0u;
-    ESP_LOGI(TAG, "scan raw address bytes 0x00-0xFF (7-bit 0x00-0x7F)");
-    for (unsigned address = 0u; address <= 0x7Fu; ++address) {
-        const uint8_t address_7bit = static_cast<uint8_t>(address);
+    for (size_t i = 0u; i < address_count; ++i) {
+        const uint8_t address_7bit = addresses[i];
         if (!I2C_MasterProbe(address_7bit, kProbeTimeoutMs)) continue;
 
         uint8_t identity = 0u;
         bool identity_valid = false;
         const I2CDeviceModel model = identifyDevice(
             address_7bit, &identity, &identity_valid);
-        if (count < kMaxDevices) {
+        if (count < max_found) {
             found[count++] = {
                 address_7bit,
                 static_cast<uint8_t>(address_7bit << 1u),
@@ -147,11 +138,16 @@ bool I2C_DEVICE_DISCOVERY_Scan(void)
                      I2C_DEVICE_DISCOVERY_ModelName(model));
         }
     }
+    return count;
+}
 
-    // 0x23 alone is ambiguous because neither BH1750 nor PCA9555 exposes a
-    // unique, read-only chip ID. On BH4TDV-RF, finding a PCA9555-compatible
-    // device at another address resolves 0x23 as the BH1750 module without
-    // sending potentially disruptive guess commands to it.
+// 0x23 alone is ambiguous because neither BH1750 nor PCA9555 exposes a
+// unique, read-only chip ID. On BH4TDV-RF, finding a PCA9555-compatible
+// device at another address resolves 0x23 as the BH1750 module without
+// sending potentially disruptive guess commands to it. The mirror case
+// (BH1750 answering at its alternate 0x5C) resolves 0x23 as the PCA9555.
+void resolveAmbiguous(I2CDiscoveredDevice *found, const size_t count)
+{
     bool pca9555_found_elsewhere = false;
     for (size_t i = 0u; i < count; ++i) {
         if (found[i].model == I2CDeviceModel::Pca9555) {
@@ -170,10 +166,6 @@ bool I2C_DEVICE_DISCOVERY_Scan(void)
         }
     }
 
-    // Mirror case: a BH1750 answering at its alternate 0x5C address means the
-    // module is not at 0x23, so an unresolved 0x23 is the PCA9555 strapped to
-    // A2:A0=011. Resolving it lets the expander driver bind the real address
-    // instead of failing on the fallback probe.
     bool bh1750_found_elsewhere = false;
     for (size_t i = 0u; i < count; ++i) {
         if (found[i].model == I2CDeviceModel::Bh1750 &&
@@ -192,16 +184,75 @@ bool I2C_DEVICE_DISCOVERY_Scan(void)
             }
         }
     }
+}
 
+void publishSnapshot(const I2CDiscoveredDevice *found, const size_t count)
+{
     portENTER_CRITICAL(&s_snapshot_lock);
     memcpy(s_devices, found, count * sizeof(found[0]));
     s_device_count = count;
     ++s_revision;
     portEXIT_CRITICAL(&s_snapshot_lock);
+}
+
+bool takeScanMutex()
+{
+    if (!ensureScanMutex() ||
+        xSemaphoreTake(s_scan_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGW(TAG, "scan already running or mutex allocation failed");
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+bool I2C_DEVICE_DISCOVERY_Scan(void)
+{
+    if (!takeScanMutex()) return false;
+
+    uint8_t all_addresses[0x80u] = {};
+    for (unsigned address = 0u; address <= 0x7Fu; ++address) {
+        all_addresses[address] = static_cast<uint8_t>(address);
+    }
+    ESP_LOGI(TAG, "scan raw address bytes 0x00-0xFF (7-bit 0x00-0x7F)");
+    I2CDiscoveredDevice found[kMaxDevices] = {};
+    const size_t count = probeAddresses(all_addresses, sizeof(all_addresses),
+                                        found, kMaxDevices);
+    resolveAmbiguous(found, count);
+    publishSnapshot(found, count);
     xSemaphoreGive(s_scan_mutex);
     ESP_LOGI(TAG, "scan complete: %u device(s)", static_cast<unsigned>(count));
     return true;
 }
+
+bool I2C_DEVICE_DISCOVERY_ScanSensors(void)
+{
+    if (!takeScanMutex()) return false;
+
+    // The screen, touch, ES8311 and PCA9555 are soldered down with fixed
+    // addresses; only the pluggable sensors are probed. 0x20 is included
+    // purely so resolveAmbiguous() can settle the 0x23 BH1750/PCA9555
+    // collision (a PCA9555 at 0x20 means 0x23 is the BH1750).
+    static const uint8_t kSensorAddresses[] = {
+        0x0Du,  // QMC5883L compass
+        0x20u,  // on-board PCA9555 (ambiguity reference, not scanned for)
+        0x23u,  // BH1750 light sensor (or a misplaced PCA9555)
+        0x38u,  // AHT20 temp/humidity (conflicts with the on-board touch)
+        0x5Cu,  // BH1750 alternate address
+        0x76u,  // BMP280/BME280 pressure
+        0x77u,  // BMP280/BME280 alternate
+    };
+    I2CDiscoveredDevice found[kMaxDevices] = {};
+    const size_t count = probeAddresses(kSensorAddresses,
+                                        sizeof(kSensorAddresses),
+                                        found, kMaxDevices);
+    resolveAmbiguous(found, count);
+    publishSnapshot(found, count);
+    xSemaphoreGive(s_scan_mutex);
+    ESP_LOGI(TAG, "sensor probe complete: %u device(s)", static_cast<unsigned>(count));
+    return true;
+}
+
 
 size_t I2C_DEVICE_DISCOVERY_GetSnapshot(I2CDiscoveredDevice *devices,
                                         const size_t capacity,
@@ -274,6 +325,7 @@ const char *I2C_DEVICE_DISCOVERY_ModelName(const I2CDeviceModel model)
 #else
 
 bool I2C_DEVICE_DISCOVERY_Scan(void) { return true; }
+bool I2C_DEVICE_DISCOVERY_ScanSensors(void) { return true; }
 size_t I2C_DEVICE_DISCOVERY_GetSnapshot(I2CDiscoveredDevice *, size_t,
                                         uint32_t *revision)
 {

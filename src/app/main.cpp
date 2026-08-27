@@ -464,11 +464,16 @@ static void initApp()
 {
     logDramMark("boot");
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
-    // Discover the complete shared bus before binding the expander and sensor
-    // drivers. The scan covers every 7-bit address (all raw write/read address
-    // bytes 0x00-0xFF) and publishes the recognized runtime addresses.
-    if (!I2C_DEVICE_DISCOVERY_Scan()) {
-        ESP_LOGE(TAG, "BH4TDV-RF startup I2C scan failed.");
+    // Latch safe expander outputs (PTT/PD off, low power) before the slow
+    // full-bus scan: until this runs, the PCA9555 pins are floating inputs
+    // and the radio PTT line can drift into transmit at power-on/reset.
+    (void)BH4TDV_RF_IO_EarlySafeInit();
+    // Only the pluggable sensors are probed: the screen, touch, ES8311
+    // and PCA9555 are soldered down with fixed addresses and need no
+    // discovery. The full-bus scan stays available from the I2C scan
+    // page as a manual diagnostic.
+    if (!I2C_DEVICE_DISCOVERY_ScanSensors()) {
+        ESP_LOGE(TAG, "BH4TDV-RF startup sensor probe failed.");
     }
     if (!BH4TDV_RF_IO_Init()) {
         ESP_LOGE(TAG, "BH4TDV-RF PCA9555 initialization failed.");
@@ -595,14 +600,13 @@ static void mainLoopTask(void *)
     );
     (void)stack_probe;
     while (true) {
-        // Heap trajectory digest: both heaps run near full on this firmware;
-        // a periodic free/min/largest line pinpoints when and where PSRAM or
-        // internal RAM runs dry (GMF payload OOM, task create failures...).
+        // Heap trajectory digest (DEBUG level now): enable APP debug logs when
+        // diagnosing where PSRAM or internal RAM runs dry.
         static uint32_t s_last_heap_log_ms = 0;
         const uint32_t heap_now_ms = nowMsApp();
         if (heap_now_ms - s_last_heap_log_ms >= 30000u) {
             s_last_heap_log_ms = heap_now_ms;
-            ESP_LOGI(TAG, "heap: psram free=%u min=%u largest=%u | internal free=%u min=%u largest=%u",
+            ESP_LOGD(TAG, "heap: psram free=%u min=%u largest=%u | internal free=%u min=%u largest=%u",
                      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
                      static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM)),
                      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)),

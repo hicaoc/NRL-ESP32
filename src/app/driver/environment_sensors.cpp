@@ -150,7 +150,12 @@ bool initBmp280()
     const uint8_t alternate = discovered == 0x76u ? 0x77u : 0x76u;
     if (initBmp280At(discovered)) return true;
     if (alternate != discovered && initBmp280At(alternate)) return true;
-    ESP_LOGW(TAG, "BMP280 not found at 0x%02X or 0x%02X", discovered, alternate);
+    // Retried periodically; log only the first failure instead of every retry.
+    static bool s_bmp_missing_logged = false;
+    if (!s_bmp_missing_logged) {
+        s_bmp_missing_logged = true;
+        ESP_LOGW(TAG, "BMP280 not found at 0x%02X or 0x%02X", discovered, alternate);
+    }
     return false;
 }
 
