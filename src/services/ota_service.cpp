@@ -483,16 +483,18 @@ void otaSpawnTimerCb(void *)
     const bool running = s_ota_task != nullptr;
     taskEXIT_CRITICAL(&s_task_lock);
     if (running || !otaWorkPending()) return;
-    // Never compete with boot WiFi/codec bring-up or a busy audio
-    // pipeline for the 16 KB internal stack: stay pending and let the
-    // timer retry once the heap has room.
-    if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) <
-        kOtaTaskStackBytes + 8u * 1024u) {
-        return;
-    }
-    TaskHandle_t created = nullptr;
-    if (xTaskCreate(otaTask, "nrl_ota", kOtaTaskStackBytes, nullptr, 3,
-                    &created) == pdPASS) {
+    // Static internal stack: the task writes flash during an update, so its
+    // stack must stay in internal RAM -- and the heap's largest free block in
+    // steady state (~8 KB, fragmented) is far below 16 KB, so the old
+    // xTaskCreate + 24 KB-largest-block guard never fired and the release
+    // check silently never ran. A compile-time stack costs .bss but always
+    // spawns. The task self-deletes when idle and is recreated on demand.
+    static StackType_t s_ota_stack[kOtaTaskStackBytes / sizeof(StackType_t)];
+    static StaticTask_t s_ota_tcb;
+    const TaskHandle_t created =
+        xTaskCreateStatic(otaTask, "nrl_ota", kOtaTaskStackBytes, nullptr, 3,
+                          s_ota_stack, &s_ota_tcb);
+    if (created != nullptr) {
         taskENTER_CRITICAL(&s_task_lock);
         s_ota_task = created;
         taskEXIT_CRITICAL(&s_task_lock);

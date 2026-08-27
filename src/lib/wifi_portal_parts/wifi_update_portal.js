@@ -9,8 +9,6 @@ Object.assign(translations.zh,{mediaConfig:'媒体/保姆',aprsConfig:'APRS'});
 Object.assign(translations.en,{signalingConfig:'Signaling / CTCSS'});
 Object.assign(translations.zh,{signalingConfig:'信令 / CTCSS'});
 Object.assign(translations.en,{remoteUpdating:'Installing firmware... {percent}%'});
-Object.assign(translations.en,{releaseTitle:'0.8.22 feature updates',releaseSmbPlayback:'Improved SMB/NAS music streaming stability, including FLAC playback.',releaseBeaconFeedback:'"Beacon now" button shows "Sent" feedback instead of "Saved".',releaseOtaCheck:'"Check releases" now saves OTA server config before querying for updates.'});
-Object.assign(translations.zh,{releaseTitle:'0.8.22 功能更新',releaseSmbPlayback:'提升 SMB/NAS 音乐串流稳定性，包括 FLAC 播放。',releaseBeaconFeedback:'"立即发信标"按钮反馈改为"已发送"。',releaseOtaCheck:'"检查版本"按钮会先保存 OTA 服务器配置再查询更新。'});
 Object.assign(translations.zh,{remoteUpdating:'正在升级固件... {percent}%'});
 function lang(){const s=localStorage.getItem('nrl_lang');if(s==='zh'||s==='en')return s;return navigator.language&&navigator.language.toLowerCase().startsWith('zh')?'zh':'en';}
 function t(k,values={}){const l=lang();let text=(translations[l]&&translations[l][k])||translations.en[k]||k;Object.entries(values).forEach(([name,value])=>{text=text.replace('{'+name+'}',String(value));});return text;}

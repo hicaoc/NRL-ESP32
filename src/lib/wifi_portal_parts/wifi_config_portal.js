@@ -683,8 +683,8 @@ const translations = {
         aiEnabledText: '启用助手连接'
       }
 };
-Object.assign(translations.en, {sensorStatus: 'Sensors'});
-Object.assign(translations.zh, {sensorStatus: '传感器'});
+Object.assign(translations.en, {sensorStatus: 'Sensors', radioConfig: 'RF Module'});
+Object.assign(translations.zh, {sensorStatus: '传感器', radioConfig: '射频模块'});
 
     function currentLang() {
       const saved = localStorage.getItem('nrl_lang');
