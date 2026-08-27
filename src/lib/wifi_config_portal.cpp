@@ -320,6 +320,10 @@ bool s_server_started = false;
 bool s_dns_started = false;
 bool s_ap_started = false;
 bool s_ap_should_run = true;
+// Backs off AP/WiFi-stack bring-up retries: a failed esp_wifi_init is almost
+// always low internal RAM, and hammering it every poll only floods the log.
+unsigned long s_ap_retry_at_ms = 0UL;
+constexpr unsigned long kApRetryBackoffMs = 5000UL;
 bool s_sta_was_connected = false;
 bool s_ap_close_scheduled = false;
 unsigned long s_ap_close_at_ms = 0UL;
@@ -448,9 +452,21 @@ static void ensureApRunning()
     if (!s_ap_should_run || s_ap_started) {
         return;
     }
+    if (s_ap_retry_at_ms != 0UL &&
+        static_cast<long>(nowMsCfg() - s_ap_retry_at_ms) < 0L) {
+        return;
+    }
 
     // Make sure the WiFi stack is up before we scan or open the AP.
-    nrlWifiInit();
+    if (!nrlWifiInit()) {
+        s_ap_retry_at_ms = nowMsCfg() + kApRetryBackoffMs;
+        ESP_LOGW(TAG, "WiFi stack init failed; retry in %lums "
+                      "(internal free=%u largest=%u)",
+                 static_cast<unsigned long>(kApRetryBackoffMs),
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+        return;
+    }
 
     // First time the config AP comes up: scan nearby WiFi while no portal
     // client is connected yet, and cache it. The page then shows the list
@@ -465,6 +481,7 @@ static void ensureApRunning()
                                       kApIp, kApGateway, kApSubnet);
     if (ap_ok) {
         s_ap_started = true;
+        s_ap_retry_at_ms = 0UL;
         const size_t station_count = nrlWifiApGetStationCount();
         char ip_buf[16] = {};
         nrlIpToString(nrlWifiApIp(), ip_buf, sizeof(ip_buf));
@@ -473,7 +490,9 @@ static void ensureApRunning()
                  static_cast<unsigned>(kApChannel),
                  static_cast<unsigned>(station_count));
     } else {
-        ESP_LOGE(TAG, "AP start failed");
+        s_ap_retry_at_ms = nowMsCfg() + kApRetryBackoffMs;
+        ESP_LOGE(TAG, "AP start failed; retry in %lums",
+                 static_cast<unsigned long>(kApRetryBackoffMs));
     }
 }
 
@@ -3875,7 +3894,7 @@ static void ensureServerRunning()
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = 80;
-    cfg.max_uri_handlers = 48;
+    cfg.max_uri_handlers = 56; // kRoutes on BH4TDV_RF is 49 entries; leave headroom
     // The IDF default allows seven HTTP clients and uses another three
     // sockets internally. With the default LWIP socket pool that can consume
     // every descriptor before APRS, NRL, SMB playback or OTA opens one.

@@ -354,7 +354,9 @@ bool nrlWifiInit()
     err = esp_wifi_init(&cfg);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE)
     {
-        ESP_LOGE(TAG, "esp_wifi_init failed: %d", err);
+        ESP_LOGE(TAG, "esp_wifi_init failed: %d (internal free=%u largest=%u)", err,
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
         return false;
     }
 

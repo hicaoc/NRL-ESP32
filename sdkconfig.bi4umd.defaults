@@ -196,3 +196,17 @@ CONFIG_LWIP_TCP_WND_DEFAULT=8192
 # task so 'who ate the internal DRAM' is answerable without a debug build.
 CONFIG_HEAP_TASK_TRACKING=y
 CONFIG_MQTT_PROTOCOL_5=y
+
+# --- WiFi internal-RAM budget ---
+# WiFi static/mgmt buffers are DMA-capable and must live in internal RAM. On a
+# factory-fresh boot the BLE provisioning host (~40 KB internal) is reserved
+# before the config portal starts, and the Kconfig-default buffer counts
+# (16 static RX + 16 static TX + 32 cache TX + 32 mgmt) then exhaust the
+# internal heap: the softAP beacon allocation (752 B) fails and IDF's
+# ieee80211_hostap_attach dereferences the null buffer, panicking in a boot
+# loop. These are walkie-talkie links (62.5 ms G.711, no bulk throughput), so
+# halve the pools; s31_korvo already runs STATIC_RX=4 / MGMT_SBUF=8.
+CONFIG_ESP32_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP32_WIFI_STATIC_TX_BUFFER_NUM=8
+CONFIG_ESP32_WIFI_CACHE_TX_BUFFER_NUM=16
+CONFIG_ESP32_WIFI_MGMT_SBUF_NUM=16

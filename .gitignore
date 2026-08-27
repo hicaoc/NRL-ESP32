@@ -33,3 +33,6 @@ dist/
 .tmp/fmo_qso_test.exe
 .tmp/fmo_station_broadcast_test.exe
 .tmp/t.exe
+.tmp/
+.codex_dependencies_s3.lock
+.codex_merge_s31_lock.py
