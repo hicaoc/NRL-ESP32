@@ -77,14 +77,16 @@ static bool speaker_hifi_release(void)
 
 static TaskHandle_t s_player_task = nullptr;
 static volatile bool s_track_running = false;
-// Persistent player task on a static internal stack. SD/FatFS access can run
-// with the flash cache paused, so the stack must be internal (PSRAM is
-// unreachable then); and it must be static/one-shot: the runtime heap
-// shatters to ~1.5 KB largest blocks in steady state (see the BT reserve in
-// nrl_bt_hfp.cpp), so the old per-track xTaskCreate of an 8 KB stack failed
-// with "player task create failed" once the device had been up a while.
+// Persistent player task on a static PSRAM stack. The task only reads the SD
+// card / network and decodes audio -- it never writes internal flash (NVS or
+// LittleFS), and during another task's flash write all non-IRAM tasks are
+// paused anyway, so the PSRAM-unreachable window never applies. The stack
+// must be static/one-shot: the runtime heap shatters to ~1.5 KB largest
+// blocks in steady state (see the BT reserve in nrl_bt_hfp.cpp), so the old
+// per-track xTaskCreate of an 8 KB stack failed with "player task create
+// failed" once the device had been up a while.
 constexpr size_t kPlayerStackBytes = 8192;
-static StackType_t s_player_stack[kPlayerStackBytes / sizeof(StackType_t)];
+NRL_PSRAM_BSS static StackType_t s_player_stack[kPlayerStackBytes / sizeof(StackType_t)];
 static StaticTask_t s_player_tcb;
 static volatile bool s_stop_requested = false;
 static volatile bool s_playing = false;

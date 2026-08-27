@@ -5,6 +5,8 @@
 #include "services/fmo_service.h"
 #include "services/fmo_station_broadcast_core.h"
 
+#include "lib/nrl_psram.h"
+
 #include <esp_log.h>
 #include <esp_rom_crc.h>
 #include <esp_timer.h>
@@ -62,7 +64,8 @@ static int64_t s_last_attempt_ms = 0;  // last send attempt (rate limiter)
 static TaskHandle_t s_task = nullptr;
 // Online-count roster (~4 KiB static): distinct heartbeat uids inside the
 // 120 s window. s_nvs_peak is the historical peak known to be in flash.
-static FmoOnlineRoster s_roster = {};
+// PSRAM: only touched from MQTT/timer task context, never from an ISR.
+NRL_PSRAM_BSS static FmoOnlineRoster s_roster = {};
 static uint32_t s_nvs_peak = 0;
 static bool s_peak_loaded = false;
 static int64_t s_last_peak_save_ms = 0;

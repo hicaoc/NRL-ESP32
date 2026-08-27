@@ -1,5 +1,6 @@
 #include "services/storage_service.h"
 #include "driver/board_pins.h"
+#include "lib/nrl_psram.h"
 
 #include <atomic>
 #include <ctime>
@@ -374,13 +375,15 @@ static char s_smb_user[32] = {};
 static char s_smb_pass[64] = {};
 static TaskHandle_t s_smb_task = nullptr;
 static volatile bool s_smb_task_restart = false;
-// Static internal stack for the permanent mount supervisor: it can be
-// (re)started at runtime (SMB config change), when the heap is already too
-// fragmented for a fresh 6 KB stack (same failure class as "player task
-// create failed"). The task is never deleted -- restarts go through
-// s_smb_task_restart -- so one static TCB/stack covers its lifetime.
+// Static PSRAM stack for the permanent mount supervisor: the task only does
+// SMB/network I/O and triggers SD scans, it never writes internal flash
+// (NVS/LittleFS). It can be (re)started at runtime (SMB config change), when
+// the heap is already too fragmented for a fresh 6 KB stack (same failure
+// class as "player task create failed"). The task is never deleted --
+// restarts go through s_smb_task_restart -- so one static TCB/stack covers
+// its lifetime.
 constexpr size_t kSmbTaskStackBytes = 6144u;
-static StackType_t s_smb_task_stack[kSmbTaskStackBytes / sizeof(StackType_t)];
+NRL_PSRAM_BSS static StackType_t s_smb_task_stack[kSmbTaskStackBytes / sizeof(StackType_t)];
 static StaticTask_t s_smb_task_tcb;
 
 static bool smb_load_config(void)

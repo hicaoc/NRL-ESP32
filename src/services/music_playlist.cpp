@@ -71,13 +71,14 @@ static size_t s_fav_count = 0;
 static PlaylistRepeatMode s_repeat_mode = PLAYLIST_REPEAT_LIST;
 static portMUX_TYPE s_scan_state_lock = portMUX_INITIALIZER_UNLOCKED;
 
-// Persistent scan worker on a static internal stack, same pattern as
-// music_player's player task: the runtime heap shatters to ~1.5 KB largest
-// blocks in steady state (see the BT reserve in nrl_bt_hfp.cpp), so the old
-// transient xTaskCreate of a 6 KB stack failed once the device had been up a
-// while.
+// Persistent scan worker on a static PSRAM stack, same pattern as
+// music_player's player task: it only walks SD/FatFS directories and never
+// writes internal flash (NVS/LittleFS). The runtime heap shatters to ~1.5 KB
+// largest blocks in steady state (see the BT reserve in nrl_bt_hfp.cpp), so
+// the old transient xTaskCreate of a 6 KB stack failed once the device had
+// been up a while.
 constexpr size_t kScanStackBytes = 6144;
-static StackType_t s_scan_stack[kScanStackBytes / sizeof(StackType_t)];
+NRL_PSRAM_BSS static StackType_t s_scan_stack[kScanStackBytes / sizeof(StackType_t)];
 static StaticTask_t s_scan_tcb;
 static TaskHandle_t s_scan_task = nullptr;
 
