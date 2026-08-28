@@ -63,6 +63,31 @@ size_t s_data_len = 0;
 size_t s_data_idx = 0;
 uint32_t s_last_byte_ms = 0;
 
+// False-trigger replay: bytes swallowed while probing for the "IMPROV" magic
+// that turned out to be plain AT text (e.g. the 'I' in "AT+RADIO=?"). They are
+// handed back to the caller via IMPROV_ReadRejected() so the AT parser sees
+// the original byte stream.
+uint8_t s_pending[kMagicLen];
+size_t s_pending_len = 0;
+uint8_t s_reject[kMagicLen + 1u];
+size_t s_reject_len = 0;
+
+void rejectByte(uint8_t byte)
+{
+    if (s_reject_len < sizeof(s_reject)) {
+        s_reject[s_reject_len++] = byte;
+    } else {
+        ESP_LOGW(TAG, "reject buffer full, byte dropped");
+    }
+}
+
+void flushPendingToReject()
+{
+    for (size_t i = 0; i < s_pending_len; ++i) rejectByte(s_pending[i]);
+    s_pending_len = 0;
+    s_magic_idx = 0;
+}
+
 // --- Frame TX -----------------------------------------------------------------
 void sendFrame(uint8_t type, const uint8_t *data, size_t len)
 {
@@ -286,6 +311,8 @@ extern "C" bool IMPROV_ProcessByte(uint8_t byte)
 
     // Inter-byte timeout: reset if the frame stalls (e.g. false 'I' trigger).
     if (s_state != ParseState::Idle && (now - s_last_byte_ms) > 200u) {
+        // A stalled partial magic was plain text; give those bytes back.
+        if (s_state == ParseState::Magic) flushPendingToReject();
         s_state = ParseState::Idle;
         s_magic_idx = 0;
     }
@@ -294,6 +321,8 @@ extern "C" bool IMPROV_ProcessByte(uint8_t byte)
     switch (s_state) {
     case ParseState::Idle:
         if (byte == kMagic[0]) {
+            s_pending[0] = byte;
+            s_pending_len = 1;
             s_magic_idx = 1;
             s_state = ParseState::Magic;
             return true;
@@ -302,12 +331,25 @@ extern "C" bool IMPROV_ProcessByte(uint8_t byte)
 
     case ParseState::Magic:
         if (byte == kMagic[s_magic_idx]) {
-            if (++s_magic_idx >= kMagicLen) s_state = ParseState::Version;
+            s_pending[s_pending_len++] = byte;
+            if (++s_magic_idx >= kMagicLen) {
+                s_state = ParseState::Version;
+                s_pending_len = 0;
+            }
             return true;
         }
-        // False trigger – reset. Re-check byte as a potential new start.
-        s_state = (byte == kMagic[0]) ? ParseState::Magic : ParseState::Idle;
-        s_magic_idx = (byte == kMagic[0]) ? 1u : 0u;
+        // False trigger – replay the consumed prefix, then re-check this byte
+        // as a potential new magic start.
+        flushPendingToReject();
+        s_state = ParseState::Idle;
+        if (byte == kMagic[0]) {
+            s_pending[0] = byte;
+            s_pending_len = 1;
+            s_magic_idx = 1;
+            s_state = ParseState::Magic;
+        } else {
+            rejectByte(byte);
+        }
         return true;
 
     case ParseState::Version:
@@ -361,4 +403,12 @@ extern "C" bool IMPROV_ProcessByte(uint8_t byte)
     }
     }
     return false;
+}
+
+extern "C" int IMPROV_ReadRejected(void)
+{
+    if (s_reject_len == 0) return -1;
+    const uint8_t byte = s_reject[0];
+    memmove(s_reject, s_reject + 1, --s_reject_len);
+    return byte;
 }

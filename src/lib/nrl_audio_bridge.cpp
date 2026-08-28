@@ -1257,25 +1257,34 @@ static void pollSerialAtConsole(void)
         }
         for (size_t i = 0; i < got; ++i) {
             // Improv protocol (binary frames from ESP Web Tools) takes priority;
-            // only bytes not consumed by Improv reach the AT line parser.
-            if (IMPROV_ProcessByte(buf[i])) {
-                continue;
-            }
-            const char ch = static_cast<char>(buf[i]);
-            if (ch == '\n' || ch == '\r') {
-                if (s_serial_at_len > 0u) {
-                    s_serial_at_line[s_serial_at_len] = '\0';
-                    processSerialAtLine(s_serial_at_line);
-                    s_serial_at_len = 0u;
+            // bytes it tentatively swallowed but then rejected (plain AT text
+            // that starts with 'I', e.g. "AT+RADIO=?") are replayed into the
+            // AT line parser in original order.
+            auto feedAt = [](char ch) {
+                if (ch == '\n' || ch == '\r') {
+                    if (s_serial_at_len > 0u) {
+                        s_serial_at_line[s_serial_at_len] = '\0';
+                        processSerialAtLine(s_serial_at_line);
+                        s_serial_at_len = 0u;
+                    }
+                    return;
                 }
+                if (s_serial_at_len + 1u >= sizeof(s_serial_at_line)) {
+                    s_serial_at_len = 0u;
+                    ESP_LOGW(TAG, "AT serial command too long, discarded");
+                    return;
+                }
+                s_serial_at_line[s_serial_at_len++] = ch;
+            };
+            const bool consumed = IMPROV_ProcessByte(buf[i]);
+            int rejected;
+            while ((rejected = IMPROV_ReadRejected()) >= 0) {
+                feedAt(static_cast<char>(rejected));
+            }
+            if (consumed) {
                 continue;
             }
-            if (s_serial_at_len + 1u >= sizeof(s_serial_at_line)) {
-                s_serial_at_len = 0u;
-                ESP_LOGW(TAG, "AT serial command too long, discarded");
-                continue;
-            }
-            s_serial_at_line[s_serial_at_len++] = ch;
+            feedAt(static_cast<char>(buf[i]));
         }
     }
 }

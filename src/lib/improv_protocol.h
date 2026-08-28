@@ -19,6 +19,12 @@ extern "C" {
 // by the Improv state machine (caller should NOT pass it to the AT parser).
 bool IMPROV_ProcessByte(uint8_t byte);
 
+// Bytes swallowed while probing for the "IMPROV" magic that turned out to be
+// plain AT text are queued here for the caller to replay into the AT parser.
+// Returns the next rejected byte, or -1 when the queue is empty. Drain after
+// every IMPROV_ProcessByte call, regardless of its return value.
+int IMPROV_ReadRejected(void);
+
 #ifdef __cplusplus
 }
 #endif
