@@ -297,7 +297,9 @@ static bool appendSupportedAtList(uint8_t *payload,
     char aprs_symbol[4] = "/I";
     char aprs_interval[8] = "60";
     char aprs_pos[40] = "";
+#if NRL_HAS_SIGNALING
     char mdc_packet[16] = "";
+#endif
     if (config != nullptr) {
         formatSciConfig(config->sci, sci_config, sizeof(sci_config));
         snprintf(hp_drive, sizeof(hp_drive), "%s", config->hp_drive_enabled ? "ON" : "OFF");
@@ -340,12 +342,14 @@ static bool appendSupportedAtList(uint8_t *payload,
                                      false, lon, sizeof(lon));
         snprintf(aprs_pos, sizeof(aprs_pos), "%s,%s", lat, lon);
     }
+#if NRL_HAS_SIGNALING
     SignalingConfig sig{};
     SIGNALING_GetConfig(&sig);
     snprintf(mdc_packet, sizeof(mdc_packet), "%02X,%02X,%04X",
              static_cast<unsigned>(sig.mdc_opcode),
              static_cast<unsigned>(sig.mdc_argument),
              static_cast<unsigned>(sig.mdc_unit_id));
+#endif
 
     // Keep the on-wire structure unchanged: every entry remains AT+NAME=value.
     // The NRL AT packet is capped at 1024 bytes and the server does not support
@@ -385,6 +389,7 @@ static bool appendSupportedAtList(uint8_t *payload,
     appendKeyValueLineIfFits(payload, capacity, used, "CODEC",
                              (NRLAudioBridge_GetVoiceCodec() == 1u) ? "OPUS" : "G711");
     appendKeyValueLineIfFits(payload, capacity, used, "PTT_MODE", ptt_mode);
+#if NRL_HAS_SIGNALING
     appendKeyValueLineIfFits(payload, capacity, used, "CTCSS_RX_MIC", sig.ctcss_rx_mic ? "ON" : "OFF");
     appendKeyValueLineIfFits(payload, capacity, used, "CTCSS_RX_NRL", sig.ctcss_rx_nrl ? "ON" : "OFF");
     appendKeyValueLineIfFits(payload, capacity, used, "MDC", mdc_packet);
@@ -399,6 +404,7 @@ static bool appendSupportedAtList(uint8_t *payload,
     appendKeyValueLineIfFits(payload, capacity, used, "DTMF_RX_NRL", sig.dtmf_rx_nrl ? "ON" : "OFF");
     appendKeyValueLineIfFits(payload, capacity, used, "DTMF_TX_NRL", sig.dtmf_tx_nrl ? "ON" : "OFF");
     appendKeyValueLineIfFits(payload, capacity, used, "DTMF_TX_SPK", sig.dtmf_tx_speaker ? "ON" : "OFF");
+#endif
     appendKeyValueLineIfFits(payload, capacity, used, "APRS", aprs_status);
     appendKeyValueLineIfFits(payload, capacity, used, "APRS_NET", aprs_net);
     appendKeyValueLineIfFits(payload, capacity, used, "APRS_TX", aprs_tx);
@@ -1721,6 +1727,11 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         return;
     }
 
+#if NRL_HAS_SIGNALING
+    // No-screen boards (BH4TDV 3188, S31 Function CoreBoard) compile the
+    // signaling/CW/MDC1200/DTMF services out; hide their AT commands too so
+    // they report unsupported instead of a misleading all-OFF state.
+
     // CTCSS/PL receive detection. The master command controls both sources;
     // the route commands below keep MIC and NRL independently selectable.
     if (stringEqualsIgnoreCase(command.command, "CTCSS")) {
@@ -1960,6 +1971,7 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
                            entry.command, enabled ? "ON" : "OFF");
         return;
     }
+#endif // NRL_HAS_SIGNALING
 
     // APRS transceiver family:
     //   AT+APRS=ON|OFF|?          master switch / status summary
