@@ -49,6 +49,9 @@ namespace {
 
 constexpr unsigned long kSlowBlinkMs = 500UL;
 constexpr unsigned long kHeartbeatMissedBlinkMs = 6500UL;
+// Boot LED self-check duration: every status LED lights for this long at
+// power-on so a dead LED is immediately visible.
+constexpr unsigned long kLedSelftestMs = 1000UL;
 // Both nrl_main_loop (20 ms cadence) and nrl_audio_bridge (10 ms cadence) call
 // STATUS_IO_Poll(); suppress duplicates instead of sampling the same ADC
 // ladder twice. 15 ms (not 10) so the outcome is phase-independent: with a
@@ -88,6 +91,18 @@ static void writeLed(const int pin, const bool on)
 static bool blinkPhase(const unsigned long now_ms, const unsigned long period_ms)
 {
     return ((now_ms / period_ms) & 1UL) == 0UL;
+}
+
+// Boot self-check shared by all boards with status LEDs: light every LED for
+// kLedSelftestMs at power-on, then resume normal status indication. The boot
+// path is not blocked; STATUS_IO_Poll() keeps running the button/PTT state
+// machines and only suppresses the LED updates during the window.
+unsigned long s_led_selftest_start_ms = 0UL;
+
+bool ledSelftestActive(const unsigned long now_ms)
+{
+    return s_led_selftest_start_ms != 0UL &&
+           (now_ms - s_led_selftest_start_ms) < kLedSelftestMs;
 }
 
 } // namespace
@@ -808,6 +823,27 @@ extern "C" void STATUS_IO_Init(void)
         ESP_LOGW(TAG, "Function CoreBoard WS2812 init failed");
     }
 #endif
+
+    // Boot self-check: light every status LED for kLedSelftestMs. Pins defined
+    // as -1 (bi4umd / bh4tdv_rf / gezipai_4g audio) no-op inside writeLed().
+    s_led_selftest_start_ms = nrl_millis_now();
+    writeLed(NRL_PIN_LED_PTT,   true);
+    writeLed(NRL_PIN_LED_AUDIO, true);
+    writeLed(NRL_PIN_LED_NET,   true);
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    // The RF board's status LEDs hang off the PCA9555 instead of GPIOs.
+    (void)BH4TDV_RF_IO_SetStatusLeds(true, true, true);
+#endif
+#if NRL_BOARD == NRL_BOARD_S31_KORVO
+    if (s_ws2812_ready) {
+        (void)bsp_led_set_rgb(BSP_LED_STATUS, 60, 60, 60);
+    }
+#elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
+    if (s_ws2812 != nullptr) {
+        (void)led_strip_set_pixel(s_ws2812, 0, 60, 60, 60);
+        (void)led_strip_refresh(s_ws2812);
+    }
+#endif
 }
 
 extern "C" void STATUS_IO_SetPttActive(const bool active)
@@ -818,7 +854,9 @@ extern "C" void STATUS_IO_SetPttActive(const bool active)
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
     (void)BH4TDV_RF_IO_SetRadioPtt(s_net_audio_active);
 #endif
-    writeLed(NRL_PIN_LED_AUDIO, s_net_audio_active);
+    if (!ledSelftestActive(nrl_millis_now())) {
+        writeLed(NRL_PIN_LED_AUDIO, s_net_audio_active);
+    }
 }
 
 extern "C" void STATUS_IO_SetFmoPttActive(const bool active)
@@ -828,7 +866,9 @@ extern "C" void STATUS_IO_SetFmoPttActive(const bool active)
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
     (void)BH4TDV_RF_IO_SetRadioPtt(s_net_audio_active);
 #endif
-    writeLed(NRL_PIN_LED_AUDIO, s_net_audio_active);
+    if (!ledSelftestActive(nrl_millis_now())) {
+        writeLed(NRL_PIN_LED_AUDIO, s_net_audio_active);
+    }
 }
 
 extern "C" void STATUS_IO_NotifyHeartbeatReceived(void)
@@ -890,14 +930,18 @@ extern "C" void STATUS_IO_Poll(void)
 #endif
     updatePtt(now);
 
+    // During the boot self-check window the LEDs stay fully lit; normal
+    // status indications resume afterwards. heartbeat_ok is also used by the
+    // WS2812 path below, so keep it computed outside the guard.
+    const bool heartbeat_ok =
+        s_last_heartbeat_rx_ms != 0UL && (now - s_last_heartbeat_rx_ms) <= kHeartbeatMissedBlinkMs;
+    if (!ledSelftestActive(now)) {
     // Yellow LED follows the transmit state (mic uplink in progress).
     writeLed(NRL_PIN_LED_PTT, s_tx_active);
     // Green LED is refreshed from the latched network-audio state.
     writeLed(NRL_PIN_LED_AUDIO, s_net_audio_active);
     // White LED: solid while the server heartbeat is alive, slow blink while
     // it is missing (no link yet / lost).
-    const bool heartbeat_ok =
-        s_last_heartbeat_rx_ms != 0UL && (now - s_last_heartbeat_rx_ms) <= kHeartbeatMissedBlinkMs;
     writeLed(NRL_PIN_LED_NET, heartbeat_ok ? true : blinkPhase(now, kSlowBlinkMs));
 
 #if NRL_BOARD == NRL_BOARD_S31_KORVO
@@ -927,6 +971,19 @@ extern "C" void STATUS_IO_Poll(void)
             led_strip_refresh(s_ws2812) == ESP_OK) {
             s_ws2812_rgb = rgb;
         }
+    }
+#endif
+    } // !ledSelftestActive
+
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    if (!ledSelftestActive(now)) {
+        // PCA9555 status LEDs: NET follows the server heartbeat (slow blink
+        // while missing), SQL follows the radio squelch, PTT follows the
+        // actual radio PTT output latch.
+        (void)BH4TDV_RF_IO_SetStatusLeds(
+            heartbeat_ok ? true : blinkPhase(now, kSlowBlinkMs),
+            s_rf_sql_active,
+            BH4TDV_RF_IO_IsTransmitting());
     }
 #endif
 
@@ -1004,6 +1061,13 @@ extern "C" void STATUS_IO_Init(void)
     writeLed(NRL_PIN_STATUS_PTT_LED, false);
     writeLed(NRL_PIN_STATUS_IO1, false);
     writeLed(NRL_PIN_STATUS_IO2, false);
+
+    // Boot self-check: light every status LED for kLedSelftestMs, then resume
+    // normal status indication (PTT out itself is never held by the check).
+    s_led_selftest_start_ms = nrl_millis_now();
+    writeLed(NRL_PIN_STATUS_PTT_LED, true);
+    writeLed(NRL_PIN_STATUS_IO1, true);
+    writeLed(NRL_PIN_STATUS_IO2, true);
 }
 
 extern "C" void STATUS_IO_SetPttActive(const bool active)
@@ -1015,7 +1079,9 @@ extern "C" void STATUS_IO_SetPttActive(const bool active)
     }
     s_ptt_active = combined;
     gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, combined ? 1 : 0);
-    writeLed(NRL_PIN_STATUS_PTT_LED, combined);
+    if (!ledSelftestActive(nrl_millis_now())) {
+        writeLed(NRL_PIN_STATUS_PTT_LED, combined);
+    }
 }
 
 extern "C" void STATUS_IO_SetFmoPttActive(const bool active)
@@ -1028,7 +1094,9 @@ extern "C" void STATUS_IO_SetFmoPttActive(const bool active)
     }
     s_ptt_active = combined;
     gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, combined ? 1 : 0);
-    writeLed(NRL_PIN_STATUS_PTT_LED, combined);
+    if (!ledSelftestActive(nrl_millis_now())) {
+        writeLed(NRL_PIN_STATUS_PTT_LED, combined);
+    }
 }
 
 extern "C" void STATUS_IO_NotifyHeartbeatReceived(void)
@@ -1060,13 +1128,17 @@ extern "C" void STATUS_IO_Poll(void)
     const bool heartbeat_ok =
         s_last_heartbeat_rx_ms != 0UL && (now - s_last_heartbeat_rx_ms) <= kHeartbeatMissedBlinkMs;
 
+    // Keep these two outputs refreshed even if callers only update the latch state.
+    // The radio PTT output must never be held by the boot LED self-check; only
+    // the indicator LEDs are.
+    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, s_ptt_active ? 1 : 0);
+    if (ledSelftestActive(now)) {
+        return;
+    }
     // IO1 is the blue status LED, used for server-alive indication.
     writeLed(NRL_PIN_STATUS_IO1, heartbeat_ok ? true : blinkPhase(now, kSlowBlinkMs));
     // IO2 is the green status LED, used for radio SQL indication.
     writeLed(NRL_PIN_STATUS_IO2, sql_active);
-
-    // Keep these two outputs refreshed even if callers only update the latch state.
-    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, s_ptt_active ? 1 : 0);
     writeLed(NRL_PIN_STATUS_PTT_LED, s_ptt_active);
 }
 

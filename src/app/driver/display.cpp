@@ -198,8 +198,10 @@ lv_obj_t *s_lbl_vol = nullptr;
 lv_obj_t *s_lbl_batt = nullptr;
 lv_obj_t *s_lbl_ip = nullptr;
 // BH4TDV_RF home: current NRL / FMO server name lines under the IP row.
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
 lv_obj_t *s_lbl_nrl_server = nullptr;
 lv_obj_t *s_lbl_fmo_server = nullptr;
+#endif
 lv_obj_t *s_lbl_cpu = nullptr;
 lv_obj_t *s_lbl_gps = nullptr;
 lv_obj_t *s_lbl_rf_rssi = nullptr;
@@ -501,8 +503,10 @@ char s_shown_wifi[28] = {};
 char s_shown_vol[16] = {};
 char s_shown_batt[20] = {};
 char s_shown_ip[96] = {};
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
 char s_shown_nrl_server[128] = {};
 char s_shown_fmo_server[128] = {};
+#endif
 char s_shown_cpu[12] = {};
 char s_shown_gps[16] = {};
 char s_shown_rf_rssi[12] = {};
@@ -1837,9 +1841,13 @@ void buildMainMenu()
         switch (kMainMenuActions[i]) {
             case MainMenuAction::Back: items[i] = menuText("< BACK", "< 返回"); break;
             case MainMenuAction::PttMode: items[i] = ptt; break;
+            case MainMenuAction::F2Ptt:
+                // Only in the RF board's action list, but the enum value must
+                // be handled on every board (-Werror=switch).
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
-            case MainMenuAction::F2Ptt: items[i] = f2_ptt; break;
+                items[i] = f2_ptt;
 #endif
+                break;
             case MainMenuAction::Fmo: items[i] = fmo_item; break;
             case MainMenuAction::FmoBcast: items[i] = fmo_bcast; break;
             case MainMenuAction::NrlCodec: items[i] = nrl_codec; break;
@@ -6074,7 +6082,9 @@ extern "C" void Display_Poll(void)
         lv_timer_handler();
         return;
     }
+#if NRL_BOARD_IS_BI4UMD_FAMILY
     processSwipeNav();
+#endif
     processBh4tdvRfHardwareKeys();
     processMenuInput(now);
     updateFmoQsoOverlay();
