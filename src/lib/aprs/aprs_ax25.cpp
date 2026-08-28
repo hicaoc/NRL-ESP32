@@ -28,6 +28,7 @@ along with VP-Digi.  If not, see <http://www.gnu.org/licenses/>.
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_random.h"
+#include "lib/nrl_psram.h"
 
 static const char *TAG = "aprs_ax25";
 #define log_d(...) ESP_LOGD(TAG, __VA_ARGS__)
@@ -73,14 +74,14 @@ struct FrameHandle
 #endif
 };
 
-static uint8_t rxBuffer[FRAME_BUFFER_SIZE]; //circular buffer for received frames
+NRL_PSRAM_BSS static uint8_t rxBuffer[FRAME_BUFFER_SIZE]; //circular buffer for received frames
 static uint16_t rxBufferHead = 0; //circular RX buffer write index
 static struct FrameHandle rxFrame[FRAME_MAX_COUNT];
 static uint8_t rxFrameHead = 0;
 static uint8_t rxFrameTail = 0;
 static bool rxFrameBufferFull = false;
 
-static uint8_t txBuffer[FRAME_BUFFER_SIZE];  //circular TX frame buffer
+NRL_PSRAM_BSS static uint8_t txBuffer[FRAME_BUFFER_SIZE];  //circular TX frame buffer
 static uint16_t txBufferHead = 0; //circular TX buffer write index
 static uint16_t txBufferTail = 0;
 static struct FrameHandle txFrame[FRAME_MAX_COUNT];

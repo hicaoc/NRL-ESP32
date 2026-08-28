@@ -437,15 +437,17 @@ static bool initFullApp()
         ESP_LOGE(TAG, "FMO service initialization failed.");
     }
     logDramMark("fmo");
+    // FMO QSO 呼叫信令（APRS APFMO0 消息）：1s tick 驱动状态机；
+    // 收包挂点在 fmo_service 的发现连接与 MQTT 订阅里。
+    // 先建 QSO（栈 12 KB）：内部 RAM 碎片下先满足大块，bcast 的 8 KB
+    // 才能塞进剩余空隙。
+    if (!FMO_QSO_Init()) {
+        ESP_LOGE(TAG, "FMO QSO signaling initialization failed.");
+    }
     // FMO-V4 STATION server broadcast: idles until enabled in /fmo and
     // the super-on-own-server gates hold.
     if (!FMO_STATION_BCAST_Init()) {
         ESP_LOGE(TAG, "FMO station broadcast initialization failed.");
-    }
-    // FMO QSO 呼叫信令（APRS APFMO0 消息）：1s tick 驱动状态机；
-    // 收包挂点在 fmo_service 的发现连接与 MQTT 订阅里。
-    if (!FMO_QSO_Init()) {
-        ESP_LOGE(TAG, "FMO QSO signaling initialization failed.");
     }
 
     s_full_app_started = true;

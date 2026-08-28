@@ -7,6 +7,8 @@
 #include "services/fmo_service.h"
 #include "services/fmo_station_broadcast.h"
 
+#include "lib/nrl_psram.h"
+
 #include <cJSON.h>
 #include <esp_log.h>
 #include <esp_rom_crc.h>
@@ -48,13 +50,13 @@ SemaphoreHandle_t s_mutex = nullptr;
 TaskHandle_t s_task = nullptr;
 bool s_initialized = false;
 
-PersistedQsoLog s_log = {};
+NRL_PSRAM_BSS PersistedQsoLog s_log = {};
 bool s_log_loaded = false;
 SemaphoreHandle_t s_log_mutex = nullptr;
 
 // 原始报文去重（发现连接与 APRS 上行回显可能投递同一条信令）：
 // 键 = from|to|verb|msgId。
-char s_seen[kDedupMax][128] = {};
+NRL_PSRAM_BSS char s_seen[kDedupMax][128] = {};
 size_t s_seen_head = 0u;
 
 uint32_t crcLog(const PersistedQsoLog *log)
@@ -197,7 +199,7 @@ void publishQsoRecord(const char *peer, const uint32_t peer_uid)
     const char *relay_name = config.server.name[0] != '\0'
                                  ? config.server.name
                                  : config.server.callsign;
-    static char json[1024];
+    static NRL_PSRAM_BSS char json[1024];
     const size_t json_size = FMO_QSO_CORE_BuildRecordJson(
         json, sizeof(json), nextLogId(),
         static_cast<uint64_t>(time(nullptr)),
@@ -292,7 +294,7 @@ void drainActions(FmoQsoAction *acts, const size_t count)
 void ringBeep(void)
 {
     // 880 Hz 双音振铃短促音（120 ms @8 kHz），走 FMO 下行的常驻扬声器路由。
-    static int16_t pcm[960];
+    static NRL_PSRAM_BSS int16_t pcm[960];
     static bool generated = false;
     if (!generated) {
         for (size_t i = 0u; i < 960u; ++i) {

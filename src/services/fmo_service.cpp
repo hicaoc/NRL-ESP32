@@ -126,7 +126,7 @@ NRL_PSRAM_BSS static uint8_t s_raw[kRawMaxSize];
 static size_t s_raw_size = 0u;
 static size_t s_raw_expected = 0u;
 // FMO/QSO/UID/<本机uid> 记录 JSON 的分块重组缓冲（载荷很小）。
-static char s_qso_record[2048];
+NRL_PSRAM_BSS static char s_qso_record[2048];
 static size_t s_qso_record_size = 0u;
 static size_t s_qso_record_expected = 0u;
 NRL_PSRAM_BSS static FmoServer s_servers[kServerMax];

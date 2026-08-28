@@ -62,7 +62,7 @@ NRL_PSRAM_BSS static PlaylistDir s_dir_storage[kClientCount][kMaxDirs];
 // from, so next/prev/auto-advance survive any client rescanning afterwards.
 NRL_PSRAM_BSS static char s_queue_paths[kMaxTracks][kMaxPathLen];
 NRL_PSRAM_BSS static char s_fav_storage[PLAYLIST_FAV_MAX][kMaxPathLen];
-static PlaylistSession s_sessions[kClientCount];
+NRL_PSRAM_BSS static PlaylistSession s_sessions[kClientCount];
 static size_t s_queue_count = 0;
 static volatile int s_current = -1; // index into s_queue_paths, -1 when idle
 static volatile bool s_auto_advance = true;
