@@ -17,13 +17,21 @@ constexpr uint8_t kDefaultAddress = 0x20u;
 constexpr uint8_t kRegInput0 = 0x00u;
 constexpr uint8_t kRegOutput0 = 0x02u;
 constexpr uint8_t kRegConfig0 = 0x06u;
-constexpr uint8_t kConfig0 = 0xBFu; // P0.6 GPS_EN is the only output.
-constexpr uint8_t kConfig1 = 0xE9u; // P1.1 PD, P1.2 PTT1, P1.4 H/L are outputs.
+// Port 0 outputs: P0.2 NET / P0.3 SQL / P0.4 PTT status LEDs (active low --
+// the pin sinks the LED current) and P0.6 GPS_EN.
+constexpr uint8_t kConfig0 = 0xA3u;
+// Port 1 outputs: P1.1 PD, P1.2 PTT1, P1.4 YAESU/MOTO radio-type select
+// (RJ11 board; the old H/L power line is gone).
+constexpr uint8_t kConfig1 = 0xE9u;
+constexpr uint8_t kP0LedNet = 1u << 2;
+constexpr uint8_t kP0LedSql = 1u << 3;
+constexpr uint8_t kP0LedPtt = 1u << 4;
+constexpr uint8_t kP0LedsOff = kP0LedNet | kP0LedSql | kP0LedPtt; // high = off
 constexpr uint8_t kP0GpsEnable = 1u << 6;
 constexpr uint8_t kP1RadioPower = 1u << 1;
 constexpr uint8_t kP1RadioPtt = 1u << 2;
 constexpr uint8_t kP1Sql = 1u << 3;
-constexpr uint8_t kP1LowPower = 1u << 4;
+constexpr uint8_t kP1YaesuMoto = 1u << 4; // 1 = YAESU/MOTO, 0 = other radios
 constexpr uint8_t kP1KeyConfirm = 1u << 5;
 constexpr uint8_t kP1KeyUp = 1u << 6;
 constexpr uint8_t kP1KeyDown = 1u << 7;
@@ -32,8 +40,8 @@ constexpr const char *TAG = "BH4TDV_RF_IO";
 SemaphoreHandle_t s_mutex = nullptr;
 StaticSemaphore_t s_mutex_buffer = {};
 portMUX_TYPE s_mutex_lock = portMUX_INITIALIZER_UNLOCKED;
-uint8_t s_output0 = 0u;
-uint8_t s_output1 = kP1LowPower;
+uint8_t s_output0 = kP0LedsOff;
+uint8_t s_output1 = 0u;
 bool s_ready = false;
 uint8_t s_address = kDefaultAddress;
 
@@ -95,9 +103,10 @@ bool BH4TDV_RF_IO_Init(void)
     }
 
     // Program safe output latches before enabling any output driver. PTT and
-    // PD stay off; H/L's transistor is on so the radio starts in low power.
-    s_output0 = 0u;
-    s_output1 = kP1LowPower;
+    // PD stay off, the radio-type select stays low (non-YAESU/MOTO), and the
+    // three status LEDs are driven high (off, active-low wiring).
+    s_output0 = kP0LedsOff;
+    s_output1 = 0u;
     if (!writePair(kRegOutput0, s_output0, s_output1) ||
         !writePair(kRegConfig0, kConfig0, kConfig1)) {
         ESP_LOGE(TAG, "PCA9555 safe initialization failed");
@@ -123,8 +132,8 @@ bool BH4TDV_RF_IO_EarlySafeInit(void)
     if (s_ready) return true;
     if (!ensureMutex() || !I2C_MasterProbe(kDefaultAddress, 100)) return false;
     s_address = kDefaultAddress;
-    s_output0 = 0u;
-    s_output1 = kP1LowPower;
+    s_output0 = kP0LedsOff;
+    s_output1 = 0u;
     if (!writePair(kRegOutput0, s_output0, s_output1) ||
         !writePair(kRegConfig0, kConfig0, kConfig1)) {
         return false;
@@ -179,9 +188,28 @@ bool BH4TDV_RF_IO_IsTransmitting(void)
     return s_ready && (s_output1 & kP1RadioPtt) != 0u;
 }
 
-bool BH4TDV_RF_IO_SetLowPower(const bool low_power)
+bool BH4TDV_RF_IO_SetYaesuMoto(const bool yaesu_moto)
 {
-    return setOutput(1u, kP1LowPower, low_power);
+    return setOutput(1u, kP1YaesuMoto, yaesu_moto);
+}
+
+// Status LEDs are active low: a set bit in the output latch turns the LED
+// OFF. One I2C transaction updates all three; skipped entirely when nothing
+// changed, so polling callers are cheap.
+bool BH4TDV_RF_IO_SetStatusLeds(const bool net, const bool sql, const bool ptt)
+{
+    if (!s_ready || s_mutex == nullptr ||
+        xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+    bool ok = true;
+    const uint8_t next = static_cast<uint8_t>(
+        (s_output0 & kP0GpsEnable) |
+        (net ? 0u : kP0LedNet) | (sql ? 0u : kP0LedSql) | (ptt ? 0u : kP0LedPtt));
+    if (next != s_output0) {
+        ok = writePair(kRegOutput0, next, s_output1);
+        if (ok) s_output0 = next;
+    }
+    xSemaphoreGive(s_mutex);
+    return ok;
 }
 
 #else
@@ -194,6 +222,7 @@ bool BH4TDV_RF_IO_SetGpsPower(bool) { return false; }
 bool BH4TDV_RF_IO_SetRadioPower(bool) { return false; }
 bool BH4TDV_RF_IO_SetRadioPtt(bool) { return false; }
 bool BH4TDV_RF_IO_IsTransmitting(void) { return false; }
-bool BH4TDV_RF_IO_SetLowPower(bool) { return false; }
+bool BH4TDV_RF_IO_SetYaesuMoto(bool) { return false; }
+bool BH4TDV_RF_IO_SetStatusLeds(bool, bool, bool) { return false; }
 
 #endif

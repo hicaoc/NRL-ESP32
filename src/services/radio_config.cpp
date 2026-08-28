@@ -27,7 +27,8 @@ constexpr const char *kNvsKey = "sr110u";
 constexpr uint32_t kPersistMagic = 0x53523155u; // 'SR1U'
 // v2: force defaults once. v1 could persist low_power=false (high power),
 // and keying 1 W on an unverified 5 V rail browns the board out.
-constexpr uint8_t kPersistVersion = 3u;
+// v4: adds radio_type (RJ11 board YAESU/MOTO select).
+constexpr uint8_t kPersistVersion = 4u;
 
 constexpr uint32_t kMinFreqHz = 400000000u;
 constexpr uint32_t kMaxFreqHz = 480000000u;
@@ -52,7 +53,8 @@ struct PersistBlob {
     uint8_t volume;
     uint8_t power_save;
     uint8_t vox;
-    uint8_t reserved[8];
+    uint8_t radio_type;
+    uint8_t reserved[7];
 };
 
 RadioModuleConfig s_config = {};
@@ -91,6 +93,7 @@ void defaultConfig(RadioModuleConfig *config)
     // boot-time full sync does not silently change the module.
     config->power_save = true;
     config->vox = 0u;
+    config->radio_type = 0u; // non-YAESU/MOTO radios: P1.4 low
 }
 
 bool toneValid(const RadioTone &tone)
@@ -129,7 +132,7 @@ bool configValid(const RadioModuleConfig *config)
            config->squelch <= 8u && config->mic_level <= 8u &&
            config->tot <= 9u && config->scramble <= 7u &&
            config->volume >= 1u && config->volume <= 9u &&
-           config->vox <= 8u;
+           config->vox <= 8u && config->radio_type <= 1u;
 }
 
 void saveConfig()
@@ -155,6 +158,7 @@ void saveConfig()
     blob.volume = s_config.volume;
     blob.power_save = s_config.power_save ? 1u : 0u;
     blob.vox = s_config.vox;
+    blob.radio_type = s_config.radio_type;
 
     nvs_handle_t nvs;
     if (nvs_open(kNvsNamespace, NVS_READWRITE, &nvs) == ESP_OK) {
@@ -199,6 +203,7 @@ void loadConfig()
     loaded.volume = blob.volume;
     loaded.power_save = blob.power_save != 0u;
     loaded.vox = blob.vox;
+    loaded.radio_type = blob.radio_type;
     // Never resurrect a corrupt blob: fall back to defaults instead.
     if (configValid(&loaded)) {
         s_config = loaded;
@@ -361,6 +366,9 @@ bool RADIO_CONFIG_Set(const RadioModuleConfig *config, const bool persist)
         config->low_power != s_config.low_power) {
         changed |= kDirtyGroup;
     }
+    // Radio type is a bare PCA9555 level, not a module command; marking the
+    // group dirty just guarantees ApplyToModule() runs and updates the pin.
+    if (config->radio_type != s_config.radio_type) changed |= kDirtyGroup;
     if (config->squelch != s_config.squelch ||
         config->mic_level != s_config.mic_level ||
         config->tot != s_config.tot ||
@@ -389,6 +397,10 @@ bool RADIO_CONFIG_ApplyToModule(void)
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
     const RadioModuleConfig *config = RADIO_CONFIG_Get();
 
+    // The YAESU/MOTO select is a plain DC level; follow the config even while
+    // the module is powered down or transmitting.
+    (void)BH4TDV_RF_IO_SetYaesuMoto(config->radio_type == 1u);
+
     // The module rejects parameter commands while transmitting; never cut an
     // ongoing transmission just to push config. Callers report the deferred
     // apply and the stored values take effect on the next boot/save.
@@ -416,9 +428,8 @@ bool RADIO_CONFIG_ApplyToModule(void)
         return false;
     }
 
-    // DMOGRP Flag1 and the PCA9555 H/L pin must never disagree.
-    if (!BH4TDV_RF_IO_SetLowPower(config->low_power)) return false;
-
+    // RJ11 board: the H/L pin is gone (P1.4 is the radio-type select now), so
+    // the power level reaches the module only through DMOGRP Flag1.
     bool ok = true;
     if (s_dirty & kDirtyGroup) {
         const bool r = sendGroup(config);

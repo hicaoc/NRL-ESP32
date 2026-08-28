@@ -730,6 +730,7 @@ bool handleRadioAtCommand(const AtCommand &command, const bool is_query,
         line("RADIO_BCLO", config.busy_lockout ? "ON" : "OFF");
         line("RADIO_NB", config.narrowband ? "ON" : "OFF");
         line("RADIO_LP", config.low_power ? "ON" : "OFF");
+        snprintf(text, sizeof(text), "%u", config.radio_type); line("RADIO_TYPE", text);
         return true;
     }
 
@@ -777,6 +778,8 @@ bool handleRadioAtCommand(const AtCommand &command, const bool is_query,
     if (stringEqualsIgnoreCase(name, "RADIO_SCRAM")) return uintField("RADIO_SCRAM", &RadioModuleConfig::scramble, 0u, 7u);
     if (stringEqualsIgnoreCase(name, "RADIO_VOL")) return uintField("RADIO_VOL", &RadioModuleConfig::volume, 1u, 9u);
     if (stringEqualsIgnoreCase(name, "RADIO_VOX")) return uintField("RADIO_VOX", &RadioModuleConfig::vox, 0u, 8u);
+    // 0 = other radios (PCA9555 P1.4 low), 1 = YAESU/MOTO (P1.4 high)
+    if (stringEqualsIgnoreCase(name, "RADIO_TYPE")) return uintField("RADIO_TYPE", &RadioModuleConfig::radio_type, 0u, 1u);
 
     auto freqField = [&](const char *key, uint32_t RadioModuleConfig::*member) {
         if (!is_query) {

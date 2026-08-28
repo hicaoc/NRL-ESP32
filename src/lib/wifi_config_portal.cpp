@@ -3670,6 +3670,7 @@ static esp_err_t handleRadioStatus(httpd_req_t *req)
     cJSON_AddBoolToObject(root, "bclo", config->busy_lockout);
     cJSON_AddBoolToObject(root, "nb", config->narrowband);
     cJSON_AddBoolToObject(root, "lp", config->low_power);
+    cJSON_AddNumberToObject(root, "rt", config->radio_type);
     char *body = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (body == nullptr) {
@@ -3750,6 +3751,12 @@ static esp_err_t handleSaveRadio(httpd_req_t *req)
     if (ok && s_server.hasArg("lp")) {
         config.low_power = s_server.arg("lp") == "1";
     }
+    if (ok && s_server.hasArg("rt")) {
+        unsigned long value = 0u;
+        ok = parseUIntArg(s_server.arg("rt"), &value) && value <= 1u;
+        if (ok) config.radio_type = static_cast<uint8_t>(value);
+        else bad_field = "rt";
+    }
 
     if (!ok || !RADIO_CONFIG_Set(&config, true)) {
         if (bad_field[0] == '\0') bad_field = "config";
@@ -3787,6 +3794,7 @@ static esp_err_t handleRadioPage(httpd_req_t *req)
 <label>VOX<select name="vox" id="vox"></select></label>
 <label>带宽<select name="nb" id="nb"><option value="0">宽带</option><option value="1">窄带</option></select></label>
 <label>发射功率<select name="lp" id="lp"><option value="0">高功率</option><option value="1">低功率</option></select></label>
+<label>电台类型<select name="rt" id="rt"><option value="0">其它电台</option><option value="1">YAESU/MOTO</option></select></label>
 <label class="fmo-row"><input type="checkbox" name="comp" value="1" id="comp">压扩</label>
 <label class="fmo-row"><input type="checkbox" name="sav" value="1" id="sav">接收省电</label>
 <label class="fmo-row"><input type="checkbox" name="bclo" value="1" id="bclo">遇忙禁发</label>
@@ -3810,7 +3818,7 @@ $('state').textContent=(s.ready?'模块在线':'模块离线')+(s.version?' '+s.
 if(loaded)return;loaded=true;
 $('en').checked=s.en;$('rxf').value=s.rxf;$('txf').value=s.txf;$('rxct').value=s.rxct;$('txct').value=s.txct;
 $('sql').value=s.sql;$('mic').value=s.mic;$('tot').value=s.tot;$('scram').value=s.scram;
-$('vol').value=s.vol;$('vox').value=s.vox;$('nb').value=s.nb?'1':'0';$('lp').value=s.lp?'1':'0';
+$('vol').value=s.vol;$('vox').value=s.vox;$('nb').value=s.nb?'1':'0';$('lp').value=s.lp?'1':'0';$('rt').value=String(s.rt??0);
 $('comp').checked=s.comp;$('sav').checked=s.sav;$('bclo').checked=s.bclo;}catch(e){$('state').textContent='读取失败';}}
 const CTCSS=['67.0','69.3','71.9','74.4','77.0','79.7','82.5','85.4','88.5','91.5','94.8','97.4','100.0','103.5','107.2','110.9','114.8','118.8','123.0','127.3','131.8','136.5','141.3','146.2','151.4','156.7','159.8','162.2','167.9','173.8','179.9','183.5','186.2','189.9','192.8','196.6','199.5','203.5','206.5','210.7','218.1','225.7','229.1','233.6','241.8','250.3','254.1'];
 const CDCSS=['023','025','026','031','032','036','043','047','051','053','054','065','071','072','073','074','114','115','116','122','125','131','132','134','143','145','152','155','156','162','165','172','174','205','212','223','225','226','243','244','245','246','251','252','255','261','263','265','266','271','274','306','311','315','325','331','332','343','346','351','356','364','365','371','411','412','413','423','431','432','445','446','452','454','455','462','464','465','466','503','506','516','523','526','532','546','565','606','612','624','627','631','632','654','662','664','703','712','723','731','732','734','743','754'];

@@ -107,7 +107,7 @@ bool SR110U_Init(void)
 {
     if (s_ready) return true;
     if (!BH4TDV_RF_IO_Init() || !BH4TDV_RF_IO_SetRadioPtt(false) ||
-        !BH4TDV_RF_IO_SetLowPower(true) || !BH4TDV_RF_IO_SetRadioPower(true)) {
+        !BH4TDV_RF_IO_SetRadioPower(true)) {
         ESP_LOGE(TAG, "radio power-up failed");
         return false;
     }
