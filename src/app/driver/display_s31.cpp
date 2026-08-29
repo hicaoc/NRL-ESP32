@@ -57,6 +57,7 @@
 #include <esp_lcd_touch.h>
 #include <esp_lcd_touch_gt1151.h>
 #include <esp_log.h>
+#include <esp_mac.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
 #include <nvs.h>
@@ -2244,9 +2245,21 @@ void buildAbout()
     fieldLabel(box, 0, 0, "Firmware Version");
     lv_obj_t *version = label(box, &lv_font_montserrat_20, kColorAccent);
     lv_obj_set_pos(version, 180, -4);
-    lv_obj_set_width(version, 520);
+    lv_obj_set_width(version, 280);
     lv_label_set_long_mode(version, LV_LABEL_LONG_DOT);
     lv_label_set_text(version, NRL_FIRMWARE_BANNER);
+
+    // STA MAC, the identity registered/bound on the certificate platform.
+    uint8_t mac[6] = {};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    char mac_text[32] = {};
+    snprintf(mac_text, sizeof(mac_text), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    fieldLabel(box, 500, 0, "MAC");
+    lv_obj_t *mac_label = label(box, &lv_font_montserrat_16, kColorAccent);
+    lv_obj_set_pos(mac_label, 548, 2);
+    lv_obj_set_width(mac_label, 192);
+    lv_label_set_text(mac_label, mac_text);
 
     fieldLabel(box, 0, 38, "OTA Server URL");
     s_ta_ota_url = textArea(box, 0, 60, 710, "http://ota.example.com",

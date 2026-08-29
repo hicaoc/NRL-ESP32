@@ -1274,7 +1274,7 @@ static const char kFmoPage[] = R"FMO(<!doctype html><html lang="en"><head>
 <label class="fmo-row"><input type="checkbox" name="transmit" value="1" id="transmit">将 PTT/SQL 麦克风上行切换到 FMO</label>
 <label class="fmo-row" title="关闭后服务器会返回本客户端发布的消息，用于调试"><input type="checkbox" name="mqtt_no_local" value="1" id="mqtt_no_local">MQTT 5 No Local</label></div></div>
 <input type="hidden" name="enabled_present" value="1"><button type="submit">保存并应用</button></form><p id="link" class="mono hint">加载中…</p></section>
-<section class="panel"><h2>自动获取证书</h2><div class="grid"><label>证书服务器地址<input id="act_host" maxlength="128" placeholder="www.hamptt.com"></label></div><div class="fmo-row"><button type="button" id="act_save">保存地址</button><button type="button" id="act_run">自动获取证书</button></div><p id="act_stat" class="mono hint">尚未激活</p><p class="hint">前提：本机 MAC 已在证书平台登记并绑定用户（hamptt.com）。成功后自动写入 user/intermediate 证书并重连 FMO；deviceKey 首次激活时自动生成并仅存于板载 LittleFS。</p></section>
+<section class="panel"><h2>自动获取证书</h2><p class="hint">本机 MAC：<strong class="mono" id="act_mac">--</strong>（在证书平台登记绑定此地址）</p><div class="grid"><label>证书服务器地址<input id="act_host" maxlength="128" placeholder="www.hamptt.com"></label></div><div class="fmo-row"><button type="button" id="act_save">保存地址</button><button type="button" id="act_run">自动获取证书</button></div><p id="act_stat" class="mono hint">尚未激活</p><p class="hint">前提：本机 MAC 已在证书平台登记并绑定用户（hamptt.com）。成功后自动写入 user/intermediate 证书并重连 FMO；deviceKey 首次激活时自动生成并仅存于板载 LittleFS。</p></section>
 <section class="panel"><h2>FMO 身份证书</h2><p id="cert" class="mono hint">加载中…</p><div class="grid">
 <label>userCert JSON<input type="file" accept="application/json,.json" data-kind="user"></label>
 <label>intermediateCert JSON<input type="file" accept="application/json,.json" data-kind="intermediate"></label>
@@ -1308,7 +1308,7 @@ async function qsoAct(a){const body=new URLSearchParams({action:a,peer:qso_peer.
 qso_call.onclick=()=>qsoAct('call');qso_answer.onclick=()=>qsoAct('answer');qso_reject.onclick=()=>qsoAct('reject');qso_cancel.onclick=()=>qsoAct('cancel');
 async function actPost(saveOnly){const body=new URLSearchParams({cert_host:act_host.value});if(saveOnly)body.set('save_only','1');act_stat.className='mono hint';act_stat.textContent=saveOnly?'保存中…':'正在获取证书（约需数秒）…';try{const r=await fetch('/fmo/activate',{method:'POST',body});const t=await r.text();if(!r.ok)throw Error(t);act_stat.className='mono ok';act_stat.textContent=t;refresh()}catch(e){act_stat.className='mono bad';act_stat.textContent=e.message||String(e)}}
 act_save.onclick=()=>actPost(true);act_run.onclick=()=>actPost(false);
-(async()=>{try{const r=await fetch('/fmo/status',{cache:'no-store'}),j=await r.json();if(j.activate){if(j.activate.host&&document.activeElement!==act_host)act_host.value=j.activate.host;if(j.activate.last){act_stat.className='mono hint';act_stat.textContent=`上次：${j.activate.last}${j.activate.last_epoch?` / ${new Date(j.activate.last_epoch*1000).toLocaleString()}`:''}`}}}catch(e){}})();
+(async()=>{try{const r=await fetch('/fmo/status',{cache:'no-store'}),j=await r.json();if(j.activate){if(j.activate.mac)act_mac.textContent=j.activate.mac;if(j.activate.host&&document.activeElement!==act_host)act_host.value=j.activate.host;if(j.activate.last){act_stat.className='mono hint';act_stat.textContent=`上次：${j.activate.last}${j.activate.last_epoch?` / ${new Date(j.activate.last_epoch*1000).toLocaleString()}`:''}`}}}catch(e){}})();
 refresh();setInterval(refresh,3000);
 </script></main></body></html>)FMO";
 
@@ -1404,7 +1404,13 @@ static esp_err_t handleFmoStatus(httpd_req_t *req)
         uint64_t act_epoch = 0;
         FMO_ACTIVATE_GetHost(act_host, sizeof(act_host));
         FMO_ACTIVATE_GetStatus(act_last, sizeof(act_last), &act_epoch);
+        uint8_t mac[6] = {};
+        esp_read_mac(mac, ESP_MAC_WIFI_STA);
+        char mac_text[13] = {};
+        snprintf(mac_text, sizeof(mac_text), "%02X%02X%02X%02X%02X%02X",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
         head += "\"activate\":{\"host\":\"" + jsonEscape(act_host) +
+                "\",\"mac\":\"" + std::string(mac_text) +
                 "\",\"last\":\"" + jsonEscape(act_last) +
                 "\",\"last_epoch\":" + std::to_string(act_epoch) + "},";
     }

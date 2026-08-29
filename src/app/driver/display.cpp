@@ -86,6 +86,7 @@
 #include <driver/gpio.h>
 #include <driver/spi_master.h>
 #include <esp_log.h>
+#include <esp_mac.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
 #include <esp_heap_caps.h>
@@ -1943,14 +1944,31 @@ void buildAboutMenu()
     lv_label_set_text(rf_version, rf_version_text);
 #endif
 
+    // STA MAC, the identity registered/bound on the certificate platform.
+    uint8_t mac[6] = {};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    char mac_text[40] = {};
+    snprintf(mac_text, sizeof(mac_text), "MAC %02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    lv_obj_t *mac_label = makeLabel(scr, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(mac_label, kWidth);
+    lv_obj_set_style_text_align(mac_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(mac_label, LV_ALIGN_TOP_MID, 0,
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+                 122);
+#else
+                 100);
+#endif
+    lv_label_set_text(mac_label, mac_text);
+
     lv_obj_t *board = makeLabel(scr, &lv_font_montserrat_16, kColorSub);
     lv_obj_set_width(board, kWidth);
     lv_obj_set_style_text_align(board, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(board, LV_ALIGN_TOP_MID, 0,
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
-                 126);
+                 148);
 #else
-                 108);
+                 122);
 #endif
     lv_label_set_text(board, "GEZIPAI");
     menuFooter(scr, menuText("PTT BACK", "PTT返回"));
