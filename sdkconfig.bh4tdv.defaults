@@ -149,3 +149,7 @@ CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
 CONFIG_LWIP_MAX_SOCKETS=16
 CONFIG_MQTT_PROTOCOL_5=y
+
+# Keep the full 64-hex-char ELF SHA-256 (the Kconfig default truncates to
+# 9 chars); the FMO device activation reports it as firmwareHash.
+CONFIG_APP_RETRIEVE_LEN_ELF_SHA=64

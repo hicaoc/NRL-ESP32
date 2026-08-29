@@ -27,6 +27,7 @@
 #include "../services/signaling_service.h"
 #include "../services/display_notice.h"
 #include "../services/espnow_link.h"
+#include "../services/fmo_activate.h"
 #include "../services/fmo_cert_store.h"
 #include "../services/fmo_service.h"
 #include "../services/fmo_station_broadcast.h"
@@ -1273,6 +1274,7 @@ static const char kFmoPage[] = R"FMO(<!doctype html><html lang="en"><head>
 <label class="fmo-row"><input type="checkbox" name="transmit" value="1" id="transmit">将 PTT/SQL 麦克风上行切换到 FMO</label>
 <label class="fmo-row" title="关闭后服务器会返回本客户端发布的消息，用于调试"><input type="checkbox" name="mqtt_no_local" value="1" id="mqtt_no_local">MQTT 5 No Local</label></div></div>
 <input type="hidden" name="enabled_present" value="1"><button type="submit">保存并应用</button></form><p id="link" class="mono hint">加载中…</p></section>
+<section class="panel"><h2>自动获取证书</h2><div class="grid"><label>证书服务器地址<input id="act_host" maxlength="128" placeholder="www.hamptt.com"></label></div><div class="fmo-row"><button type="button" id="act_save">保存地址</button><button type="button" id="act_run">自动获取证书</button></div><p id="act_stat" class="mono hint">尚未激活</p><p class="hint">前提：本机 MAC 已在证书平台登记并绑定用户（hamptt.com）。成功后自动写入 user/intermediate 证书并重连 FMO；deviceKey 首次激活时自动生成并仅存于板载 LittleFS。</p></section>
 <section class="panel"><h2>FMO 身份证书</h2><p id="cert" class="mono hint">加载中…</p><div class="grid">
 <label>userCert JSON<input type="file" accept="application/json,.json" data-kind="user"></label>
 <label>intermediateCert JSON<input type="file" accept="application/json,.json" data-kind="intermediate"></label>
@@ -1304,6 +1306,9 @@ current.onclick=()=>{if(typeof servers.showPicker==='function')servers.showPicke
 document.querySelectorAll('input[type=file]').forEach(el=>el.onchange=async()=>{if(!el.files[0])return;try{const text=await el.files[0].text();const r=await fetch('/fmo/cert/'+el.dataset.kind,{method:'POST',headers:{'Content-Type':'application/json'},body:text});const t=await r.text();if(!r.ok)throw Error(t);alert('证书已验证并写入');el.value='';refresh()}catch(e){alert('证书写入失败：'+e)}});
 async function qsoAct(a){const body=new URLSearchParams({action:a,peer:qso_peer.value,uid:qso_uid.value||'0'});try{const r=await fetch('/fmo/qso',{method:'POST',body});const t=await r.text();if(!r.ok)throw Error(t);refresh()}catch(e){alert('操作失败：'+e)}};
 qso_call.onclick=()=>qsoAct('call');qso_answer.onclick=()=>qsoAct('answer');qso_reject.onclick=()=>qsoAct('reject');qso_cancel.onclick=()=>qsoAct('cancel');
+async function actPost(saveOnly){const body=new URLSearchParams({cert_host:act_host.value});if(saveOnly)body.set('save_only','1');act_stat.className='mono hint';act_stat.textContent=saveOnly?'保存中…':'正在获取证书（约需数秒）…';try{const r=await fetch('/fmo/activate',{method:'POST',body});const t=await r.text();if(!r.ok)throw Error(t);act_stat.className='mono ok';act_stat.textContent=t;refresh()}catch(e){act_stat.className='mono bad';act_stat.textContent=e.message||String(e)}}
+act_save.onclick=()=>actPost(true);act_run.onclick=()=>actPost(false);
+(async()=>{try{const r=await fetch('/fmo/status',{cache:'no-store'}),j=await r.json();if(j.activate){if(j.activate.host&&document.activeElement!==act_host)act_host.value=j.activate.host;if(j.activate.last){act_stat.className='mono hint';act_stat.textContent=`上次：${j.activate.last}${j.activate.last_epoch?` / ${new Date(j.activate.last_epoch*1000).toLocaleString()}`:''}`}}}catch(e){}})();
 refresh();setInterval(refresh,3000);
 </script></main></body></html>)FMO";
 
@@ -1393,6 +1398,16 @@ static esp_err_t handleFmoStatus(httpd_req_t *req)
             ",\"fingerprint\":\"" + (identity.ready ? fingerprintHex(identity.fingerprint) : "") +
             "\",\"error\":\"" + jsonEscape(esp_err_to_name(identity_error)) +
             "\"},";
+    {
+        char act_host[FMO_ACTIVATE_HOST_MAX + 1] = {};
+        char act_last[128] = {};
+        uint64_t act_epoch = 0;
+        FMO_ACTIVATE_GetHost(act_host, sizeof(act_host));
+        FMO_ACTIVATE_GetStatus(act_last, sizeof(act_last), &act_epoch);
+        head += "\"activate\":{\"host\":\"" + jsonEscape(act_host) +
+                "\",\"last\":\"" + jsonEscape(act_last) +
+                "\",\"last_epoch\":" + std::to_string(act_epoch) + "},";
+    }
     {
         FmoStationBroadcastConfig bcast = {};
         FmoStationBroadcastStatus bstat = {};
@@ -1733,6 +1748,33 @@ static esp_err_t handleFmoCertificate(httpd_req_t *req)
     FMO_GetConfig(&config);
     (void)FMO_SetConfig(&config, false); // reconnect with the new identity
     return httpd_resp_sendstr(req, "OK");
+}
+
+// FMO 自动激活：保存证书服务器地址（cert_host，可选；save_only=1 时只保存
+// 不激活），随后同步执行一次 HTTPS 激活往返并写入签发证书。
+static esp_err_t handleFmoActivate(httpd_req_t *req)
+{
+    if (!s_server.bindPost(req)) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "form parse failed");
+    }
+    if (s_server.hasArg("cert_host")) {
+        const std::string host = s_server.arg("cert_host");
+        if (!host.empty() && !FMO_ACTIVATE_SetHost(host.c_str())) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "invalid certificate server host");
+        }
+    }
+    if (s_server.hasArg("save_only")) {
+        return httpd_resp_sendstr(req, "OK 证书服务器地址已保存");
+    }
+    char message[160] = {};
+    if (FMO_ACTIVATE_Run(message, sizeof(message)) != ESP_OK) {
+        return httpd_resp_send_err(
+            req, HTTPD_400_BAD_REQUEST,
+            message[0] != '\0' ? message : "activate failed");
+    }
+    return httpd_resp_sendstr(req, message);
 }
 
 static esp_err_t handleMediaPage(httpd_req_t *req)
@@ -3902,7 +3944,7 @@ static void ensureServerRunning()
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = 80;
-    cfg.max_uri_handlers = 56; // kRoutes on BH4TDV_RF is 49 entries; leave headroom
+    cfg.max_uri_handlers = 56; // kRoutes on BH4TDV_RF is 50 entries; leave headroom
     // The IDF default allows seven HTTP clients and uses another three
     // sockets internally. With the default LWIP socket pool that can consume
     // every descriptor before APRS, NRL, SMB playback or OTA opens one.
@@ -3943,6 +3985,7 @@ static void ensureServerRunning()
         { "/fmo/cert/user",        HTTP_POST, handleFmoCertificate },
         { "/fmo/cert/intermediate",HTTP_POST, handleFmoCertificate },
         { "/fmo/cert/devicekey",   HTTP_POST, handleFmoCertificate },
+        { "/fmo/activate",         HTTP_POST, handleFmoActivate },
         { "/scan",                 HTTP_GET,  handleScan },
         { "/save_wifi",            HTTP_POST, handleSaveWifi },
         { "/save_nrl",             HTTP_POST, handleSaveNrl },

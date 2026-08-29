@@ -20,6 +20,8 @@ set(app_sources
     services/cw_service.cpp
     services/display_notice.cpp
     services/espnow_link.cpp
+    services/fmo_activate.cpp
+    services/fmo_activate_core.cpp
     services/fmo_adpcm.cpp
     services/fmo_cert_store.cpp
     services/fmo_frame.cpp
