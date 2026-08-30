@@ -1202,6 +1202,9 @@ bool EXTERNAL_RADIO_SetCallsign(const char *value, const bool persist)
 bool EXTERNAL_RADIO_SetCallsignSsid(const uint8_t value, const bool persist)
 {
     EXTERNAL_RADIO_Init();
+    if (value < 1u || value > 99u) {
+        return false;
+    }
     s_config.callsign_ssid = value;
     if (persist) {
         return savePersistedConfig();

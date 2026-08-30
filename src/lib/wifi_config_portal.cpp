@@ -2676,7 +2676,7 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
     if (ok && s_server.hasArg("callsign_ssid")) {
         unsigned long value = 0UL;
         ok = parseUIntArg(s_server.arg("callsign_ssid"), &value) &&
-             value <= 255UL &&
+             value >= 1UL && value <= 99UL &&
              EXTERNAL_RADIO_SetCallsignSsid(static_cast<uint8_t>(value), false);
     }
     if (ok && s_server.hasArg("ptt_timeout")) {

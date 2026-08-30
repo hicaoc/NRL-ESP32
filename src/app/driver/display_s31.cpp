@@ -2451,7 +2451,7 @@ void buildStation()
     fieldLabel(box, 280, 0, "SSID");
     char ssid[8] = {};
     snprintf(ssid, sizeof(ssid), "%u", cfg ? static_cast<unsigned>(cfg->callsign_ssid) : 0);
-    s_ta_callsign_ssid = textArea(box, 280, 24, 110, "0", ssid, 3, false, "0123456789", true);
+    s_ta_callsign_ssid = textArea(box, 280, 24, 110, "1", ssid, 2, false, "0123456789", true);
 
     // NRL TX voice codec lives with the other NRL settings; applies + persists
     // immediately (RX auto-detects, no Save round-trip needed). On the SSID row
@@ -5458,10 +5458,10 @@ void setSsidDelta(int delta)
         return;
     }
     int ssid = static_cast<int>(cfg->callsign_ssid) + delta;
-    if (ssid < 0) {
-        ssid = 0;
-    } else if (ssid > 255) {
-        ssid = 255;
+    if (ssid < 1) {
+        ssid = 1;
+    } else if (ssid > 99) {
+        ssid = 99;
     }
     if (ssid != static_cast<int>(cfg->callsign_ssid)) {
         EXTERNAL_RADIO_SetCallsignSsid(static_cast<uint8_t>(ssid), true);
@@ -5656,7 +5656,8 @@ void saveStationForm()
     const char *port_text = (s_ta_server_port != nullptr) ? lv_textarea_get_text(s_ta_server_port) : "";
     char *end = nullptr;
     const unsigned long ssid = strtoul(ssid_text, &end, 10);
-    const bool ssid_ok = ssid_text[0] != '\0' && end != ssid_text && *end == '\0' && ssid <= 255ul;
+    const bool ssid_ok = ssid_text[0] != '\0' && end != ssid_text && *end == '\0' &&
+                         ssid >= 1ul && ssid <= 99ul;
     end = nullptr;
     const unsigned long port = strtoul(port_text, &end, 10);
     const bool port_ok = port_text[0] != '\0' && end != port_text && *end == '\0' &&
@@ -5669,7 +5670,7 @@ void saveStationForm()
               EXTERNAL_RADIO_SaveConfig();
     if (s_lbl_form_status != nullptr) {
         const char *msg = ok ? "Station config saved."
-                             : (!ssid_ok ? "Save failed: SSID must be 0-255."
+                             : (!ssid_ok ? "Save failed: SSID must be 1-99."
                                          : (!port_ok ? "Save failed: port must be 1-65535."
                                                      : "Save failed: check callsign and server."));
         lv_label_set_text(s_lbl_form_status, msg);

@@ -19,7 +19,7 @@
         <div{{CHANNEL_HIDDEN}}><label data-i18n="channel">Channel (0-7)</label><input name="channel" value="{{CHANNEL}}"></div>
         <div><label data-i18n="tailSuppressMs">Tail Suppression (ms, 0-5000, 0=off)</label><input name="tail_suppress_ms" value="{{TAIL_SUPPRESS_MS}}"></div>
         <div><label data-i18n="callsign">Callsign</label><input name="callsign" value="{{CALLSIGN}}"></div>
-        <div><label data-i18n="callsignSsid">Callsign SSID</label><input name="callsign_ssid" value="{{CALLSIGN_SSID}}"></div>
+        <div><label data-i18n="callsignSsid">Callsign SSID</label><input name="callsign_ssid" type="number" min="1" max="99" value="{{CALLSIGN_SSID}}"></div>
         <div><label data-i18n="pttTimeout">PTT Timeout (seconds, 5-3600)</label><input name="ptt_timeout" value="{{PTT_TIMEOUT}}"></div>
         <div><label data-i18n="voicePayloadBytes">Voice Packet Size (bytes, 160-500)</label><input name="voice_payload_bytes" value="{{VOICE_PAYLOAD_BYTES}}"></div>
         <div><label data-i18n="voiceCodec">NRL Voice Codec (TX)</label><select name="voice_codec"><option value="0"{{CODEC_G711_SELECTED}} data-i18n="codecG711">G.711 8 kHz (compatible)</option><option value="1"{{CODEC_OPUS_SELECTED}} data-i18n="codecOpus">Opus 16 kHz wideband</option></select></div>

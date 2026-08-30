@@ -259,7 +259,7 @@ static bool setField(const char *key, const char *value, bool *restart_wifi, boo
     if (strcmp(key, "CALL_SSID") == 0 || strcmp(key, "CALLSIGN_SSID") == 0) {
         unsigned long ssid = 0;
         return parseUnsigned(value, &ssid) &&
-               ssid <= 255 &&
+               ssid >= 1 && ssid <= 99 &&
                EXTERNAL_RADIO_SetCallsignSsid(static_cast<uint8_t>(ssid), false);
     }
 

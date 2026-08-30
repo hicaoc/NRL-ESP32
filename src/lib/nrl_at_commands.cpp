@@ -1177,7 +1177,7 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             return;
         }
         unsigned long value = 0u;
-        if (!parseUnsignedValue(command.value, &value) || value > 255u ||
+        if (!parseUnsignedValue(command.value, &value) || value < 1u || value > 99u ||
             !EXTERNAL_RADIO_SetCallsignSsid(static_cast<uint8_t>(value), true)) {
             appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "SSID");
             return;
