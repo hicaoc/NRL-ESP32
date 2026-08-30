@@ -21,6 +21,12 @@ endif()
 if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/vendor/h2zero__esp-nimble-cpp/CMakeLists.txt")
     list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/vendor/h2zero__esp-nimble-cpp")
 endif()
+# The vendored led_strip (WS2812 driver, no idf_component.yml so the component
+# manager does not re-solve offline) provides led_strip for the S31 boards and
+# the BH4TDV-RF mainboard status LED.
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/vendor/espressif__led_strip/CMakeLists.txt")
+    list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/vendor/espressif__led_strip")
+endif()
 # Support for NATIVE idf.py builds (the GitHub CI, all boards); pass
 # -DNRL_NATIVE_BUILD=1. PlatformIO is NOT involved in these, so we must
 # reproduce what platformio.ini normally provides:

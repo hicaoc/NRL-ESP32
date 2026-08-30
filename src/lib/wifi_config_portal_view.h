@@ -33,6 +33,8 @@ std::string WifiConfigPortalView_BuildNetworkSection(const ExternalRadioConfig *
                                                      const WifiConfigPortalScanEntry *scan_entries,
                                                      size_t scan_count);
 std::string WifiConfigPortalView_BuildDeviceSections(const ExternalRadioConfig *config);
+// Serial / GPS page: UART parameters, GPS power switch, live GPS panel.
+std::string WifiConfigPortalView_BuildSerialSections(const ExternalRadioConfig *config);
 std::string WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *config);
 // Media / voice-link page: S31 gets the full media stack; gezipai/bh4tdv get
 // the PTT target, NRL codec and ESP-NOW intercom controls.

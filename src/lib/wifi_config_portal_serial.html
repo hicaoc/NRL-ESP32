@@ -1,0 +1,106 @@
+<!-- @template SERIAL_SECTIONS -->
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="serialPorts">Serial Ports</h2><span class="hint" data-i18n="uart0Reserved">UART0 is reserved for system logs and serial AT commands.</span></div>
+  <div class="grid">
+    <form class="item-form span-2" method="post" action="/save_serial">
+      <div class="subgrid">
+        <div class="group-label span-2" data-i18n="uart1Sci">UART1 - SCI transparent serial</div>
+        <div class="span-2"><input type="hidden" name="uart1_enabled_present" value="1"><label class="hint"><input type="checkbox" name="uart1_enabled" value="1" {{UART1_ENABLED_CHECKED}}><span data-i18n="serialEnabled">Enable this serial port</span></label></div>
+        <div><label data-i18n="serialRxPin">RX GPIO</label><input name="uart1_rx_pin" value="{{UART1_RX_PIN}}"></div>
+        <div><label data-i18n="serialTxPin">TX GPIO</label><input name="uart1_tx_pin" value="{{UART1_TX_PIN}}"></div>
+        <div><label data-i18n="serialBaud">Baud rate</label><input name="uart1_baud" value="{{UART1_BAUD}}"></div>
+        <div><label data-i18n="serialDataBits">Data bits</label><input name="uart1_data_bits" value="{{UART1_DATA_BITS}}"></div>
+        <div><label data-i18n="serialParity">Parity (N/E/O)</label><input name="uart1_parity" value="{{UART1_PARITY}}" maxlength="1"></div>
+        <div><label data-i18n="serialStopBits">Stop bits</label><input name="uart1_stop_bits" value="{{UART1_STOP_BITS}}"></div>
+        <div class="group-label span-2" data-i18n="uart2Gps">UART2 - GPS NMEA</div>
+        <div class="span-2"><input type="hidden" name="uart2_enabled_present" value="1"><label class="hint"><input type="checkbox" name="uart2_enabled" value="1" {{UART2_ENABLED_CHECKED}}><span data-i18n="serialEnabled">Enable this serial port</span></label></div>
+        <div><label data-i18n="serialRxPin">RX GPIO</label><input name="uart2_rx_pin" value="{{UART2_RX_PIN}}"></div>
+        <div><label data-i18n="serialTxPin">TX GPIO</label><input name="uart2_tx_pin" value="{{UART2_TX_PIN}}"></div>
+        <div><label data-i18n="serialBaud">Baud rate</label><input name="uart2_baud" value="{{UART2_BAUD}}"></div>
+        <div><label data-i18n="serialDataBits">Data bits</label><input name="uart2_data_bits" value="{{UART2_DATA_BITS}}"></div>
+        <div><label data-i18n="serialParity">Parity (N/E/O)</label><input name="uart2_parity" value="{{UART2_PARITY}}" maxlength="1"></div>
+        <div><label data-i18n="serialStopBits">Stop bits</label><input name="uart2_stop_bits" value="{{UART2_STOP_BITS}}"></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div>
+    </form>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="gpsPower">GPS Power</h2></div>
+  <div class="grid">
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="gpsPower">GPS Power</label><input type="hidden" name="gps_power_present" value="1"><label class="hint"><input type="checkbox" name="gps_power" value="1" onchange="submitSwitch(this)" {{GPS_POWER_CHECKED}}><span data-i18n="gpsPowerText">Powers the GPS module; when off, APRS has no fix and uses the default position per the fixed-beacon rule</span></label></form>
+  </div>
+</section>
+<section class="panel" id="gps-live-panel" hidden>
+  <div class="section-head"><h2 data-i18n="gpsLive">GPS Live Information</h2><span class="hint mono" id="gps-live-state"></span></div>
+  <div class="grid">
+    <div><label data-i18n="gpsFixStatus">Fix status</label><div class="mono" id="gps-live-fix">-</div></div>
+    <div><label data-i18n="gpsSatellitesUsed">Satellites used</label><div class="mono" id="gps-live-satellites">-</div></div>
+    <div><label data-i18n="gpsSatellitesVisible">Satellites visible (GSV)</label><div class="mono" id="gps-live-visible">-</div></div>
+    <div><label data-i18n="gpsLatitude">Latitude</label><div class="mono" id="gps-live-latitude">-</div></div>
+    <div><label data-i18n="gpsLongitude">Longitude</label><div class="mono" id="gps-live-longitude">-</div></div>
+    <div><label data-i18n="gpsSpeed">Speed</label><div class="mono" id="gps-live-speed">-</div></div>
+    <div><label data-i18n="gpsCourse">Course</label><div class="mono" id="gps-live-course">-</div></div>
+    <div><label data-i18n="gpsAltitude">Altitude</label><div class="mono" id="gps-live-altitude">-</div></div>
+    <div><label data-i18n="gpsAccuracy">Fix quality / HDOP</label><div class="mono" id="gps-live-accuracy">-</div></div>
+    <div><label data-i18n="gpsUpdated">NMEA updated</label><div class="mono" id="gps-live-updated">-</div></div>
+    <div><label data-i18n="gpsGsvUpdated">GSV updated</label><div class="mono" id="gps-live-gsv-updated">-</div></div>
+    <div class="span-2"><label data-i18n="gpsSatelliteSignals">Satellite signals (constellation/PRN, elevation, azimuth, SNR)</label><div class="mono" id="gps-live-signals" style="white-space:pre-wrap;line-height:1.7">-</div></div>
+    <script>
+    (function(){
+      function fmt(v, suffix, digits) {
+        if (v === null || v === undefined || !Number.isFinite(Number(v))) return '-';
+        v = Number(v);
+        return v.toFixed(digits === undefined ? 0 : digits) + (suffix || '');
+      }
+      function text(id, value) {
+        var el = document.getElementById(id);
+        if (el) el.textContent = value;
+      }
+      function tr(key, fallback) {
+        return typeof t === 'function' ? t(key) : fallback;
+      }
+      function renderGps(gps) {
+        var panel = document.getElementById('gps-live-panel');
+        if (!panel) return;
+        var connected = !!(gps && gps.connected);
+        panel.hidden = !connected;
+        if (!connected) return;
+        var fixed = !!gps.fix;
+        text('gps-live-state', 'NMEA: OK');
+        text('gps-live-fix', fixed ? tr('gpsFixed', 'Fixed') : tr('gpsAcquiring', 'Acquiring'));
+        text('gps-live-satellites', gps.satellites === undefined ? '-' : String(gps.satellites));
+        text('gps-live-visible', gps.visible_satellites === undefined ? '-' : String(gps.visible_satellites));
+        text('gps-live-latitude', fixed ? fmt(gps.lat, '', 6) : '-');
+        text('gps-live-longitude', fixed ? fmt(gps.lon, '', 6) : '-');
+        text('gps-live-speed', fixed ? fmt(gps.speed, ' km/h', 1) : '-');
+        text('gps-live-course', fixed ? fmt(gps.course, '\u00b0', 0) : '-');
+        text('gps-live-altitude', fixed ? fmt(gps.alt, ' m', 1) : '-');
+        var quality = gps.quality === undefined ? '-' : 'Q=' + gps.quality;
+        if (gps.hdop !== undefined) quality += ' / HDOP=' + fmt(gps.hdop, '', 1);
+        text('gps-live-accuracy', quality);
+        text('gps-live-updated', fmt(Number(gps.age_ms) / 1000, ' s', 1));
+        text('gps-live-gsv-updated', gps.gsv_age_ms === undefined ? '-' :
+             fmt(Number(gps.gsv_age_ms) / 1000, ' s', 1));
+        var signals = Array.isArray(gps.satellite_signals) ? gps.satellite_signals.slice() : [];
+        signals.sort(function(a, b) { return Number(b.snr) - Number(a.snr); });
+        text('gps-live-signals', signals.length ? signals.map(function(s) {
+          var id = String(s.talker || '--') + String(s.prn).padStart(2, '0');
+          var elevation = Number(s.elevation) >= 0 ? s.elevation + '\u00b0' : '--';
+          var azimuth = Number(s.azimuth) >= 0 ? s.azimuth + '\u00b0' : '--';
+          var snr = Number(s.snr) >= 0 ? s.snr + ' dB-Hz' : '--';
+          return id + '  EL ' + elevation + '  AZ ' + azimuth + '  SNR ' + snr;
+        }).join('\n') : tr('gpsNoSatelliteSignals', 'No GSV satellite signal data'));
+      }
+      function refresh() {
+        fetch('/aprs/stations').then(function(r){ return r.json(); }).then(function(data){
+          if (data) renderGps(data.gps_info);
+        }).catch(function(){});
+      }
+      refresh();
+      setInterval(refresh, 1000);
+    })();
+    </script>
+  </div>
+</section>
+<!-- @endtemplate -->

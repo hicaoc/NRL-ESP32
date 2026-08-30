@@ -46,6 +46,7 @@
 #include "../../services/aprs_service.h"
 #include "../../services/espnow_link.h"
 #include "../../services/fmo_service.h"
+#include "../../services/fmo_favorites.h"
 #include "../../services/server_list_store.h"
 #include "../../services/fmo_cert_store.h"
 #include "../../services/fmo_qso.h"
@@ -332,6 +333,7 @@ enum class MenuPage : uint8_t {
     Cw,
     Map,
     Sstv,
+    FmoServers,
 };
 
 enum class MainMenuAction : uint8_t {
@@ -339,6 +341,7 @@ enum class MainMenuAction : uint8_t {
     PttMode,
     F2Ptt,
     Fmo,
+    FmoServers,
     FmoBcast,
     NrlCodec,
     NowCodec,
@@ -364,6 +367,7 @@ constexpr MainMenuAction kMainMenuActions[] = {
     MainMenuAction::Signaling,
     MainMenuAction::PttMode,
     MainMenuAction::Fmo,
+    MainMenuAction::FmoServers,
     MainMenuAction::FmoBcast,
     MainMenuAction::NrlCodec,
     MainMenuAction::NowCodec,
@@ -376,6 +380,7 @@ constexpr MainMenuAction kMainMenuActions[] = {
     MainMenuAction::F2Ptt,
 #endif
     MainMenuAction::Fmo,
+    MainMenuAction::FmoServers,
     MainMenuAction::FmoBcast,
     MainMenuAction::NrlCodec,
     MainMenuAction::NowCodec,
@@ -1829,6 +1834,9 @@ void buildMainMenu()
     FmoConfig fmo_config = {};
     FMO_GetConfig(&fmo_config);
     snprintf(fmo_item, sizeof(fmo_item), "FMO: %s", fmo_config.enabled ? "ON" : "OFF");
+    char fmo_server[44] = {};
+    snprintf(fmo_server, sizeof(fmo_server), menuText("FMO SERVER: %.16s", "FMO服务器: %.16s"),
+             fmo_config.server.name[0] != '\0' ? fmo_config.server.name : "---");
     FmoStationBroadcastConfig bcast_config = {};
     FMO_STATION_BCAST_GetConfig(&bcast_config);
     snprintf(fmo_bcast, sizeof(fmo_bcast), menuText("FMO BCAST: %s", "FMO广播: %s"),
@@ -1850,6 +1858,7 @@ void buildMainMenu()
 #endif
                 break;
             case MainMenuAction::Fmo: items[i] = fmo_item; break;
+            case MainMenuAction::FmoServers: items[i] = fmo_server; break;
             case MainMenuAction::FmoBcast: items[i] = fmo_bcast; break;
             case MainMenuAction::NrlCodec: items[i] = nrl_codec; break;
             case MainMenuAction::NowCodec: items[i] = now_codec; break;
@@ -2117,7 +2126,7 @@ void buildAprsSettingsMenu()
     lv_obj_t *scr = prepareContent();
     AprsConfig cfg{};
     APRS_SERVICE_GetConfig(&cfg);
-    constexpr size_t kItemCount = 17u;
+    constexpr size_t kItemCount = 18u;
 #if !NRL_BOARD_IS_BI4UMD_FAMILY
     constexpr size_t kVisibleRows = 5u;
     const size_t start = menuWindowStart(kItemCount, kVisibleRows);
@@ -2130,14 +2139,14 @@ void buildAprsSettingsMenu()
         menuText("NRL RX", "NRL网络接收"), menuText("GW RF>IS", "网关RF>IS"),
         menuText("GW IS>RF", "网关IS>RF"), menuText("GW NRL>IS", "网关NRL>IS"),
         menuText("GW IS>NRL", "网关IS>NRL"), menuText("GW RF>NRL", "网关RF>NRL"),
-        menuText("GW NRL>RF", "网关NRL>RF")};
+        menuText("GW NRL>RF", "网关NRL>RF"), menuText("GPS POWER", "GPS电源")};
     const bool values[] = {cfg.enabled, cfg.net_enabled, cfg.rf_tx_enabled,
                            cfg.rf_rx_enabled, cfg.auto_interval,
                            cfg.fixed_beacon_without_gps, cfg.nrl_tx_enabled,
                            cfg.nrl_rx_enabled, cfg.fwd[APRS_FWD_RF_TO_IS],
                            cfg.fwd[APRS_FWD_IS_TO_RF], cfg.fwd[APRS_FWD_NRL_TO_IS],
                            cfg.fwd[APRS_FWD_IS_TO_NRL], cfg.fwd[APRS_FWD_RF_TO_NRL],
-                           cfg.fwd[APRS_FWD_NRL_TO_RF]};
+                           cfg.fwd[APRS_FWD_NRL_TO_RF], cfg.gps_power_enabled};
 #if NRL_BOARD_IS_BI4UMD_FAMILY
     char lines[kItemCount][48] = {};
     const char *items[kItemCount] = {};
@@ -2320,6 +2329,57 @@ void buildGpsInfoMenu()
 #if !NRL_BOARD_IS_BI4UMD_FAMILY
     // bi4umd draws a touch BACK button over the footer area instead.
     menuFooter(scr, menuText("PTT BACK", "PTT返回"));
+#endif
+}
+
+// FMO server favorites: BACK row plus one row per favorite; confirm switches
+// the link to that server and enables it. Edited on the web FMO page.
+void buildFmoServersMenu()
+{
+    lv_obj_t *scr = prepareContent();
+    const size_t count = FMO_FAV_Count();
+    if (s_menu_index > count) s_menu_index = 0u;
+    FmoConfig fmo_config = {};
+    FMO_GetConfig(&fmo_config);
+    char lines[FMO_FAV_MAX][40] = {};
+    for (size_t i = 0; i < count; ++i) {
+        FmoFavorite fav = {};
+        if (!FMO_FAV_Get(i, &fav)) continue;
+        const bool current = fav.uid != 0u && fav.uid == fmo_config.server.uid &&
+                             strcmp(fav.host, fmo_config.server.host) == 0 &&
+                             fav.port == fmo_config.server.port;
+        snprintf(lines[i], sizeof(lines[i]), "%.9s %.18s%s",
+                 fav.callsign, fav.name,
+                 current ? menuText(" *", " *") : "");
+    }
+#if NRL_BOARD_IS_BI4UMD_FAMILY
+    const char *items[FMO_FAV_MAX + 1u] = {};
+    items[0] = menuText("< BACK / FMO SERVER", "< 返回 / FMO服务器");
+    for (size_t i = 0; i < count; ++i) {
+        items[i + 1u] = lines[i];
+    }
+    buildBi4umdScrollableMenu(scr, items, count + 1u);
+#else
+    constexpr size_t kVisibleRows = 5u;
+    const size_t start = menuWindowStart(count + 1u, kVisibleRows);
+    const size_t end = (start + kVisibleRows < count + 1u) ? start + kVisibleRows : count + 1u;
+    for (size_t item = start; item < end; ++item) {
+        if (item == 0u) {
+            menuRow(scr, 1, menuText("< BACK / FMO SERVER", "< 返回 / FMO服务器"),
+                    s_menu_index == 0u, nullptr, 0);
+        } else {
+            menuRow(scr, 1 + static_cast<int>(item - start) * 28, lines[item - 1u],
+                    s_menu_index == item, nullptr, static_cast<int>(item));
+        }
+    }
+#endif
+    if (count == 0u) {
+        lv_obj_t *lbl = makeLabel(scr, menuFont(&lv_font_montserrat_14), kColorSub);
+        lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 60);
+        lv_label_set_text(lbl, menuText("NO FAVORITES (ADD IN WEB)", "无收藏（在网页添加）"));
+    }
+#if !NRL_BOARD_IS_BI4UMD_FAMILY
+    menuFooter(scr, menuText("PTT SELECT/BACK", "PTT选择/返回"));
 #endif
 }
 
@@ -3438,6 +3498,7 @@ void buildMenuUi()
     else if (s_menu_page == MenuPage::AprsSettings) buildAprsSettingsMenu();
     else if (s_menu_page == MenuPage::AprsList) buildAprsListMenu();
     else if (s_menu_page == MenuPage::AprsGps) buildGpsInfoMenu();
+    else if (s_menu_page == MenuPage::FmoServers) buildFmoServersMenu();
     else if (s_menu_page == MenuPage::Signaling) buildSignalingMenu();
     else if (s_menu_page == MenuPage::Ctcss) buildCtcssMenu();
     else if (s_menu_page == MenuPage::Mdc) buildProtocolMenu(true);
@@ -5159,9 +5220,10 @@ size_t menuItemCount()
     if (s_menu_page == MenuPage::Language) return 3u;
     if (s_menu_page == MenuPage::About) return 1u;
     if (s_menu_page == MenuPage::Aprs) return 5u;
-    if (s_menu_page == MenuPage::AprsSettings) return 17u;
+    if (s_menu_page == MenuPage::AprsSettings) return 18u;
     if (s_menu_page == MenuPage::AprsList) return 1u;
     if (s_menu_page == MenuPage::AprsGps) return 1u;
+    if (s_menu_page == MenuPage::FmoServers) return FMO_FAV_Count() + 1u;
     if (s_menu_page == MenuPage::Signaling) return 4u;
     if (s_menu_page == MenuPage::Ctcss) return 3u;
     if (s_menu_page == MenuPage::Mdc || s_menu_page == MenuPage::Dtmf) return 5u;
@@ -5175,6 +5237,37 @@ void activateMainMenu()
     s_menu_index = 0u;
     s_menu_ota_requested = false;
     s_menu_ota_state[0] = '\0';
+    buildMenuUi();
+}
+
+void confirmFmoServersMenu()
+{
+    if (s_menu_index == 0u) {
+        activateMainMenu();
+        return;
+    }
+    FmoFavorite fav = {};
+    if (!FMO_FAV_Get(s_menu_index - 1u, &fav)) {
+        setMenuMessage(menuText("NO FAVORITES (ADD IN WEB)", "无收藏（在网页添加）"));
+        buildMenuUi();
+        return;
+    }
+    FmoConfig fmo = {};
+    FMO_GetConfig(&fmo);
+    memset(&fmo.server, 0, sizeof(fmo.server));
+    snprintf(fmo.server.name, sizeof(fmo.server.name), "%s", fav.name);
+    snprintf(fmo.server.host, sizeof(fmo.server.host), "%s", fav.host);
+    snprintf(fmo.server.callsign, sizeof(fmo.server.callsign), "%s", fav.callsign);
+    fmo.server.port = fav.port;
+    fmo.server.uid = fav.uid;
+    memcpy(fmo.server.fingerprint, fav.fingerprint, sizeof(fmo.server.fingerprint));
+    fmo.server.has_fingerprint = true;
+    // Switch + connect, mirroring the FMO toggle's enable behaviour.
+    fmo.enabled = true;
+    fmo.transmit = true;
+    setMenuMessage(FMO_SetConfig(&fmo, true)
+                       ? menuText("FMO SERVER SET", "已切换FMO服务器")
+                       : menuText("FMO SETTING FAILED", "FMO设置失败"));
     buildMenuUi();
 }
 
@@ -5250,6 +5343,11 @@ void confirmMainMenu()
             buildMenuUi();
             break;
         }
+        case MainMenuAction::FmoServers:
+            s_menu_page = MenuPage::FmoServers;
+            s_menu_index = 0u;
+            buildMenuUi();
+            break;
         case MainMenuAction::FmoBcast: {
             FmoStationBroadcastConfig bcast = {};
             FMO_STATION_BCAST_GetConfig(&bcast);
@@ -5520,6 +5618,11 @@ void confirmAprsSettingsMenu()
             const bool en = !cfg.fwd[APRS_FWD_NRL_TO_RF];
             ok = APRS_SERVICE_SetFwdEnabled(APRS_FWD_NRL_TO_RF, en);
             message = en ? "GW NRL>RF ON" : "GW NRL>RF OFF";
+            break;
+        }
+        case 17: {
+            ok = APRS_SERVICE_SetGpsPower(!cfg.gps_power_enabled);
+            message = !cfg.gps_power_enabled ? "GPS POWER ON" : "GPS POWER OFF";
             break;
         }
         default:
@@ -5811,6 +5914,7 @@ void processMenuInput(uint32_t now)
         else if (s_menu_page == MenuPage::AprsGps) {
             leaveAprsDetailMenu();
         }
+        else if (s_menu_page == MenuPage::FmoServers) confirmFmoServersMenu();
         else if (s_menu_page == MenuPage::Signaling) confirmSignalingMenu();
         else if (s_menu_page == MenuPage::Ctcss) confirmCtcssMenu();
         else if (s_menu_page == MenuPage::Mdc) confirmProtocolMenu(true);

@@ -37,6 +37,7 @@
 #include "../lib/nrl_wifi.h"
 #include "../lib/wifi_config_portal.h"
 #include "../services/fmo_service.h"
+#include "../services/fmo_favorites.h"
 #include "../services/fmo_qso.h"
 #include "../services/fmo_station_broadcast.h"
 #include "../services/server_list_store.h"
@@ -282,6 +283,7 @@ static void initStorageAndMusic()
     MUSIC_Init();
     PLAYLIST_Init();
     RADIO_FAV_Init();
+    FMO_FAV_Init();
     NANNY_Init();
     if (STORAGE_SdMounted()) {
         PLAYLIST_Scan();
@@ -480,7 +482,9 @@ static void initApp()
     if (!BH4TDV_RF_IO_Init()) {
         ESP_LOGE(TAG, "BH4TDV-RF PCA9555 initialization failed.");
     } else {
-        (void)BH4TDV_RF_IO_SetGpsPower(true);
+        // Power the GPS per the persisted switch (APRS config is already
+        // loaded; its own earlier apply ran before the expander was up).
+        (void)BH4TDV_RF_IO_SetGpsPower(APRS_SERVICE_GpsPowerEnabled());
     }
 #endif
     EXTERNAL_RADIO_Init();

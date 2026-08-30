@@ -37,6 +37,7 @@ SECTION_SOURCES = [
     "wifi_config_portal_sections.html",
     "wifi_config_portal_wifi.html",
     "wifi_config_portal_nrl.html",
+    "wifi_config_portal_serial.html",
     "wifi_config_portal_audio.html",
     "wifi_config_portal_media.html",
     "wifi_config_portal_aprs.html",

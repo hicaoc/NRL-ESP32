@@ -18,23 +18,6 @@
     <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsFwdNrlRf">Gateway NRL &#8594; RF</label><input type="hidden" name="aprs_fwd_nrl_rf_present" value="1"><label class="hint"><input type="checkbox" name="aprs_fwd_nrl_rf" value="1" onchange="submitSwitch(this)" {{APRS_FWD_NRL_RF_CHECKED}}><span data-i18n="aprsFwdNrlRfText">Relay packets heard on the NRL network out as AFSK through the radio (needs RF Transmit)</span></label></form>
   </div>
 </section>
-<section class="panel" id="gps-live-panel" hidden>
-  <div class="section-head"><h2 data-i18n="gpsLive">GPS Live Information</h2><span class="hint mono" id="gps-live-state"></span></div>
-  <div class="grid">
-    <div><label data-i18n="gpsFixStatus">Fix status</label><div class="mono" id="gps-live-fix">-</div></div>
-    <div><label data-i18n="gpsSatellitesUsed">Satellites used</label><div class="mono" id="gps-live-satellites">-</div></div>
-    <div><label data-i18n="gpsSatellitesVisible">Satellites visible (GSV)</label><div class="mono" id="gps-live-visible">-</div></div>
-    <div><label data-i18n="gpsLatitude">Latitude</label><div class="mono" id="gps-live-latitude">-</div></div>
-    <div><label data-i18n="gpsLongitude">Longitude</label><div class="mono" id="gps-live-longitude">-</div></div>
-    <div><label data-i18n="gpsSpeed">Speed</label><div class="mono" id="gps-live-speed">-</div></div>
-    <div><label data-i18n="gpsCourse">Course</label><div class="mono" id="gps-live-course">-</div></div>
-    <div><label data-i18n="gpsAltitude">Altitude</label><div class="mono" id="gps-live-altitude">-</div></div>
-    <div><label data-i18n="gpsAccuracy">Fix quality / HDOP</label><div class="mono" id="gps-live-accuracy">-</div></div>
-    <div><label data-i18n="gpsUpdated">NMEA updated</label><div class="mono" id="gps-live-updated">-</div></div>
-    <div><label data-i18n="gpsGsvUpdated">GSV updated</label><div class="mono" id="gps-live-gsv-updated">-</div></div>
-    <div class="span-2"><label data-i18n="gpsSatelliteSignals">Satellite signals (constellation/PRN, elevation, azimuth, SNR)</label><div class="mono" id="gps-live-signals" style="white-space:pre-wrap;line-height:1.7">-</div></div>
-  </div>
-</section>
 <section class="panel">
   <div class="section-head"><h2 data-i18n="aprsSettings">APRS Settings</h2><span class="hint" data-i18n="aprsSettingsHint">Callsign comes from the Radio page; passcode is derived automatically.</span></div>
   <div class="grid">

@@ -29,6 +29,7 @@
 #include "../services/espnow_link.h"
 #include "../services/fmo_activate.h"
 #include "../services/fmo_cert_store.h"
+#include "../services/fmo_favorites.h"
 #include "../services/fmo_service.h"
 #include "../services/fmo_station_broadcast.h"
 #include "../services/fmo_station_broadcast_core.h"
@@ -1230,6 +1231,24 @@ static esp_err_t handleNrlPage(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t handleSerialPage(httpd_req_t *req)
+{
+    s_server.bind(req);
+    const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
+    sendConfigPage((std::string(NRL_FIRMWARE_NAME) + " Serial / GPS Config").c_str(),
+                   "Serial / GPS Config",
+                   "serialGpsHeadline",
+                   "UART parameters, GPS module power and live GPS status.",
+                   "serialGpsIntro",
+                   "/save_serial",
+                   WifiConfigPortalView_BuildSerialSections(config),
+                   false,
+                   true,
+                   false,
+                   "");
+    return ESP_OK;
+}
+
 static esp_err_t handleAudioPage(httpd_req_t *req)
 {
     s_server.bind(req);
@@ -1269,11 +1288,13 @@ static const char kFmoPage[] = R"FMO(<!doctype html><html lang="en"><head>
 </div>
 </div>
 <p class="back-home"><a href="/" data-i18n="backHome">&larr; Back to home</a></p>
-<section class="panel"><h2>连接与发射</h2><form id="cfg"><div class="grid"><label>FMO 服务器<select name="server_index" id="servers"><option value="">等待发现…</option></select></label>
-<div><label class="fmo-row"><input type="checkbox" name="enabled" value="1" id="enabled">连接所选 FMO 服务器</label>
-<label class="fmo-row"><input type="checkbox" name="transmit" value="1" id="transmit">将 PTT/SQL 麦克风上行切换到 FMO</label>
+<section class="panel"><h2 data-i18n="fmoLink">连接与发射</h2><form id="cfg"><div class="grid">
+<div><label class="fmo-row"><input type="checkbox" name="enabled" value="1" id="enabled"><span data-i18n="fmoConnect">连接所选 FMO 服务器</span></label>
+<label class="fmo-row"><input type="checkbox" name="transmit" value="1" id="transmit"><span data-i18n="fmoTransmit">将 PTT/SQL 麦克风上行切换到 FMO</span></label>
 <label class="fmo-row" title="关闭后服务器会返回本客户端发布的消息，用于调试"><input type="checkbox" name="mqtt_no_local" value="1" id="mqtt_no_local">MQTT 5 No Local</label></div></div>
-<input type="hidden" name="enabled_present" value="1"><button type="submit">保存并应用</button></form><p id="link" class="mono hint">加载中…</p></section>
+<input type="hidden" name="enabled_present" value="1"></form><p id="link" class="mono hint">加载中…</p></section>
+<section class="panel"><h2 data-i18n="fmoFavTitle">收藏服务器</h2><div id="favlist" class="fmo-row"></div><p id="favempty" class="hint" data-i18n="fmoFavEmpty">暂无收藏：在下方服务器列表点 ☆ 添加；点“选择”或收藏名立即切换服务器。</p></section>
+<section class="panel"><h2 data-i18n="fmoSrvTitle">服务器列表</h2><input id="srvq" class="mono" data-i18n-ph="fmoSearch" placeholder="搜索 名称/呼号/host" style="width:100%;margin-bottom:6px;box-sizing:border-box"><div style="overflow-x:auto"><table class="mono" style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="text-align:left"><th></th><th data-i18n="fmoColName">名称</th><th data-i18n="fmoColCall">呼号</th><th>host:port</th><th data-i18n="fmoColOnline">在线</th><th data-i18n="fmoColSeen">最近上线</th><th></th></tr></thead><tbody id="srvbody"><tr><td colspan="7" class="hint" data-i18n="fmoSrvEmpty">等待发现…</td></tr></tbody></table></div><div class="fmo-row" style="margin-top:6px"><button type="button" id="pgprev" data-i18n="fmoPrev">上一页</button><span id="pginfo" class="hint mono"></span><button type="button" id="pgnext" data-i18n="fmoNext">下一页</button></div></section>
 <section class="panel"><h2>自动获取证书</h2><p class="hint">本机 MAC：<strong class="mono" id="act_mac">--</strong>（在证书平台登记绑定此地址）</p><div class="grid"><label>证书服务器地址<input id="act_host" maxlength="128" placeholder="www.hamptt.com"></label></div><div class="fmo-row"><button type="button" id="act_save">保存地址</button><button type="button" id="act_run">自动获取证书</button></div><p id="act_stat" class="mono hint">尚未激活</p><p class="hint">前提：本机 MAC 已在证书平台登记并绑定用户（hamptt.com）。成功后自动写入 user/intermediate 证书并重连 FMO；deviceKey 首次激活时自动生成并仅存于板载 LittleFS。</p></section>
 <section class="panel"><h2>FMO 身份证书</h2><p id="cert" class="mono hint">加载中…</p><div class="grid">
 <label>userCert JSON<input type="file" accept="application/json,.json" data-kind="user"></label>
@@ -1284,25 +1305,36 @@ static const char kFmoPage[] = R"FMO(<!doctype html><html lang="en"><head>
 <section class="panel"><h2>服务器广播（FMO-V4 STATION）</h2><form id="bcfg"><div class="grid"><label class="fmo-row"><input type="checkbox" name="bcast_enabled" value="1" id="bc_enabled">启用 APRS-IS 周期广播</label><label>周期<select name="bcast_mode" id="bc_mode"><option value="2">5 分钟</option><option value="3">10 分钟</option><option value="4">60 分钟</option></select></label><label>国家码（2 字母，手填）<input name="bcast_country" id="bc_country" maxlength="2" placeholder="CN"></label><label>SSID（0-15，0=不带）<input name="bcast_ssid" id="bc_ssid" type="number" min="0" max="15" placeholder="0"></label><label>覆盖半径 km<input name="bcast_cover_km" id="bc_cover" type="number" min="0" max="5000"></label><label>服务器名称（线上 UTF-8）<input name="bcast_name" id="bc_name" maxlength="32" placeholder="留空=当前服务器名"></label><label>广播 host<input name="bcast_host" id="bc_host" maxlength="63" placeholder="留空=当前 FMO host"></label><label>广播端口<input name="bcast_port" id="bc_port" type="number" min="0" max="65535" placeholder="0=当前 FMO 端口"></label><label>在线/峰值（0=自动）<div class="fmo-row"><input name="bcast_online" id="bc_online" type="number" min="0"><input name="bcast_peak" id="bc_peak" type="number" min="0"></div><div class="hint" id="bc_auto">填 0 使用自动</div></label></div><input type="hidden" name="bcast_present" value="1"><button type="submit">保存广播配置</button></form><p id="bstat" class="mono hint">加载中…</p><p class="hint">门控：MQTT 已连接、实际登录角色为 super（admin 暂不等同）、服务器呼号==本机证书呼号、APRS-IS logresp verified、SNTP 已同步；另有 60 秒最小限速。坐标取当前位置（GPS 新鲜优先，否则默认坐标）。远程关停（SERVER_REMOTE_CONTROL）未实现。</p></section>
 <section class="panel"><h2>个人信标（FMO-V4 BEACON）</h2><form id="ncfg"><div class="grid"><label class="fmo-row"><input type="checkbox" name="bcn_enabled" value="1" id="nb_enabled">启用个人信标（固定 10 分钟周期）</label><label>SSID（0-15，0=不带）<input name="bcn_ssid" id="nb_ssid" type="number" min="0" max="15" placeholder="0"></label><label>频率 MHz（20-500，4 位小数）<input name="bcn_freq" id="nb_freq" maxlength="10" placeholder="439.1625"></label><label>天线高度 m（0=不播 HEIGHT）<input name="bcn_height" id="nb_height" type="number" min="0" max="65535"></label><label>电台 RIG（≤16 字符，线上 UTF-8）<input name="bcn_rig" id="nb_rig" placeholder="留空=不播 RIG"></label><label>天线 ANT（≤16 字符，线上 UTF-8）<input name="bcn_ant" id="nb_ant" placeholder="留空=不播 ANT"></label><label>APRS 个性消息 APFMO2（≤64 字符）<input name="bcn_aprs_msg" id="nb_msg" placeholder="信标成功后跟发，留空=不发"></label><label>登录公告 APFMO1（≤128 字符）<input name="bcn_notice" id="nb_notice" placeholder="服务器广播成功后跟发，留空=不发"></label><label>QSO 消息（仅存储，≤128 字符）<input name="bcn_qso_msg" id="nb_qso" placeholder="传输机制待研究"></label></div><input type="hidden" name="bcn_present" value="1"><button type="submit">保存信标配置</button></form><p id="nstat" class="mono hint">加载中…</p><p class="hint">门控：APRS-IS logresp verified + 证书就绪 + 频率&gt;0；固定 10 分钟周期 + 60 秒最小限速，不依赖服务器/super 角色。文本禁英文逗号；线上 RIG/ANT/消息/公告为 UTF-8（与签名 TBS 内一致）。整条信标帧 ≤512 字符，超长放弃。APFMO1 公告的名称/在线/峰值沿用服务器广播生效值。</p></section>
 <script>
-const fmoI18n={en:{language:'Language',configAp:'Config AP',stationIp:'Station IP',backHome:'← Back to home',fmoHeadline:'FMO-V4 Link',fmoIntro:'Servers are discovered automatically via APRS-IS (usually within minutes). An FMO identity certificate is not a TLS certificate; all three JSON files must belong to the same identity.'},zh:{language:'语言',configAp:'配置热点',stationIp:'联网地址',backHome:'← 返回导航首页',fmoHeadline:'FMO‑V4 通联',fmoIntro:'服务器通过 APRS‑IS 自动发现（通常数分钟内出现）。FMO 身份证书不是 TLS 证书，三份 JSON 必须来自同一身份。'}};
+const fmoI18n={en:{language:'Language',configAp:'Config AP',stationIp:'Station IP',backHome:'← Back to home',fmoHeadline:'FMO-V4 Link',fmoIntro:'Servers are discovered automatically via APRS-IS (usually within minutes). An FMO identity certificate is not a TLS certificate; all three JSON files must belong to the same identity.',fmoLink:'Link & Transmit',fmoConnect:'Connect to the selected FMO server',fmoTransmit:'Switch PTT/SQL mic uplink to FMO',fmoFavTitle:'Favorite Servers',fmoFavEmpty:'No favorites yet: tap ☆ in the server list below; tap Select or a favorite name to switch servers.',fmoSrvTitle:'Servers',fmoColName:'Name',fmoColCall:'Callsign',fmoColOnline:'Online',fmoColSeen:'Last seen',fmoSrvEmpty:'Waiting for discovery…',fmoSearch:'Search name/callsign/host',fmoNoMatch:'No matching servers',fmoPrev:'Prev',fmoNext:'Next',stOff:'Disconnected',stConnecting:'Connecting…',stConnected:'Connected',stFailed:'Connect failed',btnSelect:'Select',btnRemove:'Remove'},zh:{language:'语言',configAp:'配置热点',stationIp:'联网地址',backHome:'← 返回导航首页',fmoHeadline:'FMO‑V4 通联',fmoIntro:'服务器通过 APRS‑IS 自动发现（通常数分钟内出现）。FMO 身份证书不是 TLS 证书，三份 JSON 必须来自同一身份。',fmoLink:'连接与发射',fmoConnect:'连接所选 FMO 服务器',fmoTransmit:'将 PTT/SQL 麦克风上行切换到 FMO',fmoFavTitle:'收藏服务器',fmoFavEmpty:'暂无收藏：在下方服务器列表点 ☆ 添加；点“选择”或收藏名立即切换服务器。',fmoSrvTitle:'服务器列表',fmoColName:'名称',fmoColCall:'呼号',fmoColOnline:'在线',fmoColSeen:'最近上线',fmoSrvEmpty:'等待发现…',fmoSearch:'搜索 名称/呼号/host',fmoNoMatch:'无匹配服务器',fmoPrev:'上一页',fmoNext:'下一页',stOff:'未连接',stConnecting:'连接中…',stConnected:'已连接',stFailed:'连接失败',btnSelect:'选择',btnRemove:'移除'}};
 function fmoLang(){const s=localStorage.getItem('nrl_lang');if(s==='zh'||s==='en')return s;return navigator.language&&navigator.language.toLowerCase().startsWith('zh')?'zh':'en';}
-function fmoApply(l){document.documentElement.lang=l==='zh'?'zh-CN':'en';document.querySelectorAll('input[name="lang"]').forEach(r=>{r.checked=r.value===l;});document.querySelectorAll('[data-i18n]').forEach(el=>{const k=el.getAttribute('data-i18n');if(fmoI18n[l]&&fmoI18n[l][k])el.textContent=fmoI18n[l][k];});const h=document.querySelector('h1');if(h)document.title=h.textContent;}
+function fmoApply(l){document.documentElement.lang=l==='zh'?'zh-CN':'en';document.querySelectorAll('input[name="lang"]').forEach(r=>{r.checked=r.value===l;});document.querySelectorAll('[data-i18n]').forEach(el=>{const k=el.getAttribute('data-i18n');if(fmoI18n[l]&&fmoI18n[l][k])el.textContent=fmoI18n[l][k];});document.querySelectorAll('[data-i18n-ph]').forEach(el=>{const k=el.getAttribute('data-i18n-ph');if(fmoI18n[l]&&fmoI18n[l][k])el.placeholder=fmoI18n[l][k];});const h=document.querySelector('h1');if(h)document.title=h.textContent;}
 document.querySelectorAll('input[name="lang"]').forEach(r=>{r.addEventListener('change',()=>{localStorage.setItem('nrl_lang',r.value);fmoApply(r.value);});});
 fmoApply(fmoLang());
 const esc=s=>String(s??'');let loaded=false;
+let srvData=[],favData=[],srvPage=0,cfgHoldUntil=0;const SRV_PAGE_SIZE=8;
+const T=k=>{const l=fmoLang();return (fmoI18n[l]&&fmoI18n[l][k])||fmoI18n.en[k]||k;};
+const sameSrv=(a,b)=>a&&b&&((a.uid&&b.uid&&a.uid===b.uid)||(a.host===b.host&&String(a.port)===String(b.port)));
+const favIndexOf=s=>favData.findIndex(f=>sameSrv(f,s));
+// Case-insensitive substring filter over name/callsign/host; the favorites
+// chips are rendered separately and never pass through here.
+const srvFiltered=()=>{const q=(srvq.value||'').toLowerCase();return q?srvData.filter(s=>(s.name||'').toLowerCase().includes(q)||(s.callsign||'').toLowerCase().includes(q)||(s.host||'').toLowerCase().includes(q)):srvData;};
+async function postForm(url,params){const body=new URLSearchParams(params);const r=await fetch(url,{method:'POST',body});const t=await r.text();if(!r.ok)throw Error(t);}
+function renderFavs(){const box=document.getElementById('favlist');box.innerHTML='';document.getElementById('favempty').style.display=favData.length?'none':'';favData.forEach((f,i)=>{const b=document.createElement('button');b.type='button';b.textContent='★ '+f.name;b.onclick=async()=>{try{await postForm('/fmo/config',{fav_index:i});refresh()}catch(e){alert(e)}};const x=document.createElement('button');x.type='button';x.textContent='✕';x.title=T('btnRemove');x.onclick=async()=>{try{await postForm('/fmo/favorites',{action:'remove',index:i});refresh()}catch(e){alert(e)}};box.appendChild(b);box.appendChild(x);});}
+function renderServers(){const body=document.getElementById('srvbody');body.innerHTML='';const filtered=srvFiltered();const pages=Math.max(1,Math.ceil(filtered.length/SRV_PAGE_SIZE));if(srvPage>=pages)srvPage=pages-1;const slice=filtered.slice(srvPage*SRV_PAGE_SIZE,srvPage*SRV_PAGE_SIZE+SRV_PAGE_SIZE);if(!slice.length){body.innerHTML=`<tr><td colspan="7" class="hint">${T(srvData.length?'fmoNoMatch':'fmoSrvEmpty')}</td></tr>`;}slice.forEach(s=>{const gi=srvData.indexOf(s),fi=favIndexOf(s),tr=document.createElement('tr');const td=t=>{const c=document.createElement('td');c.textContent=t;tr.appendChild(c)};const star=document.createElement('button');star.type='button';star.textContent=fi>=0?'★':'☆';star.onclick=async()=>{try{if(fi>=0)await postForm('/fmo/favorites',{action:'remove',index:fi});else await postForm('/fmo/favorites',{action:'add',name:s.name,host:s.host,callsign:s.callsign,port:s.port,uid:s.uid,fingerprint:s.fingerprint||''});refresh()}catch(e){alert(e)}};const c0=document.createElement('td');c0.appendChild(star);tr.appendChild(c0);td(s.name);td(s.callsign);td(`${s.host}:${s.port}`);td(`${s.online}/${s.total}`);td(s.last_seen?new Date(s.last_seen*1000).toLocaleString():'---');const sel=document.createElement('button');sel.type='button';sel.textContent=T('btnSelect');sel.disabled=!s.fingerprint;sel.onclick=async()=>{try{await postForm('/fmo/config',{server_index:gi});refresh()}catch(e){alert(e)}};const c1=document.createElement('td');c1.appendChild(sel);tr.appendChild(c1);body.appendChild(tr);});document.getElementById('pginfo').textContent=`${srvPage+1}/${pages} (${filtered.length})`;}
+pgprev.onclick=()=>{if(srvPage>0){srvPage--;renderServers();}};pgnext.onclick=()=>{if((srvPage+1)*SRV_PAGE_SIZE<srvFiltered().length){srvPage++;renderServers();}};
+srvq.oninput=()=>{srvPage=0;renderServers();};
 async function refresh(){try{const r=await fetch('/fmo/status',{cache:'no-store'}),j=await r.json();
-enabled.checked=j.config.enabled;transmit.checked=j.config.transmit;mqtt_no_local.checked=j.config.mqtt_no_local;
-link.className='mono '+(j.link.connected?'ok':'hint');link.textContent=`${j.link.connected?'已连接':'未连接'} / MQTT Client ID ${j.link.client_id||'---'} / ${j.link.receiving?'接收 '+j.link.voice_callsign+' '+j.link.voice_codec:'空闲'} / RX ${j.link.rx_frames} / 解析错误 ${j.link.parse_errors} / last_error ${j.link.last_error}`;
+if(Date.now()>cfgHoldUntil){enabled.checked=j.config.enabled;transmit.checked=j.config.transmit;mqtt_no_local.checked=j.config.mqtt_no_local;}
+const lst=!j.config.enabled?['stOff','hint']:(j.link.connected?['stConnected','ok']:(j.link.last_error?['stFailed','bad']:['stConnecting','hint']));link.className='mono '+lst[1];link.textContent=`${T(lst[0])} / MQTT Client ID ${j.link.client_id||'---'} / ${j.link.receiving?'接收 '+j.link.voice_callsign+' '+j.link.voice_codec:'空闲'} / RX ${j.link.rx_frames} / 解析错误 ${j.link.parse_errors}${j.link.last_error?` / last_error ${j.link.last_error}`:''}`;
 cert.className='mono '+(j.identity.ready?'ok':'bad');cert.textContent=j.identity.ready?`可用：${j.identity.callsign}，UID ${j.identity.uid}，有效期至 ${new Date(j.identity.expires_at*1000).toLocaleString()}，指纹 ${j.identity.fingerprint}`:`未就绪：user=${j.identity.user_present} intermediate=${j.identity.intermediate_present} deviceKey=${j.identity.device_key_present} error=${j.identity.error}`;
 current.textContent=j.config.server.host?`${j.config.server.name} / ${j.config.server.callsign} / UID ${j.config.server.uid} / ${j.config.server.host}:${j.config.server.port}`:'未选择服务器';
 qso_stat.className='mono hint';qso_stat.textContent=`状态 ${j.qso.phase}${j.qso.peer?` / 对方 ${j.qso.peer} UID ${j.qso.peer_uid}${j.qso.outgoing?' (呼出)':''}`:''}${j.qso.detail?` / ${j.qso.detail}`:''}`;
-bstat.className='mono '+(j.broadcast.status.gated?'bad':'ok');bstat.textContent=`角色 ${j.link.role||'---'} / 广播 ${j.broadcast.config.enabled?'开':'关'} / 门控 ${j.broadcast.status.gated?'阻塞':'通过'} / 已发 ${j.broadcast.status.tx_count} / 最近 ${j.broadcast.status.last_sent_epoch?new Date(j.broadcast.status.last_sent_epoch*1000).toLocaleString():'---'} / 拒因 ${j.broadcast.status.last_reject} / 坐标 ${j.position.lat} ${j.position.lon} ${j.position.gps?'(GPS)':'(默认)'}`;bc_auto.textContent=`填 0 使用自动（当前 在线 ${j.broadcast.auto.online} / 峰值 ${j.broadcast.auto.peak}，生效 ${j.broadcast.auto.effective_online}/${j.broadcast.auto.effective_peak}）`;nstat.className='mono '+(j.beacon.status.gated?'bad':'ok');nstat.textContent=`信标 ${j.beacon.config.enabled?'开':'关'} / 门控 ${j.beacon.status.gated?'阻塞':'通过'} / 已发 ${j.beacon.status.tx_count} / 最近 ${j.beacon.status.last_sent_epoch?new Date(j.beacon.status.last_sent_epoch*1000).toLocaleString():'---'} / 拒因 ${j.beacon.status.last_reject}`;if(!loaded){bc_enabled.checked=j.broadcast.config.enabled;bc_mode.value=String(j.broadcast.config.mode);bc_country.value=j.broadcast.config.country;bc_ssid.value=j.broadcast.config.ssid;bc_name.value=j.broadcast.config.name;bc_host.value=j.broadcast.config.host;bc_port.value=j.broadcast.config.port||'';bc_cover.value=j.broadcast.config.cover_km;bc_online.value=j.broadcast.config.online;bc_peak.value=j.broadcast.config.peak;nb_enabled.checked=j.beacon.config.enabled;nb_ssid.value=j.beacon.config.ssid;nb_freq.value=j.beacon.config.freq_x10000?j.beacon.config.freq:'';nb_height.value=j.beacon.config.height_m;nb_rig.value=j.beacon.config.rig;nb_ant.value=j.beacon.config.ant;nb_msg.value=j.beacon.config.aprs_msg;nb_notice.value=j.beacon.config.notice;nb_qso.value=j.beacon.config.qso_msg;}const old=servers.value;servers.innerHTML='<option value="">保留当前服务器</option>';j.servers.forEach((s,i)=>{const o=document.createElement('option');o.value=i;o.textContent=`${s.name} (${s.callsign}) ${s.host}:${s.port} 在线 ${s.online}/${s.total}`;servers.appendChild(o)});if(old&&servers.querySelector(`option[value="${old}"]`))servers.value=old;loaded=true;
+bstat.className='mono '+(j.broadcast.status.gated?'bad':'ok');bstat.textContent=`角色 ${j.link.role||'---'} / 广播 ${j.broadcast.config.enabled?'开':'关'} / 门控 ${j.broadcast.status.gated?'阻塞':'通过'} / 已发 ${j.broadcast.status.tx_count} / 最近 ${j.broadcast.status.last_sent_epoch?new Date(j.broadcast.status.last_sent_epoch*1000).toLocaleString():'---'} / 拒因 ${j.broadcast.status.last_reject} / 坐标 ${j.position.lat} ${j.position.lon} ${j.position.gps?'(GPS)':'(默认)'}`;bc_auto.textContent=`填 0 使用自动（当前 在线 ${j.broadcast.auto.online} / 峰值 ${j.broadcast.auto.peak}，生效 ${j.broadcast.auto.effective_online}/${j.broadcast.auto.effective_peak}）`;nstat.className='mono '+(j.beacon.status.gated?'bad':'ok');nstat.textContent=`信标 ${j.beacon.config.enabled?'开':'关'} / 门控 ${j.beacon.status.gated?'阻塞':'通过'} / 已发 ${j.beacon.status.tx_count} / 最近 ${j.beacon.status.last_sent_epoch?new Date(j.beacon.status.last_sent_epoch*1000).toLocaleString():'---'} / 拒因 ${j.beacon.status.last_reject}`;if(!loaded){bc_enabled.checked=j.broadcast.config.enabled;bc_mode.value=String(j.broadcast.config.mode);bc_country.value=j.broadcast.config.country;bc_ssid.value=j.broadcast.config.ssid;bc_name.value=j.broadcast.config.name;bc_host.value=j.broadcast.config.host;bc_port.value=j.broadcast.config.port||'';bc_cover.value=j.broadcast.config.cover_km;bc_online.value=j.broadcast.config.online;bc_peak.value=j.broadcast.config.peak;nb_enabled.checked=j.beacon.config.enabled;nb_ssid.value=j.beacon.config.ssid;nb_freq.value=j.beacon.config.freq_x10000?j.beacon.config.freq:'';nb_height.value=j.beacon.config.height_m;nb_rig.value=j.beacon.config.rig;nb_ant.value=j.beacon.config.ant;nb_msg.value=j.beacon.config.aprs_msg;nb_notice.value=j.beacon.config.notice;nb_qso.value=j.beacon.config.qso_msg;}srvData=j.servers||[];favData=j.favorites||[];renderFavs();renderServers();loaded=true;
 }catch(e){link.className='mono bad';link.textContent='状态读取失败：'+e}}
-cfg.onsubmit=async e=>{e.preventDefault();const body=new URLSearchParams(new FormData(cfg));try{const r=await fetch('/fmo/config',{method:'POST',body});const t=await r.text();if(!r.ok)throw Error(t);alert('FMO 配置已保存');refresh()}catch(e){alert('保存失败：'+e)}};
+cfg.onsubmit=async e=>{e.preventDefault();try{await postForm('/fmo/config',new FormData(cfg));refresh()}catch(e){alert('保存失败：'+e)}};
+enabled.onchange=transmit.onchange=mqtt_no_local.onchange=()=>{cfgHoldUntil=Date.now()+6000;cfg.requestSubmit();};
 bcfg.onsubmit=async e=>{e.preventDefault();const body=new URLSearchParams(new FormData(bcfg));try{const r=await fetch('/fmo/config',{method:'POST',body});const t=await r.text();if(!r.ok)throw Error(t);alert('广播配置已保存');refresh()}catch(e){alert('保存失败：'+e)}};
 ncfg.onsubmit=async e=>{e.preventDefault();const body=new URLSearchParams(new FormData(ncfg));try{const r=await fetch('/fmo/config',{method:'POST',body});const t=await r.text();if(!r.ok)throw Error(t);alert('信标配置已保存');refresh()}catch(e){alert('保存失败：'+e)}};
-servers.onchange=()=>cfg.requestSubmit();
-current.onclick=()=>{if(typeof servers.showPicker==='function')servers.showPicker();else servers.focus()};
 document.querySelectorAll('input[type=file]').forEach(el=>el.onchange=async()=>{if(!el.files[0])return;try{const text=await el.files[0].text();const r=await fetch('/fmo/cert/'+el.dataset.kind,{method:'POST',headers:{'Content-Type':'application/json'},body:text});const t=await r.text();if(!r.ok)throw Error(t);alert('证书已验证并写入');el.value='';refresh()}catch(e){alert('证书写入失败：'+e)}});
 async function qsoAct(a){const body=new URLSearchParams({action:a,peer:qso_peer.value,uid:qso_uid.value||'0'});try{const r=await fetch('/fmo/qso',{method:'POST',body});const t=await r.text();if(!r.ok)throw Error(t);refresh()}catch(e){alert('操作失败：'+e)}};
 qso_call.onclick=()=>qsoAct('call');qso_answer.onclick=()=>qsoAct('answer');qso_reject.onclick=()=>qsoAct('reject');qso_cancel.onclick=()=>qsoAct('cancel');
@@ -1348,6 +1380,22 @@ static std::string fingerprintHex(const uint8_t fingerprint[32])
         result[i * 2u + 1u] = digits[fingerprint[i] & 0x0fu];
     }
     return result;
+}
+
+// Inverse of fingerprintHex; rejects anything but exactly 64 hex digits.
+static bool fingerprintFromHex(const char *text, uint8_t out[32])
+{
+    if (text == nullptr || strlen(text) != 64u) {
+        return false;
+    }
+    for (size_t i = 0; i < 32u; ++i) {
+        unsigned value = 0;
+        if (sscanf(text + i * 2u, "%2x", &value) != 1) {
+            return false;
+        }
+        out[i] = static_cast<uint8_t>(value);
+    }
+    return true;
 }
 
 static esp_err_t handleFmoStatus(httpd_req_t *req)
@@ -1508,7 +1556,26 @@ static esp_err_t handleFmoStatus(httpd_req_t *req)
                 "\",\"port\":" + std::to_string(server.port) +
                 ",\"uid\":" + std::to_string(server.uid) +
                 ",\"online\":" + std::to_string(server.online) +
-                ",\"total\":" + std::to_string(server.total) + "}";
+                ",\"total\":" + std::to_string(server.total) +
+                ",\"last_seen\":" +
+                std::to_string(static_cast<long long>(server.last_seen));
+        if (server.has_fingerprint) {
+            item += ",\"fingerprint\":\"" + fingerprintHex(server.fingerprint) + "\"";
+        }
+        item += "}";
+        httpd_resp_send_chunk(req, item.c_str(), item.size());
+    }
+    httpd_resp_send_chunk(req, "],\"favorites\":[", 15u);
+    const size_t fav_count = FMO_FAV_Count();
+    for (size_t i = 0; i < fav_count; ++i) {
+        FmoFavorite fav = {};
+        if (!FMO_FAV_Get(i, &fav)) continue;
+        std::string item = i == 0u ? "{" : ",{";
+        item += "\"name\":\"" + jsonEscape(fav.name) +
+                "\",\"host\":\"" + jsonEscape(fav.host) +
+                "\",\"callsign\":\"" + jsonEscape(fav.callsign) +
+                "\",\"port\":" + std::to_string(fav.port) +
+                ",\"uid\":" + std::to_string(fav.uid) + "}";
         httpd_resp_send_chunk(req, item.c_str(), item.size());
     }
     httpd_resp_send_chunk(req, "]}", 2u);
@@ -1586,9 +1653,13 @@ static esp_err_t handleFmoConfig(httpd_req_t *req)
     }
     FmoConfig config = {};
     FMO_GetConfig(&config);
-    config.enabled = s_server.hasArg("enabled");
-    config.transmit = s_server.hasArg("transmit");
-    config.mqtt_no_local = s_server.hasArg("mqtt_no_local");
+    // Select-only posts (server_index/fav_index from the server list) carry
+    // no checkboxes; without this gate the absent boxes would read as off.
+    if (s_server.hasArg("enabled_present")) {
+        config.enabled = s_server.hasArg("enabled");
+        config.transmit = s_server.hasArg("transmit");
+        config.mqtt_no_local = s_server.hasArg("mqtt_no_local");
+    }
     if (s_server.hasArg("server_index") && !s_server.arg("server_index").empty()) {
         char *end = nullptr;
         const unsigned long index = strtoul(s_server.arg("server_index").c_str(), &end, 10);
@@ -1598,11 +1669,83 @@ static esp_err_t handleFmoConfig(httpd_req_t *req)
         }
         config.server = selected;
     }
+    if (s_server.hasArg("fav_index") && !s_server.arg("fav_index").empty()) {
+        char *end = nullptr;
+        const unsigned long index = strtoul(s_server.arg("fav_index").c_str(), &end, 10);
+        FmoFavorite fav = {};
+        if (end == nullptr || *end != '\0' || !FMO_FAV_Get(index, &fav)) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid favorite selection");
+        }
+        memset(&config.server, 0, sizeof(config.server));
+        snprintf(config.server.name, sizeof(config.server.name), "%s", fav.name);
+        snprintf(config.server.host, sizeof(config.server.host), "%s", fav.host);
+        snprintf(config.server.callsign, sizeof(config.server.callsign), "%s", fav.callsign);
+        config.server.port = fav.port;
+        config.server.uid = fav.uid;
+        memcpy(config.server.fingerprint, fav.fingerprint, sizeof(config.server.fingerprint));
+        config.server.has_fingerprint = true;
+    }
     if (!FMO_SetConfig(&config, true)) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                                    "select a valid FMO server before enabling");
     }
     return httpd_resp_sendstr(req, "OK");
+}
+
+// FMO server favorites: GET lists them, POST action=add (full fields,
+// fingerprint as 64 hex chars) or action=remove (index) edits the list.
+static esp_err_t handleFmoFavorites(httpd_req_t *req)
+{
+    if (req->method == HTTP_GET) {
+        s_server.bind(req);
+        httpd_resp_set_type(req, "application/json; charset=utf-8");
+        httpd_resp_send_chunk(req, "{\"favorites\":[", 14u);
+        const size_t count = FMO_FAV_Count();
+        for (size_t i = 0; i < count; ++i) {
+            FmoFavorite fav = {};
+            if (!FMO_FAV_Get(i, &fav)) continue;
+            std::string item = i == 0u ? "{" : ",{";
+            item += "\"name\":\"" + jsonEscape(fav.name) +
+                    "\",\"host\":\"" + jsonEscape(fav.host) +
+                    "\",\"callsign\":\"" + jsonEscape(fav.callsign) +
+                    "\",\"port\":" + std::to_string(fav.port) +
+                    ",\"uid\":" + std::to_string(fav.uid) +
+                    ",\"fingerprint\":\"" + fingerprintHex(fav.fingerprint) + "\"}";
+            httpd_resp_send_chunk(req, item.c_str(), item.size());
+        }
+        httpd_resp_send_chunk(req, "]}", 2u);
+        httpd_resp_send_chunk(req, nullptr, 0u);
+        return ESP_OK;
+    }
+    if (!s_server.bindPost(req)) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "form parse failed");
+    }
+    const std::string action = s_server.arg("action");
+    if (action == "add") {
+        FmoFavorite fav = {};
+        snprintf(fav.name, sizeof(fav.name), "%s", s_server.arg("name").c_str());
+        snprintf(fav.host, sizeof(fav.host), "%s", s_server.arg("host").c_str());
+        snprintf(fav.callsign, sizeof(fav.callsign), "%s", s_server.arg("callsign").c_str());
+        fav.port = static_cast<uint16_t>(strtoul(s_server.arg("port").c_str(), nullptr, 10));
+        fav.uid = static_cast<uint32_t>(strtoul(s_server.arg("uid").c_str(), nullptr, 10));
+        if (fav.name[0] == '\0') {
+            snprintf(fav.name, sizeof(fav.name), "%s", fav.callsign);
+        }
+        if (!fingerprintFromHex(s_server.arg("fingerprint").c_str(), fav.fingerprint) ||
+            !FMO_FAV_Add(&fav)) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "favorite list full or server unusable (host/port/uid/callsign/fingerprint)");
+        }
+        return httpd_resp_sendstr(req, "OK");
+    }
+    if (action == "remove") {
+        const unsigned long index = strtoul(s_server.arg("index").c_str(), nullptr, 10);
+        if (!FMO_FAV_Remove(index)) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid favorite index");
+        }
+        return httpd_resp_sendstr(req, "OK");
+    }
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "unknown action");
 }
 
 // FMO QSO 呼叫信令: action=call（peer/uid）|answer|reject|cancel。
@@ -2077,6 +2220,7 @@ static void sendAprsSavedJson(const bool ok)
     appendField("aprs_rx", cfg.rf_rx_enabled ? "1" : "0");
     appendField("aprs_auto", cfg.auto_interval ? "1" : "0");
     appendField("aprs_fixed", cfg.fixed_beacon_without_gps ? "1" : "0");
+    appendField("gps_power", cfg.gps_power_enabled ? "1" : "0");
     appendField("aprs_nrl_tx", cfg.nrl_tx_enabled ? "1" : "0");
     appendField("aprs_nrl_rx", cfg.nrl_rx_enabled ? "1" : "0");
     appendField("aprs_fwd_rf_is", cfg.fwd[APRS_FWD_RF_TO_IS] ? "1" : "0");
@@ -2122,6 +2266,9 @@ static esp_err_t handleSaveAprs(httpd_req_t *req)
     }
     if (ok && s_server.hasArg("aprs_fixed_present")) {
         ok = APRS_SERVICE_SetFixedBeaconWithoutGps(s_server.hasArg("aprs_fixed"));
+    }
+    if (ok && s_server.hasArg("gps_power_present")) {
+        ok = APRS_SERVICE_SetGpsPower(s_server.hasArg("gps_power"));
     }
     if (ok && s_server.hasArg("aprs_nrl_tx_present")) {
         ok = APRS_SERVICE_SetNrlTxEnabled(s_server.hasArg("aprs_nrl_tx"));
@@ -2513,10 +2660,15 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
              EXTERNAL_RADIO_SetServerPort(static_cast<uint16_t>(value), false);
     }
     if (ok && s_server.hasArg("channel")) {
+#if NRL_BOARD == NRL_BOARD_BH4TDV
         unsigned long value = 0UL;
         ok = parseUIntArg(s_server.arg("channel"), &value) &&
              value <= 7UL &&
              EXTERNAL_RADIO_SetChannel(static_cast<uint8_t>(value), false);
+#else
+        // Channel-select GPIOs exist only on the BH4TDV 3188 board; the field
+        // is hidden on other boards, so ignore stray submissions.
+#endif
     }
     if (ok && s_server.hasArg("callsign")) {
         ok = EXTERNAL_RADIO_SetCallsign(s_server.arg("callsign").c_str(), false);
@@ -3980,6 +4132,7 @@ static void ensureServerRunning()
         { "/",                     HTTP_GET,  handleRoot },
         { "/wifi",                 HTTP_GET,  handleWifiPage },
         { "/nrl",                  HTTP_GET,  handleNrlPage },
+        { "/serial",               HTTP_GET,  handleSerialPage },
         { "/nrl/servers",          HTTP_GET,  handleNrlServersGet },
         { "/nrl/servers",          HTTP_POST, handleNrlServersPut },
         { "/nrl/servers/refresh",  HTTP_GET,  handleNrlServersRefresh },
@@ -3992,6 +4145,8 @@ static void ensureServerRunning()
         { "/fmo/cert/intermediate",HTTP_POST, handleFmoCertificate },
         { "/fmo/cert/devicekey",   HTTP_POST, handleFmoCertificate },
         { "/fmo/activate",         HTTP_POST, handleFmoActivate },
+        { "/fmo/favorites",        HTTP_GET,  handleFmoFavorites },
+        { "/fmo/favorites",        HTTP_POST, handleFmoFavorites },
         { "/scan",                 HTTP_GET,  handleScan },
         { "/save_wifi",            HTTP_POST, handleSaveWifi },
         { "/save_nrl",             HTTP_POST, handleSaveNrl },

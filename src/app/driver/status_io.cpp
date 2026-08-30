@@ -22,7 +22,7 @@
 
 #if NRL_BOARD == NRL_BOARD_S31_KORVO
 #include "bsp/led.h"  // vendored ESP32-S31-Korvo BSP: WS2812 status LED (GPIO37)
-#elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
+#elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD || NRL_BOARD == NRL_BOARD_BH4TDV_RF || NRL_BOARD == NRL_BOARD_BI4UMD
 #include <led_strip.h>
 #endif
 
@@ -138,7 +138,7 @@ unsigned long s_last_heartbeat_rx_ms = 0UL;
 #if NRL_BOARD == NRL_BOARD_S31_KORVO
 bool s_ws2812_ready = false;
 uint32_t s_ws2812_rgb = UINT32_MAX;
-#elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
+#elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD || NRL_BOARD == NRL_BOARD_BH4TDV_RF || NRL_BOARD == NRL_BOARD_BI4UMD
 led_strip_handle_t s_ws2812 = nullptr;
 uint32_t s_ws2812_rgb = UINT32_MAX;
 #endif
@@ -798,7 +798,7 @@ extern "C" void STATUS_IO_Init(void)
     } else {
         ESP_LOGW(TAG, "WS2812 status LED init failed");
     }
-#elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
+#elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD || NRL_BOARD == NRL_BOARD_BH4TDV_RF || NRL_BOARD == NRL_BOARD_BI4UMD
     const led_strip_config_t strip_config = {
         .strip_gpio_num = NRL_PIN_WS2812_STATUS,
         .max_leds = 1,
@@ -820,7 +820,7 @@ extern "C" void STATUS_IO_Init(void)
         (void)led_strip_clear(s_ws2812);
     } else {
         s_ws2812 = nullptr;
-        ESP_LOGW(TAG, "Function CoreBoard WS2812 init failed");
+        ESP_LOGW(TAG, "WS2812 status LED init failed");
     }
 #endif
 
@@ -838,7 +838,7 @@ extern "C" void STATUS_IO_Init(void)
     if (s_ws2812_ready) {
         (void)bsp_led_set_rgb(BSP_LED_STATUS, 60, 60, 60);
     }
-#elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
+#elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD || NRL_BOARD == NRL_BOARD_BH4TDV_RF || NRL_BOARD == NRL_BOARD_BI4UMD
     if (s_ws2812 != nullptr) {
         (void)led_strip_set_pixel(s_ws2812, 0, 60, 60, 60);
         (void)led_strip_refresh(s_ws2812);
@@ -959,7 +959,7 @@ extern "C" void STATUS_IO_Poll(void)
             s_ws2812_rgb = rgb;
         }
     }
-#elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
+#elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD || NRL_BOARD == NRL_BOARD_BI4UMD
     if (s_ws2812 != nullptr) {
         const uint8_t r = s_tx_active ? 60 : 0;
         const uint8_t g = s_net_audio_active ? 60 : 0;
@@ -978,12 +978,28 @@ extern "C" void STATUS_IO_Poll(void)
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
     if (!ledSelftestActive(now)) {
         // PCA9555 status LEDs: NET follows the server heartbeat (slow blink
-        // while missing), SQL follows the radio squelch, PTT follows the
-        // actual radio PTT output latch.
-        (void)BH4TDV_RF_IO_SetStatusLeds(
-            heartbeat_ok ? true : blinkPhase(now, kSlowBlinkMs),
-            s_rf_sql_active,
-            BH4TDV_RF_IO_IsTransmitting());
+        // while missing), SQL follows the radio squelch, PTT follows either
+        // the local mic uplink (PTT button) or the radio retransmit latch
+        // (inbound network audio keyed out through the SR-110U).
+        const bool net_on = heartbeat_ok ? true : blinkPhase(now, kSlowBlinkMs);
+        const bool sql_on = s_rf_sql_active;
+        const bool ptt_on = s_tx_active || BH4TDV_RF_IO_IsTransmitting();
+        (void)BH4TDV_RF_IO_SetStatusLeds(net_on, sql_on, ptt_on);
+        // The mainboard's single WS2812 mirrors the three PCA9555 lamps by
+        // priority: PTT red > SQL green > NET blue > off (NET slow-blinks
+        // with the heartbeat phase like the blue lamp).
+        if (s_ws2812 != nullptr) {
+            const uint8_t r = ptt_on ? 60 : 0;
+            const uint8_t g = (!ptt_on && sql_on) ? 60 : 0;
+            const uint8_t b = (!ptt_on && !sql_on && net_on) ? 60 : 0;
+            const uint32_t rgb = (static_cast<uint32_t>(r) << 16u) |
+                                 (static_cast<uint32_t>(g) << 8u) | b;
+            if (rgb != s_ws2812_rgb &&
+                led_strip_set_pixel(s_ws2812, 0, r, g, b) == ESP_OK &&
+                led_strip_refresh(s_ws2812) == ESP_OK) {
+                s_ws2812_rgb = rgb;
+            }
+        }
     }
 #endif
 

@@ -24,6 +24,8 @@ set(app_sources
     services/fmo_activate_core.cpp
     services/fmo_adpcm.cpp
     services/fmo_cert_store.cpp
+    services/fmo_favorites.cpp
+    services/fmo_favorites_core.cpp
     services/fmo_frame.cpp
     services/fmo_protocol.cpp
     services/fmo_service.cpp
@@ -215,6 +217,11 @@ if(IDF_TARGET STREQUAL "esp32s31")
                                   espressif__esp_websocket_client
                                   esp_driver_jpeg)
 endif()
+
+# led_strip is vendored (vendor/espressif__led_strip, manifest-less so the
+# component manager does not re-solve offline); every board may use it
+# (BH4TDV-RF mainboard WS2812 status LED, S31 status LEDs).
+list(APPEND app_priv_requires espressif__led_strip)
 
 # Optional USB-RNDIS backend. Current production boards leave this disabled;
 # enabling the experimental board macro pulls the driver dependencies in.

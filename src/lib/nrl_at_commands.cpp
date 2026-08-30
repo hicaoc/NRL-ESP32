@@ -370,8 +370,11 @@ static bool appendSupportedAtList(uint8_t *payload,
     if (!ok) return false;
 
     char number[16];
+#if NRL_BOARD == NRL_BOARD_BH4TDV
+    // Channel-select GPIOs exist only on the BH4TDV 3188 board.
     snprintf(number, sizeof(number), "%u", (config != nullptr) ? config->channel : 0u);
     appendKeyValueLineIfFits(payload, capacity, used, "CH", number);
+#endif
     appendKeyValueLineIfFits(payload, capacity, used, "D_IP", (config != nullptr) ? config->server_host : "");
     snprintf(number, sizeof(number), "%u", (config != nullptr) ? config->server_port : 0u);
     appendKeyValueLineIfFits(payload, capacity, used, "D_PORT", number);
@@ -1087,6 +1090,7 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     }
 
     if (stringEqualsIgnoreCase(command.command, "CH")) {
+#if NRL_BOARD == NRL_BOARD_BH4TDV
         if (is_query) {
             appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "CH", config->channel);
             return;
@@ -1100,6 +1104,11 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         }
         appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "CH", EXTERNAL_RADIO_GetChannel());
         return;
+#else
+        // Channel-select GPIOs exist only on the BH4TDV 3188 board.
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "CH");
+        return;
+#endif
     }
 
     if (stringEqualsIgnoreCase(command.command, "D_IP")) {
@@ -1982,6 +1991,8 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     //   AT+APRS_NRLRX=ON|OFF      demodulate NRL network audio
     //   AT+APRS_AUTO=ON|OFF       speed/movement-adaptive beacon interval
     //   AT+APRS_FIXED=ON|OFF      allow default-position beacons without GPS
+    //   AT+GPS_POWER=ON|OFF       GPS module power; OFF also stops the UART2
+    //                             NMEA intake (no argument reports the state)
     //   AT+APRS_SERVER=host:port  APRS-IS server
     //   AT+APRS_SSID=0..15        SSID appended to the radio callsign
     //   AT+APRS_SYMBOL=/I         symbol table+code (TCP/IP by default)
@@ -2001,7 +2012,7 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             AprsConfig cfg;
             APRS_SERVICE_GetConfig(&cfg);
             char status[192];
-            snprintf(status, sizeof(status), "%s net=%s%s rf_tx=%s rf_rx=%s nrl_tx=%s nrl_rx=%s fwd=%d%d%d%d%d%d auto=%s fixed=%s gps=%s rx=%lu tx=%lu",
+            snprintf(status, sizeof(status), "%s net=%s%s rf_tx=%s rf_rx=%s nrl_tx=%s nrl_rx=%s fwd=%d%d%d%d%d%d auto=%s fixed=%s gps=%s pwr=%s rx=%lu tx=%lu",
                      cfg.enabled ? "ON" : "OFF",
                      cfg.net_enabled ? "ON" : "OFF",
                      APRS_SERVICE_IsNetConnected() ? "(conn)" : "",
@@ -2015,6 +2026,7 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
                      cfg.auto_interval ? "ON" : "OFF",
                      cfg.fixed_beacon_without_gps ? "ON" : "OFF",
                      APRS_SERVICE_GpsHasFix() ? "FIX" : "NO",
+                     cfg.gps_power_enabled ? "ON" : "OFF",
                      static_cast<unsigned long>(APRS_SERVICE_GetRxCount()),
                      static_cast<unsigned long>(APRS_SERVICE_GetTxCount()));
             appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS", status);
@@ -2080,6 +2092,23 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
                                                                                             : cfg.rf_rx_enabled)))));
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
                            command.command, state ? "ON" : "OFF");
+        return;
+    }
+
+    // GPS module power: drives the GPS_EN line where the hardware has one
+    // and always gates the UART2 NMEA intake. No argument (or "=?") reads
+    // back the current state.
+    if (stringEqualsIgnoreCase(command.command, "GPS_POWER")) {
+        if (!is_query && command.value[0] != '\0') {
+            bool enabled = false;
+            if (!parseBoolValue(command.value, &enabled) ||
+                !APRS_SERVICE_SetGpsPower(enabled)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "GPS_POWER");
+                return;
+            }
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           "GPS_POWER", APRS_SERVICE_GpsPowerEnabled() ? "ON" : "OFF");
         return;
     }
 

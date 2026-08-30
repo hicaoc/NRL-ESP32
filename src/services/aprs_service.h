@@ -60,6 +60,7 @@ typedef struct {
     uint16_t beacon_interval_s;
     bool auto_interval;   // SmartBeaconing-style: shorten the period while the GPS moves
     bool fixed_beacon_without_gps; // allow default-position beacons while GPS has no fresh fix
+    bool gps_power_enabled; // GPS module power; off also stops the UART2 NMEA intake
     int32_t default_lat_e6; // microdegrees, used when GPS has no fix
     int32_t default_lon_e6;
     uint16_t server_port;
@@ -145,6 +146,11 @@ bool APRS_SERVICE_SetBeaconInterval(uint16_t seconds);      // 10..3600
 // configured interval stays the stationary/no-GPS ceiling.
 bool APRS_SERVICE_SetAutoInterval(bool enabled);
 bool APRS_SERVICE_SetFixedBeaconWithoutGps(bool enabled);
+// GPS power switch (persisted). On bh4tdv_rf this drives the PCA9555 GPS_EN
+// line; on every board it starts/stops the UART2 NMEA intake and, when
+// switched off, drops the cached fix so consumers fall back to the default
+// position immediately.
+bool APRS_SERVICE_SetGpsPower(bool enabled);
 bool APRS_SERVICE_SetDefaultPosition(double lat, double lon);
 // WGS-84 coordinates used for config input. Accepts APRS/NMEA style
 // "ddmm.mmmm[N|S]" for latitude and "dddmm.mmmm[E|W]" for longitude
@@ -187,6 +193,7 @@ bool APRS_SERVICE_SendRawLine(const char *line);
 uint32_t APRS_SERVICE_GetRxCount(void);   // frames decoded from RF
 uint32_t APRS_SERVICE_GetTxCount(void);   // beacons sent
 bool APRS_SERVICE_GpsHasFix(void);
+bool APRS_SERVICE_GpsPowerEnabled(void);
 void APRS_SERVICE_GetGpsInfo(AprsGpsInfo *out);
 
 // Station list snapshot, ordered most-recently-heard first. Returns the

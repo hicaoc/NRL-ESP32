@@ -3,6 +3,7 @@
 
 #include "audio/audio_router.h"
 #include "audio/audio_focus.h"
+#include "driver/bh4tdv_rf_io.h"
 #include "driver/board_pins.h"
 #include "driver/display.h"
 #include "driver/external_radio.h"
@@ -106,6 +107,7 @@ struct PersistBlob {
     uint8_t nrl_tx_enabled;  // appended in 0.8.49: AFSK out over the NRL uplink
     uint8_t nrl_rx_enabled;  // appended in 0.8.49: demodulate NRL downlink
     uint8_t fwd[APRS_FWD_COUNT]; // appended in 0.8.50: gateway forwarding switches
+    uint8_t gps_power_enabled; // appended in 0.8.83: GPS module power switch
 } __attribute__((packed));
 
 struct StationRec {
@@ -336,6 +338,7 @@ void defaultConfig(AprsConfig &cfg)
     cfg.beacon_interval_s = 60;
     cfg.auto_interval = false;
     cfg.fixed_beacon_without_gps = true;
+    cfg.gps_power_enabled = true;
     cfg.default_lat_e6 = kDefaultLatE6;
     cfg.default_lon_e6 = kDefaultLonE6;
     cfg.server_port = 14580;
@@ -375,6 +378,7 @@ void persistConfig()
     for (size_t i = 0; i < APRS_FWD_COUNT; ++i) {
         blob.fwd[i] = s_cfg.fwd[i] ? 1 : 0;
     }
+    blob.gps_power_enabled = s_cfg.gps_power_enabled ? 1 : 0;
 
     nvs_handle_t nvs;
     if (nvs_open(kNvsNamespace, NVS_READWRITE, &nvs) == ESP_OK) {
@@ -469,6 +473,12 @@ void loadConfig()
             s_cfg.fwd[i] = blob.fwd[i] != 0;
         }
     } // else keep the defaults (RF/NRL -> IS on)
+    const bool has_gps_power_switch =
+        size >= offsetof(PersistBlob, gps_power_enabled) +
+                    sizeof(blob.gps_power_enabled);
+    s_cfg.gps_power_enabled = has_gps_power_switch
+                                  ? blob.gps_power_enabled != 0
+                                  : true;
     const bool migrate_extended_comment = !has_comment_v3;
     if (migrate_zero_position || migrate_aprs_server || migrate_tcpip_symbol ||
         migrate_extended_comment) {
@@ -718,6 +728,9 @@ void drainNmeaRing()
 
 void pollGpsSerial()
 {
+    // GPS power off: leave the UART2 driver down (GPS_SERIAL_Read would
+    // otherwise re-install it on the next call).
+    if (!s_cfg.gps_power_enabled) return;
     uint8_t bytes[192];
     for (;;) {
         const size_t count = GPS_SERIAL_Read(bytes, sizeof(bytes));
@@ -733,6 +746,34 @@ void pollGpsSerial()
         if (count < sizeof(bytes)) break;
     }
     drainNmeaRing();
+}
+
+// Applies the persisted GPS power switch: the PCA9555 GPS_EN line on
+// bh4tdv_rf (a stub returning false on boards without the hardware) plus
+// the UART2 NMEA intake. Powering off also drops the cached fix/NMEA
+// timestamps so GpsHasFix/GetGpsInfo report "disconnected" right away and
+// beacons fall back to the default position per the fixed-beacon rule.
+void applyGpsPowerState()
+{
+    (void)BH4TDV_RF_IO_SetGpsPower(s_cfg.gps_power_enabled);
+    if (s_cfg.gps_power_enabled) {
+        if (!GPS_SERIAL_Init()) {
+            ESP_LOGW(TAG, "GPS UART2 initialization failed; using default position");
+        }
+        return;
+    }
+    GPS_SERIAL_Stop();
+    portENTER_CRITICAL(&s_gps_mux);
+    s_gps_fix = false;
+    s_gps_fix_quality = 0;
+    s_gps_satellites = -1;
+    s_gps_last_fix_ms = 0;
+    s_gps_last_nmea_ms = 0;
+    s_gps_last_rmc_ms = 0;
+    s_gps_last_gga_ms = 0;
+    s_gps_last_gsv_ms = 0;
+    s_gps_visible_count = 0;
+    portEXIT_CRITICAL(&s_gps_mux);
 }
 
 bool ownPosition(double *lat, double *lon, double *alt_m)
@@ -2026,9 +2067,10 @@ extern "C" void APRS_SERVICE_Init(void)
     s_cfg_mutex = xSemaphoreCreateMutex();
     s_station_mutex = xSemaphoreCreateMutex();
     loadConfig();
-    if (!GPS_SERIAL_Init()) {
-        ESP_LOGW(TAG, "GPS UART2 initialization failed; using default position");
-    }
+    // The PCA9555 is not up yet at this point of boot, so the GPS_EN line
+    // is (re)applied from main after BH4TDV_RF_IO_Init; the UART2 side of
+    // the switch is fully handled here.
+    applyGpsPowerState();
 
     memset(s_stations, 0, sizeof(s_station_storage));
 
@@ -2231,6 +2273,24 @@ extern "C" bool APRS_SERVICE_SetFixedBeaconWithoutGps(bool enabled)
         s_last_beacon_ms = 0;
     }
     return true;
+}
+
+extern "C" bool APRS_SERVICE_SetGpsPower(bool enabled)
+{
+    if (s_cfg_mutex == nullptr) {
+        return false;
+    }
+    lockCfg();
+    s_cfg.gps_power_enabled = enabled;
+    persistConfig();
+    unlockCfg();
+    applyGpsPowerState();
+    return true;
+}
+
+extern "C" bool APRS_SERVICE_GpsPowerEnabled(void)
+{
+    return s_cfg.gps_power_enabled;
 }
 
 extern "C" bool APRS_SERVICE_ParseAprsCoord(const char *text, bool is_lat, double *deg_out)

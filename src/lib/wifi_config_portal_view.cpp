@@ -357,11 +357,34 @@ std::string WifiConfigPortalView_BuildDeviceSections(const ExternalRadioConfig *
     replaceToken(html, "{{SERVER_HOST}}", htmlEscape(config->server_host));
     replaceToken(html, "{{SERVER_PORT}}", fromU32(config->server_port));
     replaceToken(html, "{{CHANNEL}}", fromU32(config->channel));
+    // Only the BH4TDV 3188 board has channel-select GPIOs; hide the field elsewhere.
+    replaceToken(html, "{{CHANNEL_HIDDEN}}",
+                 NRL_BOARD == NRL_BOARD_BH4TDV ? "" : " hidden");
     replaceToken(html, "{{CALLSIGN}}", htmlEscape(config->callsign));
     replaceToken(html, "{{CALLSIGN_SSID}}", fromU32(config->callsign_ssid));
     replaceToken(html, "{{PTT_TIMEOUT}}", fromU32(config->ptt_timeout_s));
     replaceToken(html, "{{VOICE_PAYLOAD_BYTES}}", fromU32(config->voice_payload_bytes));
     replaceToken(html, "{{TAIL_SUPPRESS_MS}}", fromU32(config->tail_suppress_ms));
+    const uint8_t nrl_codec = NRLAudioBridge_GetVoiceCodec();
+    replaceToken(html, "{{CODEC_G711_SELECTED}}", nrl_codec == 0u ? " selected" : "");
+    replaceToken(html, "{{CODEC_OPUS_SELECTED}}", nrl_codec == 1u ? " selected" : "");
+#if NRL_BOARD_IS_GEZIPAI_FAMILY
+    std::string battery_section = std::string(kWifiConfigPortalBatterySectionTemplate);
+    replaceToken(battery_section, "{{BATT_RAW_MV}}", fromI32(Display_GetBatteryRawMv()));
+    replaceToken(battery_section, "{{BATT_CAL_MV}}", fromI32(Display_GetBatteryCalibratedMv()));
+    replaceToken(battery_section, "{{BATT_CAL_MILLI}}", fromU32(config->battery_cal_milli));
+    replaceToken(html, "{{BATTERY_SECTION}}", battery_section);
+#else
+    replaceToken(html, "{{BATTERY_SECTION}}", std::string(""));
+#endif
+    return html;
+}
+
+// Serial / GPS page: UART1/UART2 parameters, the GPS power switch and the
+// live GPS panel (populated by the page's own polling script).
+std::string WifiConfigPortalView_BuildSerialSections(const ExternalRadioConfig *config)
+{
+    std::string html = std::string(kWifiConfigPortalSerialSectionsTemplate);
     SerialPortConfig serial{};
     SERIAL_PORT_CONFIG_Get(&serial);
     replaceToken(html, "{{UART1_ENABLED_CHECKED}}", checkedAttr(serial.uart1_enabled));
@@ -378,18 +401,9 @@ std::string WifiConfigPortalView_BuildDeviceSections(const ExternalRadioConfig *
     replaceToken(html, "{{UART2_DATA_BITS}}", fromU32(serial.uart2_data_bits));
     replaceToken(html, "{{UART2_PARITY}}", std::string(1, serial.uart2_parity));
     replaceToken(html, "{{UART2_STOP_BITS}}", fromU32(serial.uart2_stop_bits));
-    const uint8_t nrl_codec = NRLAudioBridge_GetVoiceCodec();
-    replaceToken(html, "{{CODEC_G711_SELECTED}}", nrl_codec == 0u ? " selected" : "");
-    replaceToken(html, "{{CODEC_OPUS_SELECTED}}", nrl_codec == 1u ? " selected" : "");
-#if NRL_BOARD_IS_GEZIPAI_FAMILY
-    std::string battery_section = std::string(kWifiConfigPortalBatterySectionTemplate);
-    replaceToken(battery_section, "{{BATT_RAW_MV}}", fromI32(Display_GetBatteryRawMv()));
-    replaceToken(battery_section, "{{BATT_CAL_MV}}", fromI32(Display_GetBatteryCalibratedMv()));
-    replaceToken(battery_section, "{{BATT_CAL_MILLI}}", fromU32(config->battery_cal_milli));
-    replaceToken(html, "{{BATTERY_SECTION}}", battery_section);
-#else
-    replaceToken(html, "{{BATTERY_SECTION}}", std::string(""));
-#endif
+    AprsConfig aprs{};
+    APRS_SERVICE_GetConfig(&aprs);
+    replaceToken(html, "{{GPS_POWER_CHECKED}}", checkedAttr(aprs.gps_power_enabled));
     return html;
 }
 
@@ -780,6 +794,7 @@ std::string WifiConfigPortalView_BuildHomeCards(void)
     std::string html = "<div class=\"nav-cards\">";
     html += navCard("/wifi", "wifiConfig", "WiFi Config");
     html += navCard("/nrl", "nrlConfig", "NRL Config");
+    html += navCard("/serial", "serialGpsConfig", "Serial / GPS Config");
     html += navCard("/audio", "audioSettings", "Audio Settings");
     html += navCard("/media", "mediaConfig", "Media / Nanny");
     html += navCard("/aprs", "aprsConfig", "APRS");
@@ -822,6 +837,9 @@ std::string WifiConfigPortalView_BuildConfigPage(const ExternalRadioConfig *conf
     replaceToken(html, "{{SERVER_HOST}}", htmlEscape(config->server_host));
     replaceToken(html, "{{SERVER_PORT}}", fromU32(config->server_port));
     replaceToken(html, "{{CHANNEL}}", fromU32(config->channel));
+    // Only the BH4TDV 3188 board has channel-select GPIOs; hide the field elsewhere.
+    replaceToken(html, "{{CHANNEL_HIDDEN}}",
+                 NRL_BOARD == NRL_BOARD_BH4TDV ? "" : " hidden");
     replaceToken(html, "{{CALLSIGN}}", htmlEscape(config->callsign));
     replaceToken(html, "{{CALLSIGN_SSID}}", fromU32(config->callsign_ssid));
     replaceToken(html, "{{MIC_VOLUME}}", fromU32(config->mic_volume));

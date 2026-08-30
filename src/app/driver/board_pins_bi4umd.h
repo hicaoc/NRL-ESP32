@@ -16,6 +16,12 @@
 #define NRL_PIN_LED_AUDIO       -1
 #define NRL_PIN_LED_NET         -1
 
+// Single XL-5050RGBC-WS2812B RGB LED on the display mainboard. Data in on
+// GPIO42 = module physical pin 48 (MTMS). Shows R=TX, G=network audio,
+// B=server link (slow blink while the heartbeat is missing), like S31.
+#define NRL_PIN_WS2812_STATUS   42
+#define NRL_WS2812_INVERT_OUT   0
+
 #define NRL_PIN_PA_EN           1
 #define NRL_PIN_PA_EN_ACTIVE_LEVEL 0
 #define NRL_HAS_ES7210          0
