@@ -985,13 +985,16 @@ extern "C" void STATUS_IO_Poll(void)
         const bool sql_on = s_rf_sql_active;
         const bool ptt_on = s_tx_active || BH4TDV_RF_IO_IsTransmitting();
         (void)BH4TDV_RF_IO_SetStatusLeds(net_on, sql_on, ptt_on);
-        // The mainboard's single WS2812 mirrors the three PCA9555 lamps by
-        // priority: PTT red > SQL green > NET blue > off (NET slow-blinks
-        // with the heartbeat phase like the blue lamp).
+        // The mainboard's single WS2812 shows the audio direction:
+        //   red   = inbound network audio retransmitted through the radio,
+        //   green = local PTT uplink to the network (or RF squelch open),
+        //   blue  = server link (slow blink while the heartbeat is missing).
         if (s_ws2812 != nullptr) {
-            const uint8_t r = ptt_on ? 60 : 0;
-            const uint8_t g = (!ptt_on && sql_on) ? 60 : 0;
-            const uint8_t b = (!ptt_on && !sql_on && net_on) ? 60 : 0;
+            const bool radio_tx = BH4TDV_RF_IO_IsTransmitting();
+            const bool uplink = s_tx_active || sql_on;
+            const uint8_t r = radio_tx ? 60 : 0;
+            const uint8_t g = (!radio_tx && uplink) ? 60 : 0;
+            const uint8_t b = (!radio_tx && !uplink && net_on) ? 60 : 0;
             const uint32_t rgb = (static_cast<uint32_t>(r) << 16u) |
                                  (static_cast<uint32_t>(g) << 8u) | b;
             if (rgb != s_ws2812_rgb &&
