@@ -368,16 +368,24 @@ std::string WifiConfigPortalView_BuildDeviceSections(const ExternalRadioConfig *
     const uint8_t nrl_codec = NRLAudioBridge_GetVoiceCodec();
     replaceToken(html, "{{CODEC_G711_SELECTED}}", nrl_codec == 0u ? " selected" : "");
     replaceToken(html, "{{CODEC_OPUS_SELECTED}}", nrl_codec == 1u ? " selected" : "");
-#if NRL_BOARD_IS_GEZIPAI_FAMILY
-    std::string battery_section = std::string(kWifiConfigPortalBatterySectionTemplate);
-    replaceToken(battery_section, "{{BATT_RAW_MV}}", fromI32(Display_GetBatteryRawMv()));
-    replaceToken(battery_section, "{{BATT_CAL_MV}}", fromI32(Display_GetBatteryCalibratedMv()));
-    replaceToken(battery_section, "{{BATT_CAL_MILLI}}", fromU32(config->battery_cal_milli));
-    replaceToken(html, "{{BATTERY_SECTION}}", battery_section);
-#else
-    replaceToken(html, "{{BATTERY_SECTION}}", std::string(""));
-#endif
     return html;
+}
+
+// Battery calibration page (gezipai family boards only): raw/calibrated
+// readings plus the calibration scale, kept off the NRL page so the
+// radio-identity settings stay short.
+std::string WifiConfigPortalView_BuildBatterySections(const ExternalRadioConfig *config)
+{
+#if NRL_BOARD_IS_GEZIPAI_FAMILY
+    std::string html = std::string(kWifiConfigPortalBatterySectionTemplate);
+    replaceToken(html, "{{BATT_RAW_MV}}", fromI32(Display_GetBatteryRawMv()));
+    replaceToken(html, "{{BATT_CAL_MV}}", fromI32(Display_GetBatteryCalibratedMv()));
+    replaceToken(html, "{{BATT_CAL_MILLI}}", fromU32(config->battery_cal_milli));
+    return html;
+#else
+    (void)config;
+    return std::string("");
+#endif
 }
 
 // Serial / GPS page: UART1/UART2 parameters, the GPS power switch and the
@@ -794,19 +802,24 @@ std::string WifiConfigPortalView_BuildHomeCards(void)
     std::string html = "<div class=\"nav-cards\">";
     html += navCard("/wifi", "wifiConfig", "WiFi Config");
     html += navCard("/nrl", "nrlConfig", "NRL Config");
-    html += navCard("/serial", "serialGpsConfig", "Serial / GPS Config");
+    html += navCard("/fmo", "fmoConfig", "FMO Config");
     html += navCard("/audio", "audioSettings", "Audio Settings");
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+    html += navCard("/radio", "radioConfig", "RF Module");
+#endif
     html += navCard("/media", "mediaConfig", "Media / Nanny");
     html += navCard("/aprs", "aprsConfig", "APRS");
 #if NRL_HAS_SIGNALING
     html += navCard("/signaling", "signalingConfig", "Signaling / CTCSS");
 #endif
-    html += navCard("/fmo", "fmoConfig", "FMO");
+    html += navCard("/serial", "serialGpsConfig", "Serial / GPS Config");
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
-    html += navCard("/radio", "radioConfig", "RF Module");
     html += navCard("/sensors", "sensorStatus", "Sensors");
 #endif
     html += navCard("/update", "firmwareUpdate", "Firmware Update");
+#if NRL_BOARD_IS_GEZIPAI_FAMILY
+    html += navCard("/battery", "batteryConfig", "Battery");
+#endif
     html += "</div>";
     return html;
 }

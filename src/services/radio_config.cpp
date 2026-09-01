@@ -30,9 +30,20 @@ constexpr uint32_t kPersistMagic = 0x53523155u; // 'SR1U'
 // v4: adds radio_type (RJ11 board YAESU/MOTO select).
 constexpr uint8_t kPersistVersion = 4u;
 
-constexpr uint32_t kMinFreqHz = 400000000u;
-constexpr uint32_t kMaxFreqHz = 480000000u;
+// UHF modules (SR-110U) cover 400-480 MHz; the VHF sibling (SR-110V,
+// version string "110V-...") covers 136-174 MHz. Accept both bands and let
+// the module itself reject what its hardware cannot do.
+constexpr uint32_t kUhfMinFreqHz = 400000000u;
+constexpr uint32_t kUhfMaxFreqHz = 480000000u;
+constexpr uint32_t kVhfMinFreqHz = 136000000u;
+constexpr uint32_t kVhfMaxFreqHz = 174000000u;
 constexpr uint32_t kFreqStepHz = 2500u; // datasheet: 6.25K or 2K5 multiples
+
+bool freqInBand(const uint32_t hz)
+{
+    return (hz >= kUhfMinFreqHz && hz <= kUhfMaxFreqHz) ||
+           (hz >= kVhfMinFreqHz && hz <= kVhfMaxFreqHz);
+}
 
 struct PersistBlob {
     uint32_t magic;
@@ -121,11 +132,9 @@ bool toneValid(const RadioTone &tone)
 bool configValid(const RadioModuleConfig *config)
 {
     if (config == nullptr) return false;
-    const bool rx_ok = config->rx_freq_hz >= kMinFreqHz &&
-                       config->rx_freq_hz <= kMaxFreqHz &&
+    const bool rx_ok = freqInBand(config->rx_freq_hz) &&
                        config->rx_freq_hz % kFreqStepHz == 0u;
-    const bool tx_ok = config->tx_freq_hz >= kMinFreqHz &&
-                       config->tx_freq_hz <= kMaxFreqHz &&
+    const bool tx_ok = freqInBand(config->tx_freq_hz) &&
                        config->tx_freq_hz % kFreqStepHz == 0u;
     return rx_ok && tx_ok &&
            toneValid(config->rx_tone) && toneValid(config->tx_tone) &&
@@ -272,36 +281,64 @@ bool sendGroup(const RadioModuleConfig *config)
     const unsigned flag = (config->busy_lockout ? 1u : 0u) |
                           (config->narrowband ? 2u : 0u);
     const unsigned flag1 = config->low_power ? 1u : 0u;
-    length = snprintf(reinterpret_cast<char *>(wire + used), sizeof(wire) - used,
-                      ",%u,%u", flag, flag1);
-    if (length <= 0 || used + static_cast<size_t>(length) >= sizeof(wire)) return false;
-    used += static_cast<size_t>(length);
+    const size_t base_used = used; // freq+tone part; flags appended per variant
+
+    // Some module firmwares reject the Flag/Flag1 parameters outright
+    // ("+DMOGRP:1" even for ",0,0"). Fall back in steps: full command,
+    // factory-default flags, then no flag parameters at all (the H/L pin
+    // already carries the power selection on this board).
+    struct GroupVariant { bool with_flags; unsigned flag; unsigned flag1; };
+    const GroupVariant variants[3] = {
+        {true, flag, flag1},
+        {true, 0u, 0u},
+        {false, 0u, 0u},
+    };
 
     char response[48] = {};
-    {   // Full wire dump for manual verification (tones are raw bytes).
-        static const char kHex[] = "0123456789ABCDEF";
+    bool ok = false;
+    int tried = 0;
+    for (int v = 0; v < 3 && !ok; ++v) {
+        if (v == 1 && flag == 0u && flag1 == 0u) continue; // same as variant 0
+        used = base_used;
+        if (variants[v].with_flags) {
+            length = snprintf(reinterpret_cast<char *>(wire + used), sizeof(wire) - used,
+                              ",%u,%u", variants[v].flag, variants[v].flag1);
+            if (length <= 0 || used + static_cast<size_t>(length) >= sizeof(wire)) break;
+            used += static_cast<size_t>(length);
+        }
+        ++tried;
+        for (int attempt = 0; attempt < 2 && !ok; ++attempt) {
+            response[0] = 0;
+            ok = SR110U_CommandRaw(wire, used, response, sizeof(response), 800u) &&
+                 replyOk(response, "DMOGRP");
+            if (response[0] != 0) break;  // explicit reply (incl. :1); retry only silence
+            ESP_LOGW(TAG, "DMOGRP no reply (variant %d, attempt %d), retrying",
+                     v, attempt + 1);
+        }
+        vTaskDelay(pdMS_TO_TICKS(30));
+        ESP_LOGD(TAG, "DMOGRP rx: '%s'", response);
+        if (!ok && response[0] != 0) {
+            ESP_LOGW(TAG, "DMOGRP variant %d rejected: '%s'%s", v, response,
+                     v + 1 < 3 ? ", trying simpler form" : "");
+        }
+    }
+    if (!ok) {
+        static const char kHexE[] = "0123456789ABCDEF";
         char dump[3 * 80 + 1] = {};
         size_t n = 0u;
         for (size_t i = 0u; i < used; ++i) {
-            dump[n++] = kHex[wire[i] >> 4u];
-            dump[n++] = kHex[wire[i] & 0x0Fu];
+            dump[n++] = kHexE[wire[i] >> 4u];
+            dump[n++] = kHexE[wire[i] & 0x0Fu];
             dump[n++] = ' ';
         }
-        ESP_LOGD(TAG, "DMOGRP tx %u bytes: %s", static_cast<unsigned>(used), dump);
-    }
-    bool ok = false;
-    for (int attempt = 0; attempt < 2 && !ok; ++attempt) {
-        response[0] = 0;
-        ok = SR110U_CommandRaw(wire, used, response, sizeof(response), 800u) &&
-             replyOk(response, "DMOGRP");
-        if (response[0] != 0) break;  // explicit reply (incl. :1); retry only silence
-        ESP_LOGW(TAG, "DMOGRP no reply (attempt %d), retrying", attempt + 1);
-    }
-    vTaskDelay(pdMS_TO_TICKS(30));
-    ESP_LOGD(TAG, "DMOGRP rx: '%s'", response);
-    if (!ok) {
-        ESP_LOGE(TAG, "DMOGRP rejected: '%s' (rfv=%s tfv=%s flag=%u flag1=%u)",
-                 response, rx_freq, tx_freq, flag, flag1);
+        ESP_LOGE(TAG,
+                 "DMOGRP rejected after %d variant(s): '%s' (rfv=%s tfv=%s rxt=%u/%u txt=%u/%u flag=%u flag1=%u) tx: %s",
+                 tried, response, rx_freq, tx_freq,
+                 static_cast<unsigned>(config->rx_tone.type),
+                 static_cast<unsigned>(config->rx_tone.value),
+                 static_cast<unsigned>(config->tx_tone.type),
+                 static_cast<unsigned>(config->tx_tone.value),
+                 flag, flag1, dump);
     }
     return ok;
 }
@@ -400,6 +437,9 @@ bool RADIO_CONFIG_ApplyToModule(void)
     // The YAESU/MOTO select is a plain DC level; follow the config even while
     // the module is powered down or transmitting.
     (void)BH4TDV_RF_IO_SetYaesuMoto(config->radio_type == 1u);
+    // H/L power select must agree with the DMOGRP Flag1 power bit; it is a
+    // plain pin level, so apply it unconditionally like the radio-type line.
+    (void)BH4TDV_RF_IO_SetRadioLowPower(config->low_power);
 
     // The module rejects parameter commands while transmitting; never cut an
     // ongoing transmission just to push config. Callers report the deferred
@@ -412,8 +452,11 @@ bool RADIO_CONFIG_ApplyToModule(void)
 
     if (!config->enabled) {
         const bool ok = BH4TDV_RF_IO_SetRadioPower(false);
-        s_module_powered = !ok ? s_module_powered : false;
-        if (ok) ESP_LOGI(TAG, "module powered down");
+        if (ok) {
+            s_module_powered = false;
+            SR110U_NotifyPowerCycled();
+            ESP_LOGI(TAG, "module powered down");
+        }
         return ok;
     }
 
@@ -428,8 +471,8 @@ bool RADIO_CONFIG_ApplyToModule(void)
         return false;
     }
 
-    // RJ11 board: the H/L pin is gone (P1.4 is the radio-type select now), so
-    // the power level reaches the module only through DMOGRP Flag1.
+    // The H/L pin (P1.0) and the DMOGRP Flag1 power bit are both applied;
+    // modules that reject Flag1 still get the power level via the H/L wire.
     bool ok = true;
     if (s_dirty & kDirtyGroup) {
         const bool r = sendGroup(config);
@@ -475,7 +518,7 @@ bool RADIO_CONFIG_ParseFreqMHz(const char *text, uint32_t *out_hz)
     const double mhz = strtod(text, &end);
     if (end == text || *end != '\0' || mhz <= 0.0) return false;
     const uint32_t hz = static_cast<uint32_t>(mhz * 1000000.0 + 0.5);
-    if (hz < kMinFreqHz || hz > kMaxFreqHz || hz % kFreqStepHz != 0u) {
+    if (!freqInBand(hz) || hz % kFreqStepHz != 0u) {
         return false;
     }
     *out_hz = hz;

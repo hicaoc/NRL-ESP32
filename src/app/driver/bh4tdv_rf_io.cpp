@@ -20,14 +20,16 @@ constexpr uint8_t kRegConfig0 = 0x06u;
 // Port 0 outputs: P0.2 NET / P0.3 SQL / P0.4 PTT status LEDs (active low --
 // the pin sinks the LED current) and P0.6 GPS_EN.
 constexpr uint8_t kConfig0 = 0xA3u;
-// Port 1 outputs: P1.1 PD, P1.2 PTT1, P1.4 YAESU/MOTO radio-type select
-// (RJ11 board; the old H/L power line is gone).
-constexpr uint8_t kConfig1 = 0xE9u;
+// Port 1 outputs: P1.0 H/L power select, P1.1 PD, P1.2 PTT1, P1.4
+// YAESU/MOTO radio-type select (RJ11 board; HL_IN restored so it stays in
+// sync with the DMOGRP Flag1 power bit).
+constexpr uint8_t kConfig1 = 0xE8u;
 constexpr uint8_t kP0LedNet = 1u << 2;
 constexpr uint8_t kP0LedSql = 1u << 3;
 constexpr uint8_t kP0LedPtt = 1u << 4;
 constexpr uint8_t kP0LedsOff = kP0LedNet | kP0LedSql | kP0LedPtt; // high = off
 constexpr uint8_t kP0GpsEnable = 1u << 6;
+constexpr uint8_t kP1HlIn = 1u << 0;       // 0 = low power (grounded), 1 = high power
 constexpr uint8_t kP1RadioPower = 1u << 1;
 constexpr uint8_t kP1RadioPtt = 1u << 2;
 constexpr uint8_t kP1Sql = 1u << 3;
@@ -103,8 +105,9 @@ bool BH4TDV_RF_IO_Init(void)
     }
 
     // Program safe output latches before enabling any output driver. PTT and
-    // PD stay off, the radio-type select stays low (non-YAESU/MOTO), and the
-    // three status LEDs are driven high (off, active-low wiring).
+    // PD stay off, H/L stays low (low power), the radio-type select stays
+    // low (non-YAESU/MOTO), and the three status LEDs are driven high (off,
+    // active-low wiring).
     s_output0 = kP0LedsOff;
     s_output1 = 0u;
     if (!writePair(kRegOutput0, s_output0, s_output1) ||
@@ -163,7 +166,11 @@ bool BH4TDV_RF_IO_Read(uint8_t *keys, bool *sql_active)
     if ((input[1] & kP1KeyUp) == 0u) pressed |= BH4TDV_RF_KEY_UP;
     if ((input[1] & kP1KeyConfirm) == 0u) pressed |= BH4TDV_RF_KEY_CONFIRM;
     *keys = pressed;
-    *sql_active = (input[1] & kP1Sql) == 0u;
+    // A powered-down module leaves its SQL output floating; never report it
+    // as squelch-open, or the uplink gate keys the NRL network as if PTT
+    // were held the moment the radio module is disabled.
+    const bool radio_powered = (s_output1 & kP1RadioPower) != 0u;
+    *sql_active = radio_powered && (input[1] & kP1Sql) == 0u;
     return true;
 }
 
@@ -191,6 +198,15 @@ bool BH4TDV_RF_IO_IsTransmitting(void)
 bool BH4TDV_RF_IO_SetYaesuMoto(const bool yaesu_moto)
 {
     return setOutput(1u, kP1YaesuMoto, yaesu_moto);
+}
+
+bool BH4TDV_RF_IO_SetRadioLowPower(const bool low_power)
+{
+    // Module H/L pin: grounded = low power, floating = high power; a hard
+    // high level must never be applied. A PCA9555 output '1' is only a weak
+    // pull-up, so it leaves the module in high power without violating the
+    // datasheet rule. Keep this in sync with the DMOGRP Flag1 power bit.
+    return setOutput(1u, kP1HlIn, !low_power);
 }
 
 // Status LEDs are active low: a set bit in the output latch turns the LED
@@ -223,6 +239,7 @@ bool BH4TDV_RF_IO_SetRadioPower(bool) { return false; }
 bool BH4TDV_RF_IO_SetRadioPtt(bool) { return false; }
 bool BH4TDV_RF_IO_IsTransmitting(void) { return false; }
 bool BH4TDV_RF_IO_SetYaesuMoto(bool) { return false; }
+bool BH4TDV_RF_IO_SetRadioLowPower(bool) { return false; }
 bool BH4TDV_RF_IO_SetStatusLeds(bool, bool, bool) { return false; }
 
 #endif

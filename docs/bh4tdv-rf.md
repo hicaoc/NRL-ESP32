@@ -44,11 +44,11 @@ BI4UMD 的 ILI9341 触摸屏、ES8311 音频、TF 卡、电池检测和 GPS 功�
 | P0.4 | — | PTT_LED | 输出 | 红灯，0=点亮；射频发射中 |
 | P0.6 | pin 10 / IO6 | GPS_EN | 输出 | 1=GPS 上电 |
 | P0.7 | pin 11 / IO10 | IO_EXT_01 | 输入 | 预留，高阻 |
-| P1.0 | — | NC | 输入 | 未使用，高阻 |
+| P1.0 | — | HL_IN | 输出 | 0=低功率（接地），1=高功率（弱上拉等效悬空）；与 DMOGRP Flag1 保持一致 |
 | P1.1 | — | PD | 输出 | 1=SR-110U 开机，0=关机 |
 | P1.2 | — | PTT1 | 输出 | 1=发射，0=接收；板上 MOS 管转换为模块 PTT 低有效 |
 | P1.3 | — | SQL | 输入 | 0=收到射频信号，1=无信号 |
-| P1.4 | — | YAESU/MOTO | 输出 | 1=YAESU/MOTO 电台，0=其它电台（RJ11 版，原 HL_IN 已取消；高低功率仅由 DMOGRP Flag1 控制） |
+| P1.4 | — | YAESU/MOTO | 输出 | 1=YAESU/MOTO 电台，0=其它电台 |
 | P1.5 | — | KEY_C | 输入 | 三向键 PRESS，0=按下 |
 | P1.6 | — | KEY_B | 输入 | 三向键 UP，0=按下 |
 | P1.7 | — | KEY_A | 输入 | 三向键 DOWN，0=按下 |
@@ -56,7 +56,7 @@ BI4UMD 的 ILI9341 触摸屏、ES8311 音频、TF 卡、电池检测和 GPS 功�
 方向寄存器：
 
 - Configuration Port 0：`0xA3`；
-- Configuration Port 1：`0xE9`。
+- Configuration Port 1：`0xE8`。
 
 ### 3.2 安全初始化
 
@@ -65,7 +65,7 @@ PCA9555 上电后全部端口是输入，输出锁存器默认是高。为避免
 
 1. 探测地址 `0x20`；
 2. 先写 Output Port 0；默认 `GPS_EN=0`，三颗状态 LED 置高（熄灭）；
-3. 再写 Output Port 1；默认 `PD=0`、`PTT1=0`、`YAESU/MOTO=0`（其它电台）；
+3. 再写 Output Port 1；默认 `PD=0`、`PTT1=0`、`HL_IN=0`（低功率）、`YAESU/MOTO=0`（其它电台）；
 4. 最后写两个 Configuration 寄存器；
 5. 清读两个 Input Port；
 6. 业务层要求开机时才置 `PD=1`，等待至少 500 ms 后访问 SR-110U 串口。

@@ -29,6 +29,11 @@
     label{display:block;margin:0 0 6px;font-weight:700;font-size:13px;}
     input,select{width:100%;min-height:40px;padding:9px 10px;border:1px solid #c5ced8;border-radius:6px;font-size:15px;background:#fff;color:var(--ink);}
     input:disabled,select:disabled{background:#eef2f5;color:#7a8490;border-color:#d7dee7;opacity:1;cursor:not-allowed;}
+    .nrl-server-field{position:relative;}
+    .nrl-server-suggest{position:absolute;top:calc(100% + 3px);left:0;right:0;z-index:60;max-height:320px;overflow-y:auto;background:#fff;border:1px solid #c5ced8;border-radius:6px;box-shadow:0 8px 20px rgba(15,25,35,.18);}
+    .nrl-server-suggest .nrl-server-row{padding:5px 10px;font-size:13px;line-height:1.35;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .nrl-server-suggest .nrl-server-row:hover,.nrl-server-suggest .nrl-server-row.active{background:#e7f0fa;}
+    .nrl-server-suggest .nrl-server-row.active{outline:1px solid #bcd6f2;}
     input[type=checkbox]{width:auto;min-height:0;margin-right:8px;}
     .row{display:flex;gap:10px;align-items:center;flex-wrap:nowrap;}
     .row select{flex:1;min-width:220px;width:auto;}

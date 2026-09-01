@@ -4,7 +4,7 @@
   <div class="grid">
     <form class="item-form span-2" method="post" action="/save_nrl">
       <div class="subgrid">
-        <div><label data-i18n="serverHost">Server Host / IP</label><select id="nrl-server-select" name="server_host"><option value="{{SERVER_HOST}}" data-port="{{SERVER_PORT}}" selected>{{SERVER_HOST}}</option></select><div class="hint" id="nrl-server-current" role="button" tabindex="0">Current NRL server: {{SERVER_HOST}}:{{SERVER_PORT}}</div><div class="hint" id="nrl-server-status" data-i18n="serverListLoading">Loading server list...</div></div>
+        <div><label data-i18n="serverHost">Server Host / IP</label><div class="nrl-server-field"><input id="nrl-server-host" name="server_host" value="{{SERVER_HOST}}" data-i18n-title="serverHostHint" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="hostname or IP address"><datalist id="nrl-server-options"><option value="{{SERVER_HOST}}" data-port="{{SERVER_PORT}}"></datalist><div id="nrl-server-suggest" class="nrl-server-suggest" hidden role="listbox"></div></div><div class="hint" id="nrl-server-current" role="button" tabindex="0">Current NRL server: {{SERVER_HOST}}:{{SERVER_PORT}}</div><div class="hint" id="nrl-server-status" data-i18n="serverListLoading">Loading server list...</div></div>
         <div><label data-i18n="serverPort">Server Port</label><input id="nrl-server-port" name="server_port" value="{{SERVER_PORT}}"></div>
       </div>
       <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div>
@@ -27,7 +27,7 @@
       <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div>
     </form>
   </div>
-</section>{{BATTERY_SECTION}}
+</section>
 <!-- @endtemplate -->
 
 <!-- @template BATTERY_SECTION -->

@@ -31,7 +31,7 @@ struct RadioModuleConfig {
     RadioTone tx_tone;
     bool busy_lockout;   // DMOGRP Flag bit0: busy channel lockout (遇忙禁发)
     bool narrowband;     // DMOGRP Flag bit1: 0=wide 1=narrow
-    bool low_power;      // DMOGRP Flag1 bit0 (UART-only; the RJ11 board has no H/L pin)
+    bool low_power;      // DMOGRP Flag1 bit0 + PCA9555 P1.0 H/L pin (must agree)
     uint8_t radio_type;  // 0 = other radios (P1.4 low), 1 = YAESU/MOTO (P1.4 high)
     uint8_t squelch;     // 0..8
     uint8_t mic_level;   // 0..8, module default 5

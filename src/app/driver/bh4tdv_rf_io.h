@@ -25,8 +25,12 @@ bool BH4TDV_RF_IO_SetRadioPtt(bool transmit);
 // Current radio PTT output state (driven from the PCA9555 output latch).
 bool BH4TDV_RF_IO_IsTransmitting(void);
 // Drives the PCA9555 P1.4 radio-type select: true = YAESU/MOTO (high),
-// false = other radios (low). (RJ11 board; the old H/L line is gone.)
+// false = other radios (low).
 bool BH4TDV_RF_IO_SetYaesuMoto(bool yaesu_moto);
+// Drives the PCA9555 P1.0 H/L power select: true = low power (pin grounded),
+// false = high power (weak pull-up, i.e. floating). Must follow the DMOGRP
+// Flag1 power bit.
+bool BH4TDV_RF_IO_SetRadioLowPower(bool low_power);
 // NET/SQL/PTT status LEDs on PCA9555 P0.2/P0.3/P0.4, active low. Arguments
 // are logical on/off; one I2C write, skipped when nothing changes.
 bool BH4TDV_RF_IO_SetStatusLeds(bool net, bool sql, bool ptt);

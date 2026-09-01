@@ -3,13 +3,14 @@ const translations = {
         language: 'Language',
         wifiConfig: 'WiFi Config',
         nrlConfig: 'NRL Config',
+        batteryConfig: 'Battery',
         serialGpsConfig: 'Serial / GPS Config',
         audioSettings: 'Audio Settings',
         firmwareUpdate: 'Firmware Update',
         homeTitle: 'Configuration',
         homeIntro: 'Choose the settings page to open.',
         backHome: 'Back to home',
-        fmoConfig: 'FMO',
+        fmoConfig: 'FMO Config',
         configAp: 'Config AP',
         stationIp: 'Station IP',
         bootNotice: 'Hold BOOT for 5 seconds after startup to reset WiFi settings.',
@@ -18,6 +19,8 @@ const translations = {
         wifiIntro: 'Set the WiFi network the device should join.',
         nrlHeadline: 'NRL Config',
         nrlIntro: 'Set server address and radio identity.',
+        batteryHeadline: 'Battery',
+        batteryIntro: 'Calibrate the on-board battery sense against a multimeter.',
         serialGpsHeadline: 'Serial / GPS Config',
         serialGpsIntro: 'Set UART parameters and GPS module power; live GPS status is shown below.',
         audioHeadline: 'Audio Settings',
@@ -52,6 +55,7 @@ const translations = {
         scan: 'Scan',
         server: 'Server',
         serverHost: 'Server Host / IP',
+        serverHostHint: 'Pick from the list or type a custom hostname / IP address',
         serverPort: 'Server Port',
         currentNrlServer: 'Current NRL server',
         serverListLoading: 'Loading server list...',
@@ -347,13 +351,14 @@ const translations = {
         language: '语言',
         wifiConfig: 'WiFi配置',
         nrlConfig: 'NRL配置',
+        batteryConfig: '电池',
         serialGpsConfig: '串口 / GPS 配置',
         audioSettings: '音频设置',
         firmwareUpdate: '固件升级',
         homeTitle: '配置导航',
         homeIntro: '选择要打开的管理页面。',
         backHome: '返回导航首页',
-        fmoConfig: 'FMO',
+        fmoConfig: 'FMO配置',
         configAp: '配置热点',
         stationIp: '联网地址',
         bootNotice: '开机后按住 BOOT 5 秒可重置 WiFi 和服务器设置。',
@@ -362,6 +367,8 @@ const translations = {
         wifiIntro: '设置设备要连接的 WiFi 网络。',
         nrlHeadline: 'NRL配置',
         nrlIntro: '设置服务器地址和电台身份。',
+        batteryHeadline: '电池',
+        batteryIntro: '使用万用表校准板载电池电压采样。',
         serialGpsHeadline: '串口 / GPS 配置',
         serialGpsIntro: '设置串口参数和 GPS 电源，下方显示 GPS 实时状态。',
         audioHeadline: '音频设置',
@@ -396,6 +403,7 @@ const translations = {
         scan: '扫描',
         server: '服务器',
         serverHost: '服务器地址 / IP',
+        serverHostHint: '可从列表选择，也可直接输入自定义主机名 / IP 地址',
         serverPort: '服务器端口',
         currentNrlServer: '当前 NRL 服务器',
         serverListLoading: '正在加载服务器列表...',
@@ -1232,26 +1240,40 @@ Object.assign(translations.zh, {sensorStatus: '传感器', radioConfig: '射频�
       status.textContent = t(key).replace('{count}', String(count || 0));
     }
 
+    function findNrlServerOption(host) {
+      const list = document.getElementById('nrl-server-options');
+      if (!list) return null;
+      const value = String(host || '').trim();
+      if (!value) return null;
+      return Array.prototype.find.call(list.options, (opt) => opt.value === value) || null;
+    }
+
     function syncNrlServerPort() {
-      const select = document.getElementById('nrl-server-select');
+      const host = document.getElementById('nrl-server-host');
       const port = document.getElementById('nrl-server-port');
-      if (!select || !port || select.selectedIndex < 0) return;
-      const selected = select.options[select.selectedIndex];
+      if (!host || !port) return;
+      const selected = findNrlServerOption(host.value);
       if (selected && selected.dataset.port) port.value = selected.dataset.port;
       updateNrlServerCurrent();
     }
 
     function updateNrlServerCurrent() {
-      const select = document.getElementById('nrl-server-select');
+      const host = document.getElementById('nrl-server-host');
       const current = document.getElementById('nrl-server-current');
-      if (!select || !current || select.selectedIndex < 0) return;
-      const selected = select.options[select.selectedIndex];
+      if (!host || !current) return;
+      const value = String(host.value || '').trim();
+      if (!value) {
+        current.textContent = t('currentNrlServer') + ': ---';
+        return;
+      }
+      const option = findNrlServerOption(value);
+      const name = option && option.dataset.name ? option.dataset.name : '';
       current.textContent = t('currentNrlServer') + ': ' +
-                            (selected ? selected.textContent : '---');
+                            (name ? name + ' (' + value + ')' : value);
     }
 
     function renderNrlServers(payload, currentHost, currentPort) {
-        const select = document.getElementById('nrl-server-select');
+        const list = document.getElementById('nrl-server-options');
         const servers = (payload && payload.data && Array.isArray(payload.data.items)
           ? payload.data.items
           : payload && Array.isArray(payload.data) ? payload.data : [])
@@ -1259,50 +1281,164 @@ Object.assign(translations.zh, {sensorStatus: '传感器', radioConfig: '射频�
                             Number(item.port) > 0 && Number(item.port) <= 65535)
           .sort((a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0));
         if (!servers.length) throw new Error('empty server list');
-        select.innerHTML = '';
-        let matched = false;
+        list.innerHTML = '';
         servers.forEach((server) => {
           const host = platformServerHost(server.host);
           const serverPort = String(server.port);
           const option = document.createElement('option');
           option.value = host;
           option.dataset.port = serverPort;
-          option.textContent = String(server.name || host) + ' · ' + host + ':' + serverPort +
-                               ' · ' + String(Number(server.online) || 0) + '/' +
-                               String(Number(server.total) || 0);
-          if (!matched && host === platformServerHost(currentHost) && serverPort === currentPort) {
-            option.selected = true;
-            matched = true;
-          }
-          select.appendChild(option);
+          option.dataset.name = String(server.name || '');
+          option.label = String(server.name || host) + ' · ' + host + ':' + serverPort +
+                         ' · ' + String(Number(server.online) || 0) + '/' +
+                         String(Number(server.total) || 0);
+          list.appendChild(option);
         });
-        if (!matched && currentHost) {
+        if (currentHost && !findNrlServerOption(currentHost)) {
           const option = document.createElement('option');
           option.value = currentHost;
           option.dataset.port = currentPort;
-          option.textContent = currentHost + ':' + currentPort;
-          option.selected = true;
-          select.insertBefore(option, select.firstChild);
+          option.label = currentHost + ':' + currentPort;
+          list.insertBefore(option, list.firstChild);
         }
         updateNrlServerCurrent();
+        if (nrlServerSuggestVisible()) renderNrlServerSuggest();
         return servers.length;
     }
 
-    async function loadNrlServers() {
-      const select = document.getElementById('nrl-server-select');
-      const port = document.getElementById('nrl-server-port');
-      if (!select || !port) return;
-      const currentHost = select.value;
-      const currentPort = port.value;
-      select.addEventListener('change', () => {
-        syncNrlServerPort();
-        if (select.form) submitFormFromButton(select.form);
+    let nrlSuggestActive = -1;
+
+    function nrlServerSuggestRows() {
+      const suggest = document.getElementById('nrl-server-suggest');
+      if (!suggest) return [];
+      return Array.prototype.slice.call(suggest.children);
+    }
+
+    function nrlServerSuggestVisible() {
+      const suggest = document.getElementById('nrl-server-suggest');
+      return !!suggest && !suggest.hidden;
+    }
+
+    function setActiveNrlServerRow(index) {
+      const rows = nrlServerSuggestRows();
+      nrlSuggestActive = index;
+      rows.forEach((row, i) => {
+        row.classList.toggle('active', i === index);
+        if (i === index && row.scrollIntoView) row.scrollIntoView({block: 'nearest'});
       });
+    }
+
+    function renderNrlServerSuggest() {
+      const suggest = document.getElementById('nrl-server-suggest');
+      const host = document.getElementById('nrl-server-host');
+      if (!suggest || !host) return;
+      const typed = String(host.value || '').trim().toLowerCase();
+      const list = document.getElementById('nrl-server-options');
+      const options = list ? Array.prototype.filter.call(list.options, (opt) =>
+        !typed || opt.value.toLowerCase().includes(typed) ||
+        String(opt.label || '').toLowerCase().includes(typed)) : [];
+      suggest.innerHTML = '';
+      options.forEach((opt) => {
+        const row = document.createElement('div');
+        row.className = 'nrl-server-row';
+        row.setAttribute('role', 'option');
+        row.dataset.value = opt.value;
+        row.dataset.port = opt.dataset.port || '';
+        row.textContent = opt.label || opt.value;
+        suggest.appendChild(row);
+      });
+      nrlSuggestActive = -1;
+    }
+
+    function openNrlServerSuggest() {
+      const suggest = document.getElementById('nrl-server-suggest');
+      if (!suggest) return;
+      renderNrlServerSuggest();
+      suggest.hidden = false;
+    }
+
+    function closeNrlServerSuggest() {
+      const suggest = document.getElementById('nrl-server-suggest');
+      if (!suggest) return;
+      suggest.hidden = true;
+      nrlSuggestActive = -1;
+    }
+
+    function pickNrlServerRow(row) {
+      const host = document.getElementById('nrl-server-host');
+      if (!host || !row) return;
+      host.value = row.dataset.value || '';
+      if (row.dataset.port) {
+        const port = document.getElementById('nrl-server-port');
+        if (port) port.value = row.dataset.port;
+      }
+      closeNrlServerSuggest();
+      updateNrlServerCurrent();
+      if (host.form) submitFormFromButton(host.form);
+    }
+
+    async function loadNrlServers() {
+      const host = document.getElementById('nrl-server-host');
+      const port = document.getElementById('nrl-server-port');
+      if (!host || !port) return;
+      const currentHost = host.value;
+      const currentPort = port.value;
+      let lastAutoSaved = null;
+      host.addEventListener('change', () => {
+        syncNrlServerPort();
+        const value = String(host.value || '').trim();
+        // Auto-save only when an entry is picked from the server list; a
+        // manually typed custom host/IP is saved via the Save button.
+        if (value && findNrlServerOption(value) && value !== lastAutoSaved && host.form) {
+          lastAutoSaved = value;
+          submitFormFromButton(host.form);
+        }
+      });
+      host.addEventListener('focus', openNrlServerSuggest);
+      host.addEventListener('input', () => {
+        renderNrlServerSuggest();
+        const suggest = document.getElementById('nrl-server-suggest');
+        if (suggest) suggest.hidden = false;
+      });
+      host.addEventListener('blur', () => setTimeout(closeNrlServerSuggest, 120));
+      host.addEventListener('keydown', (event) => {
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault();
+          if (!nrlServerSuggestVisible()) {
+            openNrlServerSuggest();
+            return;
+          }
+          const rows = nrlServerSuggestRows();
+          if (!rows.length) return;
+          const delta = event.key === 'ArrowDown' ? 1 : -1;
+          setActiveNrlServerRow((nrlSuggestActive + delta + rows.length) % rows.length);
+        } else if (event.key === 'Enter') {
+          if (nrlServerSuggestVisible() && nrlSuggestActive >= 0) {
+            event.preventDefault();
+            pickNrlServerRow(nrlServerSuggestRows()[nrlSuggestActive]);
+          }
+        } else if (event.key === 'Escape') {
+          closeNrlServerSuggest();
+        }
+      });
+      const suggest = document.getElementById('nrl-server-suggest');
+      if (suggest) {
+        suggest.addEventListener('click', (event) => {
+          const row = event.target.closest ? event.target.closest('.nrl-server-row') : null;
+          if (row) pickNrlServerRow(row);
+        });
+        suggest.addEventListener('mouseover', (event) => {
+          const row = event.target.closest ? event.target.closest('.nrl-server-row') : null;
+          if (!row) return;
+          const index = nrlServerSuggestRows().indexOf(row);
+          if (index >= 0) setActiveNrlServerRow(index);
+        });
+      }
       const current = document.getElementById('nrl-server-current');
       if (current) {
         const openPicker = () => {
-          if (typeof select.showPicker === 'function') select.showPicker();
-          else select.focus();
+          host.focus();
+          openNrlServerSuggest();
         };
         current.addEventListener('click', openPicker);
         current.addEventListener('keydown', (event) => {
