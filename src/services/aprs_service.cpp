@@ -2673,6 +2673,53 @@ extern "C" size_t APRS_SERVICE_GetStations(AprsStationInfo *out, size_t max_coun
     return count;
 }
 
+extern "C" bool APRS_SERVICE_FindStation(const char *callsign, AprsStationInfo *out)
+{
+    if (callsign == nullptr || out == nullptr || s_stations == nullptr) {
+        return false;
+    }
+    char base[10] = {};
+    size_t n = 0;
+    while (callsign[n] != '\0' && callsign[n] != '-' && n < sizeof(base) - 1u) {
+        base[n] = (char)toupper((unsigned char)callsign[n]);
+        ++n;
+    }
+    if (n == 0u) return false;
+    const uint32_t now = nowMs();
+    bool found = false;
+    lockStations();
+    for (size_t i = 0; i < kStationCount; ++i) {
+        if (!s_stations[i].used) continue;
+        const StationRec &rec = s_stations[i];
+        char rbase[10] = {};
+        size_t m = 0;
+        while (rec.name[m] != '\0' && rec.name[m] != '-' && m < sizeof(rbase) - 1u) {
+            rbase[m] = (char)toupper((unsigned char)rec.name[m]);
+            ++m;
+        }
+        if (m != n || memcmp(rbase, base, n) != 0) continue;
+        AprsStationInfo &info = *out;
+        memcpy(info.name, rec.name, sizeof(info.name));
+        memcpy(info.symbol, rec.symbol, sizeof(info.symbol));
+        info.lat = rec.lat;
+        info.lon = rec.lon;
+        info.altitude_m = rec.altitude_m;
+        info.speed_kmh = rec.speed_kmh;
+        info.course_deg = rec.course_deg;
+        info.derived_speed_kmh = rec.derived_speed_kmh;
+        info.distance_km = rec.distance_km;
+        info.bearing_deg = rec.bearing_deg;
+        info.age_s = (now - rec.last_heard_ms) / 1000u;
+        info.pkt_count = rec.pkt_count;
+        info.via_rf = rec.via_rf;
+        memcpy(info.comment, rec.comment, sizeof(info.comment));
+        found = true;
+        break;
+    }
+    unlockStations();
+    return found;
+}
+
 extern "C" uint32_t APRS_SERVICE_GetStationRevision(void)
 {
     return s_station_revision;

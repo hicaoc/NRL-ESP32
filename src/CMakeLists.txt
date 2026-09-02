@@ -41,6 +41,7 @@ set(app_sources
     services/ota_service.cpp
     services/radio_favorites.cpp
     services/server_list_store.cpp
+    services/speaker_info.cpp
     services/radio_config.cpp
     services/signaling_service.cpp
     services/smb_stream.cpp

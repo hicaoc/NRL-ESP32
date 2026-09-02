@@ -34,6 +34,8 @@
 #include <nvs.h>
 #include <sodium.h>
 
+#include <cJSON.h>
+
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -125,10 +127,21 @@ static TaskHandle_t s_discovery_task = nullptr;
 NRL_PSRAM_BSS static uint8_t s_raw[kRawMaxSize];
 static size_t s_raw_size = 0u;
 static size_t s_raw_expected = 0u;
-// FMO/QSO/UID/<本机uid> 记录 JSON 的分块重组缓冲（载荷很小）。
+// FMO/QSO/UID/# 载荷的分块重组缓冲（载荷很小）。
 NRL_PSRAM_BSS static char s_qso_record[2048];
 static size_t s_qso_record_size = 0u;
 static size_t s_qso_record_expected = 0u;
+static uint32_t s_qso_record_uid = 0u;
+// 成员网格花名册：成员 JSON（{"callsign","isSpeaking","isHost","grid"}，QSO 会话内
+// 或 NRL 桥 type5 [json] 跨服务器转发）按呼号存网格，说话人位置显示的数据源。
+// 与原厂固件一致：网格随发言状态推送，精度 = 方格中心（±10km 级）。
+struct MemberGridSlot {
+    char callsign[8];
+    char grid[7];
+};
+constexpr size_t kMemberGridMax = 12u;
+static MemberGridSlot s_member_grids[kMemberGridMax];
+static size_t s_member_grids_next = 0u;
 NRL_PSRAM_BSS static FmoServer s_servers[kServerMax];
 static size_t s_server_count = 0u;
 static uint32_t s_server_generation = 0u;
@@ -585,14 +598,97 @@ static bool heartbeatUid(const esp_mqtt_event_t *event, uint32_t *uid)
     return true;
 }
 
-// "FMO/QSO/UID/<uid>" established-QSO record topic (only our own uid is
-// subscribed). Only the first data chunk carries the topic.
+// "FMO/QSO/UID/<uid>" topic（通配订阅；仅首个数据分片带 topic）。
 static bool qsoRecordTopic(const esp_mqtt_event_t *event)
 {
     static const char prefix[] = "FMO/QSO/UID/";
     return event->topic != nullptr && event->current_data_offset == 0 &&
            event->topic_len > static_cast<int>(sizeof(prefix) - 1u) &&
            memcmp(event->topic, prefix, sizeof(prefix) - 1u) == 0;
+}
+
+// 提取 "FMO/QSO/UID/<uid>" 尾段 uid（首个分片调用）。
+static uint32_t qsoTopicUid(const esp_mqtt_event_t *event)
+{
+    static const char prefix[] = "FMO/QSO/UID/";
+    if (event->topic == nullptr ||
+        event->topic_len <= static_cast<int>(sizeof(prefix) - 1u)) {
+        return 0u;
+    }
+    char tail[12];
+    const size_t tail_len =
+        static_cast<size_t>(event->topic_len) - (sizeof(prefix) - 1u);
+    if (tail_len == 0u || tail_len >= sizeof(tail)) return 0u;
+    memcpy(tail, event->topic + sizeof(prefix) - 1u, tail_len);
+    tail[tail_len] = '\0';
+    char *end = nullptr;
+    const unsigned long parsed = strtoul(tail, &end, 10);
+    if (end == tail || *end != '\0' || parsed > UINT32_MAX) return 0u;
+    return static_cast<uint32_t>(parsed);
+}
+
+static uint32_t ownUid()
+{
+    FmoIdentityStatus identity = {};
+    if (FMO_CERT_GetStatus(&identity) == ESP_OK && identity.ready) {
+        return identity.uid;
+    }
+    return 0u;
+}
+
+// 成员 JSON → 网格花名册。判定：有 callsign 且无 fromCallsign/logId（与完整
+// 记录 JSON 区分）；grid 4/6 位才收。
+static void storeMemberGrid(const char *data, size_t len)
+{
+    cJSON *root = cJSON_ParseWithLength(data, len);
+    if (root == nullptr) return;
+    const cJSON *cs = cJSON_GetObjectItemCaseSensitive(root, "callsign");
+    const cJSON *grid = cJSON_GetObjectItemCaseSensitive(root, "grid");
+    const bool is_member =
+        cJSON_IsString(cs) && cJSON_IsString(grid) &&
+        cJSON_GetObjectItemCaseSensitive(root, "fromCallsign") == nullptr &&
+        cJSON_GetObjectItemCaseSensitive(root, "logId") == nullptr;
+    if (is_member) {
+        char callsign[8] = {};
+        size_t n = 0;
+        const char *src = cs->valuestring;
+        while (src[n] != '\0' && src[n] != '-' && n < sizeof(callsign) - 1u) {
+            callsign[n] = static_cast<char>(
+                toupper(static_cast<unsigned char>(src[n])));
+            ++n;
+        }
+        const char *gsrc = grid->valuestring;
+        const size_t glen = strlen(gsrc);
+        char g[7] = {};
+        if ((glen == 4u || glen == 6u) && glen < sizeof(g)) {
+            for (size_t i = 0; i < glen; ++i) {
+                g[i] = static_cast<char>(
+                    toupper(static_cast<unsigned char>(gsrc[i])));
+            }
+        }
+        if (callsign[0] != '\0' && g[0] != '\0') {
+            portENTER_CRITICAL(&s_lock);
+            size_t slot = kMemberGridMax;
+            for (size_t i = 0; i < kMemberGridMax; ++i) {
+                if (strcmp(s_member_grids[i].callsign, callsign) == 0) {
+                    slot = i;
+                    break;
+                }
+            }
+            if (slot == kMemberGridMax) {
+                slot = s_member_grids_next;
+                s_member_grids_next =
+                    (s_member_grids_next + 1u) % kMemberGridMax;
+            }
+            snprintf(s_member_grids[slot].callsign,
+                     sizeof(s_member_grids[slot].callsign), "%s", callsign);
+            snprintf(s_member_grids[slot].grid,
+                     sizeof(s_member_grids[slot].grid), "%s", g);
+            portEXIT_CRITICAL(&s_lock);
+            ESP_LOGI(TAG, "member grid: %s [%s]", callsign, g);
+        }
+    }
+    cJSON_Delete(root);
 }
 
 static void mqttEvent(void *, esp_event_base_t, const int32_t event_id,
@@ -615,16 +711,10 @@ static void mqttEvent(void *, esp_event_base_t, const int32_t event_id,
         (void)esp_mqtt_client_subscribe(event->client, "FMO/RAW", 0);
         // Online-count source: every device heartbeats here ~once a minute.
         (void)esp_mqtt_client_subscribe(event->client, "FMO/LATE/UID_V1/#", 0);
-        // Established-QSO records addressed to us (FMO QSO signaling).
-        {
-            FmoIdentityStatus identity = {};
-            if (FMO_CERT_GetStatus(&identity) == ESP_OK && identity.ready) {
-                char topic[40];
-                snprintf(topic, sizeof(topic), "FMO/QSO/UID/%lu",
-                         static_cast<unsigned long>(identity.uid));
-                (void)esp_mqtt_client_subscribe(event->client, topic, 0);
-            }
-        }
+        // FMO/QSO/UID/# 通配订阅：成员 JSON（谁在讲话 + 网格，含桥转发的跨服务器
+        // 网格）进花名册供说话人位置显示；记录 JSON 仅当 topic uid==本机 uid 时落日志。
+        // 流量极小（实网抓包 20 分钟语音仅 8 条 QSO 消息），对 ESP32 无压力。
+        (void)esp_mqtt_client_subscribe(event->client, "FMO/QSO/UID/#", 0);
         portENTER_CRITICAL(&s_lock);
         s_status.connected = true;
         s_status.last_error = ESP_OK;
@@ -686,6 +776,7 @@ static void mqttEvent(void *, esp_event_base_t, const int32_t event_id,
                                 static_cast<int>(sizeof(s_qso_record))
                         ? static_cast<size_t>(event->total_data_len)
                         : 0u;
+                s_qso_record_uid = qsoTopicUid(event);
             }
             if (s_qso_record_expected == 0u || event->data_len <= 0 ||
                 static_cast<size_t>(event->current_data_offset) !=
@@ -700,8 +791,14 @@ static void mqttEvent(void *, esp_event_base_t, const int32_t event_id,
                    static_cast<size_t>(event->data_len));
             s_qso_record_size += static_cast<size_t>(event->data_len);
             if (s_qso_record_size == s_qso_record_expected) {
-                FMO_QSO_OnMqttRecord(s_qso_record,
-                                     static_cast<int>(s_qso_record_size));
+                // 成员 JSON 进网格花名册（任何 uid 的 topic 都收）；
+                // 通联记录只在发给我们时落日志（通配订阅下必须过滤）。
+                storeMemberGrid(s_qso_record, s_qso_record_size);
+                const uint32_t own = ownUid();
+                if (own != 0u && s_qso_record_uid == own) {
+                    FMO_QSO_OnMqttRecord(s_qso_record,
+                                         static_cast<int>(s_qso_record_size));
+                }
                 s_qso_record_size = 0u;
                 s_qso_record_expected = 0u;
             }
@@ -1350,6 +1447,31 @@ extern "C" void FMO_GetLinkStatus(FmoLinkStatus *status)
     portENTER_CRITICAL(&s_lock);
     *status = s_status;
     portEXIT_CRITICAL(&s_lock);
+}
+
+extern "C" bool FMO_LookupMemberGrid(const char *callsign, char out_grid[7])
+{
+    if (callsign == nullptr || out_grid == nullptr) return false;
+    out_grid[0] = '\0';
+    char base[8] = {};
+    size_t n = 0;
+    while (callsign[n] != '\0' && callsign[n] != '-' && n < sizeof(base) - 1u) {
+        base[n] = static_cast<char>(toupper(static_cast<unsigned char>(callsign[n])));
+        ++n;
+    }
+    if (n == 0u) return false;
+    bool found = false;
+    portENTER_CRITICAL(&s_lock);
+    for (size_t i = 0; i < kMemberGridMax; ++i) {
+        if (strcmp(s_member_grids[i].callsign, base) == 0 &&
+            s_member_grids[i].grid[0] != '\0') {
+            snprintf(out_grid, 7, "%s", s_member_grids[i].grid);
+            found = true;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&s_lock);
+    return found;
 }
 
 extern "C" bool FMO_IsSuperOnOwnServer(void)

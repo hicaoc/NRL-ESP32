@@ -19,6 +19,7 @@
 #include "../../services/display_notice.h"
 #include "../../services/espnow_link.h"
 #include "../../services/fmo_service.h"
+#include "../../services/speaker_info.h"
 #include "../../services/fmo_cert_store.h"
 #include "../../services/map_tiles.h"
 #include "../../services/music_player.h"
@@ -294,7 +295,7 @@ lv_obj_t *s_lbl_rx_codec = nullptr;
 char s_shown_rx_source[12] = {};
 char s_shown_rx_codec[12] = {};
 lv_obj_t *s_lbl_dmrid = nullptr;
-char s_shown_dmrid[20] = {};
+char s_shown_dmrid[96] = {};  // 复用为说话人信息行（网格|距离|方位|电台）
 lv_obj_t *s_lbl_callsign = nullptr;
 lv_obj_t *s_lbl_signaling = nullptr;
 lv_obj_t *s_lbl_ssid = nullptr;
@@ -6939,6 +6940,21 @@ void refreshHome()
     if (has_caller && remote_dmr_id != 0u) {
         snprintf(dmrid, sizeof(dmrid), "DMRID %lu",
                  static_cast<unsigned long>(remote_dmr_id));
+    } else if (has_fmo_caller || has_caller || has_espnow_caller) {
+        // 说话人附加信息（对齐 nrl-pulse）：网格|距离|方位 + 信标电台信息。
+        // NRL 呼叫方有 DMRID 时该行已被占用，无 DMRID 时同样显示。
+        const char *spk = has_fmo_caller ? fmo.voice_callsign
+                          : has_caller ? voice_call
+                          : espnow_peer;
+        SpeakerInfo info;
+        if (spk != nullptr && SPEAKER_INFO_Lookup(spk, &info)) {
+            char geo[48];
+            char rig[72];
+            SPEAKER_INFO_FormatGeo(&info, geo, sizeof(geo));
+            SPEAKER_INFO_FormatRig(&info, rig, sizeof(rig));
+            snprintf(dmrid, sizeof(dmrid), "%s%s%s", geo,
+                     (geo[0] != '\0' && rig[0] != '\0') ? " | " : "", rig);
+        }
     }
     setLabel(s_lbl_dmrid, s_shown_dmrid, sizeof(s_shown_dmrid), dmrid);
     if (s_lbl_callsign != nullptr) {

@@ -200,6 +200,11 @@ void APRS_SERVICE_GetGpsInfo(AprsGpsInfo *out);
 // number of entries copied. Bump-counter lets displays skip refreshes
 // (S31 FULL-mode renders are expensive).
 size_t APRS_SERVICE_GetStations(AprsStationInfo *out, size_t max_count);
+
+// Find one station by callsign (base match, ignores -SSID and case).
+// Returns false when not heard yet; the snapshot copy is thread-safe.
+// 供说话人信息（网格/距离/方位 + 信标电台信息）按呼号查询。
+bool APRS_SERVICE_FindStation(const char *callsign, AprsStationInfo *out);
 uint32_t APRS_SERVICE_GetStationRevision(void);
 
 // Last raw packet heard (TNC2 text, RF or IS) for the gezipai live ticker.

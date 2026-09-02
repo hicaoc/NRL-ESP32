@@ -48,6 +48,7 @@
 #include "../../services/fmo_service.h"
 #include "../../services/fmo_favorites.h"
 #include "../../services/server_list_store.h"
+#include "../../services/speaker_info.h"
 #include "../../services/fmo_cert_store.h"
 #include "../../services/fmo_qso.h"
 #include "../../services/fmo_qso_core.h"
@@ -4570,6 +4571,34 @@ void refreshCaller()
         } else {
             snprintf(call_text, sizeof(call_text), "----");
             snprintf(ssid_text, sizeof(ssid_text), "SSID -");
+        }
+    }
+
+    // 说话人附加信息（对齐 nrl-pulse：网格|距离|方位 + 信标电台信息），
+    // 追加到 SSID 行；各布局该标签均为 SCROLL_CIRCULAR，长文本自动滚动。
+    {
+        const char *spk = fmo_rx ? fmo.voice_callsign
+                          : (rx && voice_call[0] != '\0') ? voice_call
+                          : (espnow_rx && espnow_peer[0] != '\0') ? espnow_peer
+                          : nullptr;
+        if (spk != nullptr) {
+            SpeakerInfo info;
+            if (SPEAKER_INFO_Lookup(spk, &info)) {
+                char geo[48];
+                char rig[72];
+                SPEAKER_INFO_FormatGeo(&info, geo, sizeof(geo));
+                SPEAKER_INFO_FormatRig(&info, rig, sizeof(rig));
+                size_t used = strlen(ssid_text);
+                if (geo[0] != '\0' && used + 4u < sizeof(ssid_text)) {
+                    snprintf(ssid_text + used, sizeof(ssid_text) - used,
+                             " | %s", geo);
+                    used = strlen(ssid_text);
+                }
+                if (rig[0] != '\0' && used + 4u < sizeof(ssid_text)) {
+                    snprintf(ssid_text + used, sizeof(ssid_text) - used,
+                             " | %s", rig);
+                }
+            }
         }
     }
 

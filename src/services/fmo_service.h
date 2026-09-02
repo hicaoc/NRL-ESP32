@@ -72,6 +72,10 @@ bool FMO_SelectServer(size_t index, bool persist);
 // link is down or the publish could not be queued.
 bool FMO_PublishMessage(const char *topic, const char *data, int len);
 
+// 成员网格花名册（FMO/QSO/UID/# 成员 JSON，含 NRL 桥 [json] 跨服务器转发）。
+// 按呼号（忽略大小写/-SSID）查网格，供说话人位置显示；未收录返回 false。
+bool FMO_LookupMemberGrid(const char *callsign, char out_grid[7]);
+
 #ifdef __cplusplus
 }
 #endif
