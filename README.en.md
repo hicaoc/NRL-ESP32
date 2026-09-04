@@ -2,7 +2,7 @@
 
 [Chinese manual](README.md) · HTML: [Chinese](README.html) / [English](README.en.html)
 
-Current firmware version: `0.8.59`
+Current firmware version: `0.8.85`
 
 This project is an NRL network-radio bridge firmware primarily targeting ESP32-S31, while retaining support for ESP32-S3 boards. It brings radio audio, PTT, SQL, channel selection, SCI serial passthrough, and network configuration into one embedded application. Board targets use the appropriate audio codec, including ES8311 or ES8389; the project covers Moto3188/NRL hardware and ESP32-S31 development boards.
 
