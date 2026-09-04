@@ -6935,7 +6935,7 @@ void refreshHome()
     }
     setLabel(s_lbl_callsign, s_shown_callsign, sizeof(s_shown_callsign), call);
 
-    char dmrid[sizeof(s_shown_dmrid)] = {};
+    char dmrid[192] = {};
     const uint32_t remote_dmr_id = NRLAudioBridge_GetRemoteDmrId();
     if (has_caller && remote_dmr_id != 0u) {
         snprintf(dmrid, sizeof(dmrid), "DMRID %lu",

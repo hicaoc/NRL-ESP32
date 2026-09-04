@@ -110,6 +110,11 @@ if(IDF_TARGET STREQUAL "esp32s31")
     set(idf_btdm_le_header
         "$ENV{IDF_PATH}/components/bt/include/common/btdm_le.h")
     file(READ "${idf_s31_bt_header}" s31_bt_header_text)
+    # btdm_le.h was removed in IDF 6.2; the S31 esp_bt.h now defines the
+    # enums inline, so the GCC 16 overlay is no longer needed.  Guard the
+    # read so that older IDF layouts still work but missing files don't
+    # break CMake configuration.
+    if(EXISTS "${idf_btdm_le_header}")
     file(READ "${idf_btdm_le_header}" s31_btdm_le_text)
     string(FIND "${s31_btdm_le_text}"
         "typedef enum esp_power_level esp_power_level_t;" s31_bad_enum_forward)
@@ -134,6 +139,7 @@ if(IDF_TARGET STREQUAL "esp32s31")
             "${s31_bt_overlay}/common/btdm_le.h" COPYONLY)
         list(APPEND app_private_include_dirs
             "${s31_bt_overlay}/esp32s31/include")
+    endif()
     endif()
 endif()
 
