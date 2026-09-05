@@ -241,7 +241,14 @@ static bool i2s_setup(void) {
     s_i2s_tx_enabled = false;
     s_i2s_rx_enabled = false;
 
-    i2s_chan_config_t channel_config = I2S_CHANNEL_DEFAULT_CONFIG(kI2sPort, I2S_ROLE_MASTER);
+    // Field-by-field init instead of I2S_CHANNEL_DEFAULT_CONFIG: newer IDF
+    // masters reordered i2s_chan_config_t and their own macro no longer matches
+    // the declaration order (-Werror=missing-field-initializers). Zero-init
+    // covers the remaining defaults (allow_pd, intr_priority, destinations,
+    // dma_buffer_in_psram are all 0/false, I2S_DESTINATION_DMA == 0).
+    i2s_chan_config_t channel_config = {};
+    channel_config.id = kI2sPort;
+    channel_config.role = I2S_ROLE_MASTER;
     // Keep only a few 10 ms DMA frames queued. Larger rings hide scheduling
     // hiccups by building capture latency that can keep growing under load.
     channel_config.dma_desc_num = 3;
