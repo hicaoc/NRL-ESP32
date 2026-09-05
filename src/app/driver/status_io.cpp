@@ -1032,6 +1032,7 @@ namespace {
 bool s_ptt_active = false;
 bool s_nrl_ptt_active = false;
 bool s_fmo_ptt_active = false;
+bool s_soft_ptt_active = false;
 unsigned long s_last_heartbeat_rx_ms = 0UL;
 int s_last_sql1_level = -1;
 int s_last_sql2_level = -1;
@@ -1092,7 +1093,7 @@ extern "C" void STATUS_IO_Init(void)
 extern "C" void STATUS_IO_SetPttActive(const bool active)
 {
     s_nrl_ptt_active = active;
-    const bool combined = s_nrl_ptt_active || s_fmo_ptt_active;
+    const bool combined = s_nrl_ptt_active || s_fmo_ptt_active || s_soft_ptt_active;
     if (s_ptt_active != combined) {
         ESP_LOGI(TAG, "ptt_out=%u", combined ? 1u : 0u);
     }
@@ -1106,10 +1107,25 @@ extern "C" void STATUS_IO_SetPttActive(const bool active)
 extern "C" void STATUS_IO_SetFmoPttActive(const bool active)
 {
     s_fmo_ptt_active = active;
-    const bool combined = s_nrl_ptt_active || s_fmo_ptt_active;
+    const bool combined = s_nrl_ptt_active || s_fmo_ptt_active || s_soft_ptt_active;
     if (s_ptt_active != combined) {
         ESP_LOGI(TAG, "ptt_out=%u (FMO=%u)", combined ? 1u : 0u,
                  active ? 1u : 0u);
+    }
+    s_ptt_active = combined;
+    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, combined ? 1 : 0);
+    if (!ledSelftestActive(nrl_millis_now())) {
+        writeLed(NRL_PIN_STATUS_PTT_LED, combined);
+    }
+}
+
+extern "C" void STATUS_IO_SetSoftPtt(const bool held)
+{
+    s_soft_ptt_active = held;
+    const bool combined = s_nrl_ptt_active || s_fmo_ptt_active || s_soft_ptt_active;
+    if (s_ptt_active != combined) {
+        ESP_LOGI(TAG, "ptt_out=%u (soft=%u)", combined ? 1u : 0u,
+                 held ? 1u : 0u);
     }
     s_ptt_active = combined;
     gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, combined ? 1 : 0);

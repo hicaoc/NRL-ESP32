@@ -5,6 +5,7 @@
 #include "es7210.h"
 #include "es8311.h"
 #include "es8389.h"
+#include "vox.h"
 #include "../../lib/nrl_audio_config.h"
 #include "../../lib/nrl_bt_hfp.h"
 #include "../../services/config_notify.h"
@@ -73,6 +74,17 @@ constexpr uint16_t kMinVoicePayloadBytes = 160U;
 constexpr uint16_t kMaxVoicePayloadBytes = 500U;
 constexpr uint16_t kDefaultTailSuppressMs = 0U;       // disabled
 constexpr uint16_t kMaxTailSuppressMs = 5000U;
+constexpr int kMinVoxOpenDb = -80;
+constexpr int kMaxVoxOpenDb = -10;
+constexpr int kMinVoxCloseDb = -90;
+constexpr int kMaxVoxCloseDb = -15;
+constexpr int kDefaultVoxOpenDb = -40;
+constexpr int kDefaultVoxCloseDb = -48;
+constexpr uint16_t kDefaultVoxAttackMs = 30U;
+constexpr uint16_t kMaxVoxAttackMs = 500U;
+constexpr uint16_t kDefaultVoxHangMs = 600U;
+constexpr uint16_t kMinVoxHangMs = 100U;
+constexpr uint16_t kMaxVoxHangMs = 3000U;
 
 struct PersistedExternalRadioConfig {
     uint32_t magic;
@@ -120,11 +132,26 @@ struct PersistedExternalRadioConfig {
     uint32_t adceq_b2;
     uint8_t reserved4[4];
     ExternalWifiProfile wifi_extra[EXTERNAL_RADIO_MAX_WIFI_PROFILES - 1U];
+    // Software VOX extension, appended without a config version bump. Blobs
+    // written before these fields existed are kPersistedVoxExtensionBytes
+    // shorter; loadPersistedConfig() accepts both sizes and substitutes the
+    // defaults when the extension is absent.
+    uint8_t vox_enabled;
+    int8_t vox_open_db;
+    int8_t vox_close_db;
+    uint16_t vox_attack_ms;
+    uint16_t vox_hang_ms;
+    uint8_t vox_reserved;
     uint32_t crc32;
 } __attribute__((packed));
 
 static_assert(sizeof(PersistedExternalRadioConfig) <= 1024U,
               "device configuration must remain a small NVS blob");
+
+constexpr size_t kPersistedVoxExtensionBytes =
+    sizeof(PersistedExternalRadioConfig) -
+    offsetof(PersistedExternalRadioConfig, vox_enabled) - sizeof(uint32_t);
+static_assert(kPersistedVoxExtensionBytes == 8U, "VOX extension layout changed");
 
 ExternalRadioConfig s_config = {};
 bool s_loaded = false;
@@ -345,7 +372,7 @@ static void applyDefaultAdcConfig(void)
     s_config.adc_sync = true;
     s_config.adc_inv = false;
     s_config.adc_ramclr = false;
-    s_config.adc_scale = 4U;
+    s_config.adc_scale = 7U;
     s_config.alc_enabled = false;
     s_config.adc_automute_enabled = false;
     s_config.alc_winsize = 0U;
@@ -379,6 +406,11 @@ static void applyDefaultAudioConfig(void)
     s_config.mic_hpf_enabled = true;
     s_config.bt_enabled = false;
     s_config.wifi_enabled = true;
+    s_config.vox_enabled = false;
+    s_config.vox_open_db = kDefaultVoxOpenDb;
+    s_config.vox_close_db = kDefaultVoxCloseDb;
+    s_config.vox_attack_ms = kDefaultVoxAttackMs;
+    s_config.vox_hang_ms = kDefaultVoxHangMs;
 }
 
 static void loadAdcRegisters(const uint8_t reg14,
@@ -626,6 +658,21 @@ static void normalizeConfig(void)
     if (s_config.tail_suppress_ms > kMaxTailSuppressMs) {
         s_config.tail_suppress_ms = kMaxTailSuppressMs;
     }
+    if (s_config.vox_open_db < kMinVoxOpenDb || s_config.vox_open_db > kMaxVoxOpenDb) {
+        s_config.vox_open_db = kDefaultVoxOpenDb;
+    }
+    if (s_config.vox_close_db < kMinVoxCloseDb || s_config.vox_close_db > kMaxVoxCloseDb) {
+        s_config.vox_close_db = kDefaultVoxCloseDb;
+    }
+    if (s_config.vox_close_db > s_config.vox_open_db - 2) {
+        s_config.vox_close_db = static_cast<int8_t>(s_config.vox_open_db - 2);
+    }
+    if (s_config.vox_attack_ms > kMaxVoxAttackMs) {
+        s_config.vox_attack_ms = kDefaultVoxAttackMs;
+    }
+    if (s_config.vox_hang_ms < kMinVoxHangMs || s_config.vox_hang_ms > kMaxVoxHangMs) {
+        s_config.vox_hang_ms = kDefaultVoxHangMs;
+    }
 #if !defined(NRL_ENABLE_AEC) || !NRL_ENABLE_AEC
     s_config.aec_enabled = false;
 #endif
@@ -645,12 +692,24 @@ static bool loadPersistedConfig(void)
     const esp_err_t read_error = nvs_get_blob(
         nvs, kConfigNvsKey, &persisted, &size);
     nvs_close(nvs);
-    const uint32_t expected_crc = esp_rom_crc32_le(
-        0u, reinterpret_cast<const uint8_t *>(&persisted),
-        offsetof(PersistedExternalRadioConfig, crc32));
-    if (read_error != ESP_OK || size != sizeof(persisted) ||
+    // Blobs saved before the VOX extension existed are kPersistedVoxExtensionBytes
+    // shorter; both sizes are accepted and an absent extension loads as defaults.
+    // The trailing CRC sits at size-4 in either layout.
+    if (read_error != ESP_OK ||
+        (size != sizeof(persisted) &&
+         size != sizeof(persisted) - kPersistedVoxExtensionBytes) ||
         persisted.magic != kConfigMagic ||
-        persisted.version != kConfigVersion || persisted.crc32 != expected_crc) {
+        persisted.version != kConfigVersion) {
+        return false;
+    }
+    const bool has_vox_extension = size == sizeof(persisted);
+    const size_t crc_offset = size - sizeof(uint32_t);
+    uint32_t stored_crc = 0U;
+    memcpy(&stored_crc, reinterpret_cast<const uint8_t *>(&persisted) + crc_offset,
+           sizeof(stored_crc));
+    const uint32_t expected_crc = esp_rom_crc32_le(
+        0u, reinterpret_cast<const uint8_t *>(&persisted), crc_offset);
+    if (stored_crc != expected_crc) {
         return false;
     }
 
@@ -798,6 +857,19 @@ static bool loadPersistedConfig(void)
         s_config.tail_suppress_ms = 0U;
         s_config.mic_pcm_gain_milli = 0U;
     }
+    if (has_vox_extension) {
+        s_config.vox_enabled = persisted.vox_enabled == kPersistedFlagOn;
+        s_config.vox_open_db = persisted.vox_open_db;
+        s_config.vox_close_db = persisted.vox_close_db;
+        s_config.vox_attack_ms = persisted.vox_attack_ms;
+        s_config.vox_hang_ms = persisted.vox_hang_ms;
+    } else {
+        s_config.vox_enabled = false;
+        s_config.vox_open_db = kDefaultVoxOpenDb;
+        s_config.vox_close_db = kDefaultVoxCloseDb;
+        s_config.vox_attack_ms = kDefaultVoxAttackMs;
+        s_config.vox_hang_ms = kDefaultVoxHangMs;
+    }
     normalizeConfig();
     return true;
 }
@@ -868,6 +940,11 @@ static bool savePersistedConfig(void)
     persisted.reserved2[3] = static_cast<uint8_t>((s_config.tail_suppress_ms >> 8) & 0xFFU);
     persisted.reserved2[4] = static_cast<uint8_t>(s_config.mic_pcm_gain_milli & 0xFFU);
     persisted.reserved2[5] = static_cast<uint8_t>((s_config.mic_pcm_gain_milli >> 8) & 0xFFU);
+    persisted.vox_enabled = s_config.vox_enabled ? kPersistedFlagOn : kPersistedFlagOff;
+    persisted.vox_open_db = s_config.vox_open_db;
+    persisted.vox_close_db = s_config.vox_close_db;
+    persisted.vox_attack_ms = s_config.vox_attack_ms;
+    persisted.vox_hang_ms = s_config.vox_hang_ms;
     copyBounded(persisted.wifi_ssid, sizeof(persisted.wifi_ssid), s_config.wifi_ssid);
     copyBounded(persisted.wifi_password, sizeof(persisted.wifi_password), s_config.wifi_password);
     for (size_t i = 1; i < EXTERNAL_RADIO_MAX_WIFI_PROFILES; ++i) {
@@ -1670,6 +1747,30 @@ bool EXTERNAL_RADIO_SetTailSuppressMs(const uint16_t value, const bool persist)
         return false;
     }
     s_config.tail_suppress_ms = value;
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetVoxConfig(const bool enabled, const int open_db, const int close_db,
+                                 const uint16_t attack_ms, const uint16_t hang_ms,
+                                 const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if (open_db < kMinVoxOpenDb || open_db > kMaxVoxOpenDb ||
+        close_db < kMinVoxCloseDb || close_db > kMaxVoxCloseDb ||
+        close_db > open_db - 2 ||
+        attack_ms > kMaxVoxAttackMs ||
+        hang_ms < kMinVoxHangMs || hang_ms > kMaxVoxHangMs) {
+        return false;
+    }
+    s_config.vox_enabled = enabled;
+    s_config.vox_open_db = static_cast<int8_t>(open_db);
+    s_config.vox_close_db = static_cast<int8_t>(close_db);
+    s_config.vox_attack_ms = attack_ms;
+    s_config.vox_hang_ms = hang_ms;
+    VOX_Configure(enabled, open_db, close_db, attack_ms, hang_ms);
     if (persist) {
         return savePersistedConfig();
     }

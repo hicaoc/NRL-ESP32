@@ -117,6 +117,15 @@ struct ExternalRadioConfig {
     // echo loop a repeater's response would otherwise create between two or more
     // networked devices. 0 disables suppression; valid range 0..5000.
     uint16_t tail_suppress_ms;
+    // Software VOX (voice-operated transmit): keys the soft PTT when the mic
+    // frame level stays at or above vox_open_db (dBFS) for vox_attack_ms and
+    // releases it vox_hang_ms after the level drops below vox_close_db.
+    // Distinct from the SR-110U module's hardware VOX (AT+RADIO_VOX).
+    bool vox_enabled;
+    int8_t vox_open_db;
+    int8_t vox_close_db;
+    uint16_t vox_attack_ms;
+    uint16_t vox_hang_ms;
     SciSerialConfig sci;
     // Saved Wi-Fi networks in connection-priority order. Entry 0 mirrors the
     // legacy wifi_ssid/wifi_password fields so existing AT/BLE/LCD callers
@@ -189,6 +198,10 @@ bool EXTERNAL_RADIO_SetBatteryCalibration(uint16_t scale_milli, bool persist);
 bool EXTERNAL_RADIO_SetVoicePayloadBytes(uint16_t value, bool persist);
 // Tail-audio suppression window in milliseconds (0 disables). Accepts 0..5000.
 bool EXTERNAL_RADIO_SetTailSuppressMs(uint16_t value, bool persist);
+// Software VOX (voice-operated transmit) on the mic uplink. open_db accepts
+// -80..-10, close_db -90..-15 and must be <= open_db - 2, attack_ms 0..500,
+// hang_ms 100..3000. Takes effect immediately on the running capture task.
+bool EXTERNAL_RADIO_SetVoxConfig(bool enabled, int open_db, int close_db, uint16_t attack_ms, uint16_t hang_ms, bool persist);
 #endif
 
 #endif // DRIVER_EXTERNAL_RADIO_H

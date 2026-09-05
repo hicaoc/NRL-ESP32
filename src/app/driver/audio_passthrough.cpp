@@ -2,6 +2,8 @@
 
 #include "audio/audio_router.h"
 #include "driver/board_pins.h"
+#include "driver/external_radio.h"
+#include "driver/vox.h"
 #include "lib/nrl_psram.h"
 #include "services/signaling_service.h"
 #include "services/sstv_service.h"
@@ -669,6 +671,7 @@ static void audio_passthrough_task(void *) {
         if (software_filter_enabled) {
             mic_hpf_apply(frame, kFrameSamples);
         }
+        VOX_ProcessFrame(frame, kFrameSamples);
 
         // Full bypass when both AEC and AI noise are runtime-disabled: skip
         // AEC_SubmitCapture() entirely so the AFE goes idle (no NSNET2 RNN
@@ -707,6 +710,7 @@ static void audio_passthrough_task(void *) {
         SIGNALING_FeedRawMic(frame, kFrameSamples);
         SSTV_SERVICE_FeedRawMic(frame, kFrameSamples);
         mic_hpf_apply(frame, kFrameSamples);
+        VOX_ProcessFrame(frame, kFrameSamples);
 
         AudioRouter_PushFrame(AUDIO_SRC_MIC, 16000u, frame, kFrameSamples);
 #endif
@@ -893,6 +897,15 @@ extern "C" bool AUDIO_StartPassthrough(void) {
         ESP_LOGI(TAG, "esp-sr resident init failed -- mic uplink falls back to raw");
     }
 #endif
+
+    const ExternalRadioConfig *vox_cfg = EXTERNAL_RADIO_GetConfig();
+    if (vox_cfg != nullptr) {
+        VOX_Configure(vox_cfg->vox_enabled,
+                      static_cast<int>(vox_cfg->vox_open_db),
+                      static_cast<int>(vox_cfg->vox_close_db),
+                      vox_cfg->vox_attack_ms,
+                      vox_cfg->vox_hang_ms);
+    }
 
     s_passthrough_running = true;
     // Stack lives in PSRAM (MALLOC_CAP_SPIRAM): 8 KB is too big to find as a

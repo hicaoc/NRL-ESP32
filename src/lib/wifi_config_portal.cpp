@@ -21,6 +21,7 @@
 #include "../app/driver/i2c_device_discovery.h"
 #include "../app/driver/bh4tdv_rf_io.h"
 #include "../app/driver/sr110u.h"
+#include "../app/driver/vox.h"
 #include "../services/radio_config.h"
 #include "../services/ai_assistant.h"
 #include "../services/aprs_service.h"
@@ -723,6 +724,12 @@ static void logChangedFields(const ExternalRadioConfig *before,
         out += #field "="; \
         out += std::to_string(static_cast<unsigned>(after->field)); \
     }
+#define LOG_INT(field) \
+    if (before->field != after->field) { \
+        sep(); \
+        out += #field "="; \
+        out += std::to_string(static_cast<int>(after->field)); \
+    }
 #define LOG_U32(field) \
     if (before->field != after->field) { \
         sep(); \
@@ -804,8 +811,14 @@ static void logChangedFields(const ExternalRadioConfig *before,
     LOG_U32(adceq_a2);
     LOG_U32(adceq_b1);
     LOG_U32(adceq_b2);
+    LOG_BOOL(vox_enabled);
+    LOG_INT(vox_open_db);
+    LOG_INT(vox_close_db);
+    LOG_UINT(vox_attack_ms);
+    LOG_UINT(vox_hang_ms);
 #undef LOG_BOOL
 #undef LOG_UINT
+#undef LOG_INT
 #undef LOG_U32
 #undef LOG_IP
 #undef LOG_STR
@@ -1098,6 +1111,8 @@ static void sendSavedFieldsJson(const bool ok)
             "adc_automute_noise_gate", "adc_automute_volume",
             "adc_hpfs1", "adc_hpfs2", "adc_eq_bypass", "adc_hpf",
             "adceq_b0", "adceq_a1", "adceq_a2", "adceq_b1", "adceq_b2",
+            "vox_enabled", "vox_open_db", "vox_close_db",
+            "vox_attack_ms", "vox_hang_ms",
         };
         for (const char *name : kAudioFields) {
             appendField(name);
@@ -1286,6 +1301,18 @@ static esp_err_t handleAudioPage(httpd_req_t *req)
                    false,
                    true,
                    "");
+    return ESP_OK;
+}
+
+static esp_err_t handleVoxLevel(httpd_req_t *req)
+{
+    s_server.bind(req);
+    char body[96];
+    snprintf(body, sizeof(body), "{\"level_db\":%.1f,\"active\":%s}",
+             static_cast<double>(VOX_CurrentLevelDb()),
+             VOX_IsActive() ? "true" : "false");
+    s_server.sendHeader("Cache-Control", "no-store");
+    s_server.send(200, "application/json; charset=utf-8", body);
     return ESP_OK;
 }
 
@@ -2522,6 +2549,22 @@ static bool parseUIntArg(const std::string &text, unsigned long *out_value)
     return true;
 }
 
+static bool parseIntArg(const std::string &text, long *out_value)
+{
+    if (out_value == nullptr || text.empty()) {
+        return false;
+    }
+
+    char *end = nullptr;
+    const long value = strtol(text.c_str(), &end, 10);
+    if (end == text.c_str() || (end != nullptr && *end != '\0')) {
+        return false;
+    }
+
+    *out_value = value;
+    return true;
+}
+
 static bool parseMicPcmGainArg(const std::string &text, uint16_t *out_milli)
 {
     if (out_milli == nullptr || text.empty()) return false;
@@ -2977,6 +3020,48 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
         }
         if (ok) {
             ok = EXTERNAL_RADIO_SetAdcAutomuteConfig(winsize, noise_gate, volume, false);
+        }
+    }
+    if (ok && (s_server.hasArg("vox_enabled_present") ||
+               s_server.hasArg("vox_open_db") ||
+               s_server.hasArg("vox_close_db") ||
+               s_server.hasArg("vox_attack_ms") ||
+               s_server.hasArg("vox_hang_ms"))) {
+        const ExternalRadioConfig *current = EXTERNAL_RADIO_GetConfig();
+        bool enabled = current != nullptr && current->vox_enabled;
+        long open_db = current != nullptr ? current->vox_open_db : -40L;
+        long close_db = current != nullptr ? current->vox_close_db : -48L;
+        unsigned long attack_ms = current != nullptr ? current->vox_attack_ms : 30UL;
+        unsigned long hang_ms = current != nullptr ? current->vox_hang_ms : 600UL;
+        unsigned long value = 0UL;
+        if (s_server.hasArg("vox_enabled")) {
+            enabled = s_server.arg("vox_enabled") == "1";
+        } else if (s_server.hasArg("vox_enabled_present")) {
+            enabled = false;
+        }
+        if (ok && s_server.hasArg("vox_open_db")) {
+            ok = parseIntArg(s_server.arg("vox_open_db"), &open_db) &&
+                 open_db >= -80L && open_db <= -10L;
+        }
+        if (ok && s_server.hasArg("vox_close_db")) {
+            ok = parseIntArg(s_server.arg("vox_close_db"), &close_db) &&
+                 close_db >= -90L && close_db <= -15L;
+        }
+        if (ok && s_server.hasArg("vox_attack_ms")) {
+            ok = parseUIntArg(s_server.arg("vox_attack_ms"), &value) && value <= 500UL;
+            attack_ms = value;
+        }
+        if (ok && s_server.hasArg("vox_hang_ms")) {
+            ok = parseUIntArg(s_server.arg("vox_hang_ms"), &value) &&
+                 value >= 100UL && value <= 3000UL;
+            hang_ms = value;
+        }
+        if (ok) {
+            ok = close_db <= open_db - 2L &&
+                 EXTERNAL_RADIO_SetVoxConfig(enabled, static_cast<int>(open_db),
+                                             static_cast<int>(close_db),
+                                             static_cast<uint16_t>(attack_ms),
+                                             static_cast<uint16_t>(hang_ms), false);
         }
     }
     if (ok && (s_server.hasArg("adc_eq_bypass_present") ||
@@ -4152,7 +4237,7 @@ static void ensureServerRunning()
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = 80;
-    cfg.max_uri_handlers = 56; // kRoutes on BH4TDV_RF is 50 entries; leave headroom
+    cfg.max_uri_handlers = 56; // kRoutes is 55 entries with all board options enabled; leave headroom
     // The IDF default allows seven HTTP clients and uses another three
     // sockets internally. With the default LWIP socket pool that can consume
     // every descriptor before APRS, NRL, SMB playback or OTA opens one.
@@ -4188,6 +4273,7 @@ static void ensureServerRunning()
         { "/nrl/servers",          HTTP_POST, handleNrlServersPut },
         { "/nrl/servers/refresh",  HTTP_GET,  handleNrlServersRefresh },
         { "/audio",                HTTP_GET,  handleAudioPage },
+        { "/vox_level",            HTTP_GET,  handleVoxLevel },
         { "/fmo",                  HTTP_GET,  handleFmoPage },
         { "/fmo/status",           HTTP_GET,  handleFmoStatus },
         { "/fmo/config",           HTTP_POST, handleFmoConfig },

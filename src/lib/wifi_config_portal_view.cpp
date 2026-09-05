@@ -450,6 +450,26 @@ std::string WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *c
                  std::string("")
 #endif
     );
+    // Software VOX is board-neutral (pure software on the mic uplink), so its
+    // controls live in the always-rendered Audio Processing panel, not the
+    // ES8311-gated expert panels below.
+    replaceToken(html, "{{VOX_CHECKED}}", checkedAttr(config->vox_enabled));
+    const std::string vox_open_db = fromI32(config->vox_open_db);
+    replaceToken(html, "{{VOX_OPEN_DB_INPUT}}",
+                 buildAutoSubmitNumber("vox_open_db", "VOX Open Threshold (-80..-10 dBFS)",
+                                       "voxOpenDb", "-80", "-10", "1", vox_open_db.c_str()));
+    const std::string vox_close_db = fromI32(config->vox_close_db);
+    replaceToken(html, "{{VOX_CLOSE_DB_INPUT}}",
+                 buildAutoSubmitNumber("vox_close_db", "VOX Close Threshold (-90..-15 dBFS)",
+                                       "voxCloseDb", "-90", "-15", "1", vox_close_db.c_str()));
+    replaceToken(html, "{{VOX_ATTACK_MS_INPUT}}",
+                 buildAutoSubmitNumber("vox_attack_ms", "VOX Attack (0-500 ms)",
+                                       "voxAttackMs", "0", "500", "1",
+                                       fromU32(config->vox_attack_ms).c_str()));
+    replaceToken(html, "{{VOX_HANG_MS_INPUT}}",
+                 buildAutoSubmitNumber("vox_hang_ms", "VOX Hang (100-3000 ms)",
+                                       "voxHangMs", "100", "3000", "1",
+                                       fromU32(config->vox_hang_ms).c_str()));
     // ES8311 register-level expert panels only make sense on boards that
     // actually carry an ES8311 (the S31-Korvo uses an ES8389 with a totally
     // different register map). The ADC panel is further hidden when a
@@ -483,9 +503,6 @@ std::string WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *c
     replaceToken(html, "{{ADC_DMIC_VALUE}}", boolValue(config->adc_dmic_enabled));
     replaceToken(html, "{{ADC_LINSEL_CHECKED}}", checkedAttr(config->adc_linsel));
     replaceToken(html, "{{ADC_LINSEL_VALUE}}", boolValue(config->adc_linsel));
-    replaceToken(html, "{{ADC_PGA_GAIN}}", fromU32(config->adc_pga_gain));
-    replaceToken(html, "{{ADC_RAMPRATE}}", fromU32(config->adc_ramprate));
-    replaceToken(html, "{{ADC_SCALE}}", fromU32(config->adc_scale));
     replaceToken(html, "{{ADC_PGA_GAIN_SLIDER}}", buildAutoSubmitSlider("adc_pga_gain", "ADC PGA Gain (0-10)", "adcPgaGain", 0u, 10u, config->adc_pga_gain));
     replaceToken(html, "{{ADC_RAMPRATE_SLIDER}}", buildAutoSubmitSlider("adc_ramprate", "ADC VC Ramp Rate (0-15)", "adcRampRate", 0u, 15u, config->adc_ramprate));
     replaceToken(html, "{{ADC_SCALE_SLIDER}}", buildAutoSubmitSlider("adc_scale", "ADC Gain Scale (0-7)", "adcGainScale", 0u, 7u, config->adc_scale));

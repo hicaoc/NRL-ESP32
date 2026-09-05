@@ -19,6 +19,11 @@
     <div class="subpanel"><h3 data-i18n="volume">Volume</h3><div class="subgrid">{{MIC_VOLUME_SLIDER}}{{MIC_PCM_GAIN_INPUT}}{{LINE_OUT_VOLUME_SLIDER}}</div></div>
     <div class="subpanel"><h3 data-i18n="audioProcessing">Audio Processing</h3><div class="subgrid">
       {{AEC_SECTION}}
+      <div class="group-label span-2" data-i18n="vox">VOX</div>
+      <form class="item-form" method="post" action="/save_nrl"><label data-i18n="voxEnable">Software VOX</label><input type="hidden" name="vox_enabled_present" value="1"><label class="hint"><input type="checkbox" name="vox_enabled" value="1" onchange="submitSwitch(this)" {{VOX_CHECKED}}><span data-i18n="voxEnableText">Key soft PTT when the mic level opens the gate</span></label></form>
+      {{VOX_OPEN_DB_INPUT}}{{VOX_CLOSE_DB_INPUT}}{{VOX_ATTACK_MS_INPUT}}{{VOX_HANG_MS_INPUT}}
+      <div class="item-form span-2"><label data-i18n="voxLevel">Mic level (live)</label><span class="hint mono" id="vox-level">--</span></div>
+      <script>(function(){var el=document.getElementById('vox-level');if(!el){return;}async function voxRefresh(){try{var r=await fetch('/vox_level',{cache:'no-store'});var j=await r.json();el.textContent=j.level_db.toFixed(1)+' dBFS'+(j.active?' [TX]':'');}catch(e){}}voxRefresh();setInterval(voxRefresh,1000);})();</script>
     </div></div>
     {{ES8311_ADC_SECTION}}
     {{ES8311_DAC_SECTION}}

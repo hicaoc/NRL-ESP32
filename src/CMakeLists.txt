@@ -71,6 +71,7 @@ set(app_sources
     app/driver/sci_serial.cpp
     app/driver/serial_port_config.cpp
     app/driver/status_io.cpp
+    app/driver/vox.cpp
     lib/aprs/aprs_ax25.cpp
     lib/aprs/aprs_crc_ccit.c
     lib/aprs/aprs_modem.cpp

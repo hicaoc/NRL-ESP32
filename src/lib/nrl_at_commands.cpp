@@ -13,6 +13,7 @@
 #include "driver/external_radio.h"
 #include "driver/gps_serial.h"
 #include "driver/serial_port_config.h"
+#include "driver/vox.h"
 #include "services/ai_assistant.h"
 #include "services/aprs_service.h"
 #include "services/display_notice.h"
@@ -470,6 +471,24 @@ static bool parseUnsignedValue(const char *text, unsigned long *out_value)
 
     char *end = nullptr;
     const unsigned long value = strtoul(text, &end, 10);
+    if (end == text || (end != nullptr && *end != '\0')) {
+        return false;
+    }
+
+    *out_value = value;
+    return true;
+}
+
+// Signed counterpart of parseUnsignedValue for values that may be negative
+// (e.g. VOX thresholds in dBFS).
+static bool parseIntValue(const char *text, long *out_value)
+{
+    if (text == nullptr || out_value == nullptr || text[0] == '\0') {
+        return false;
+    }
+
+    char *end = nullptr;
+    const long value = strtol(text, &end, 10);
     if (end == text || (end != nullptr && *end != '\0')) {
         return false;
     }
@@ -1200,6 +1219,107 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             return;
         }
         appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "PTT_TIMEOUT", EXTERNAL_RADIO_GetConfig()->ptt_timeout_s);
+        return;
+    }
+
+    // ESP32-side software VOX (voice-operated transmit) on the mic uplink.
+    // Distinct from AT+RADIO_VOX, which is the SR-110U RF module's hardware
+    // VOX level. Each setter below passes the untouched fields through from
+    // the current config, so one field can change at a time.
+    if (stringEqualsIgnoreCase(command.command, "VOX")) {
+        if (is_query) {
+            char status[48];
+            snprintf(status, sizeof(status), "%s,LEVEL=%.1f,ACTIVE=%u",
+                     config->vox_enabled ? "ON" : "OFF",
+                     static_cast<double>(VOX_CurrentLevelDb()),
+                     VOX_IsActive() ? 1u : 0u);
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "VOX", status);
+            return;
+        }
+        bool enabled = false;
+        if (!parseBoolValue(command.value, &enabled) ||
+            !EXTERNAL_RADIO_SetVoxConfig(enabled, config->vox_open_db, config->vox_close_db,
+                                         config->vox_attack_ms, config->vox_hang_ms, true)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "VOX");
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "VOX",
+                           EXTERNAL_RADIO_GetConfig()->vox_enabled ? "ON" : "OFF");
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "VOX_OPEN")) {
+        if (is_query) {
+            char db[8];
+            snprintf(db, sizeof(db), "%d", static_cast<int>(config->vox_open_db));
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "VOX_OPEN", db);
+            return;
+        }
+        long value = 0;
+        if (!parseIntValue(command.value, &value) || value < -80 || value > -10 ||
+            !EXTERNAL_RADIO_SetVoxConfig(config->vox_enabled, static_cast<int>(value), config->vox_close_db,
+                                         config->vox_attack_ms, config->vox_hang_ms, true)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "VOX_OPEN");
+            return;
+        }
+        char db[8];
+        snprintf(db, sizeof(db), "%d", static_cast<int>(EXTERNAL_RADIO_GetConfig()->vox_open_db));
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "VOX_OPEN", db);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "VOX_CLOSE")) {
+        if (is_query) {
+            char db[8];
+            snprintf(db, sizeof(db), "%d", static_cast<int>(config->vox_close_db));
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "VOX_CLOSE", db);
+            return;
+        }
+        long value = 0;
+        // -90..-15 dBFS and at least 2 dB below the open threshold so the
+        // gate has hysteresis and cannot chatter.
+        if (!parseIntValue(command.value, &value) || value < -90 || value > -15 ||
+            value > static_cast<long>(config->vox_open_db) - 2 ||
+            !EXTERNAL_RADIO_SetVoxConfig(config->vox_enabled, config->vox_open_db, static_cast<int>(value),
+                                         config->vox_attack_ms, config->vox_hang_ms, true)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "VOX_CLOSE");
+            return;
+        }
+        char db[8];
+        snprintf(db, sizeof(db), "%d", static_cast<int>(EXTERNAL_RADIO_GetConfig()->vox_close_db));
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "VOX_CLOSE", db);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "VOX_ATTACK")) {
+        if (is_query) {
+            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "VOX_ATTACK", config->vox_attack_ms);
+            return;
+        }
+        unsigned long value = 0u;
+        if (!parseUnsignedValue(command.value, &value) || value > 500u ||
+            !EXTERNAL_RADIO_SetVoxConfig(config->vox_enabled, config->vox_open_db, config->vox_close_db,
+                                         static_cast<uint16_t>(value), config->vox_hang_ms, true)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "VOX_ATTACK");
+            return;
+        }
+        appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "VOX_ATTACK", EXTERNAL_RADIO_GetConfig()->vox_attack_ms);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "VOX_HANG")) {
+        if (is_query) {
+            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "VOX_HANG", config->vox_hang_ms);
+            return;
+        }
+        unsigned long value = 0u;
+        if (!parseUnsignedValue(command.value, &value) || value < 100u || value > 3000u ||
+            !EXTERNAL_RADIO_SetVoxConfig(config->vox_enabled, config->vox_open_db, config->vox_close_db,
+                                         config->vox_attack_ms, static_cast<uint16_t>(value), true)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "VOX_HANG");
+            return;
+        }
+        appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "VOX_HANG", EXTERNAL_RADIO_GetConfig()->vox_hang_ms);
         return;
     }
 
