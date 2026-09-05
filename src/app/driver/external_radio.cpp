@@ -43,6 +43,11 @@ constexpr uint8_t kLegacyConfigVersion5 = 5U;
 constexpr uint8_t kMinChannel = 0U;
 constexpr uint8_t kMaxChannel = 7U;
 constexpr uint8_t kDefaultMicVolume = 180U;
+// ES8311 REG17 (ADC volume) misbehaves above 0xBA on some chips: the
+// ADC output drops to digital zero (observed 0xBB-0xC0 dead, 0xC1
+// erratic), which looks exactly like a dead mic. Cap the volume below
+// that cliff; 186 costs only ~2.5 dB of headroom on healthy chips.
+constexpr uint8_t kMaxMicVolume = 186U;
 constexpr uint16_t kDefaultMicPcmGainMilli = 1000U;
 constexpr uint16_t kMinMicPcmGainMilli = 100U;
 constexpr uint16_t kMaxMicPcmGainMilli = 5000U;
@@ -596,6 +601,9 @@ static void normalizeConfig(void)
     } else {
         s_config.wifi_ssid[0] = '\0';
         s_config.wifi_password[0] = '\0';
+    }
+    if (s_config.mic_volume > kMaxMicVolume) {
+        s_config.mic_volume = kMaxMicVolume;
     }
     sanitizeString(s_config.server_host);
     sanitizeCallsign(s_config.callsign);
@@ -1292,7 +1300,7 @@ bool EXTERNAL_RADIO_SetCallsignSsid(const uint8_t value, const bool persist)
 bool EXTERNAL_RADIO_SetMicVolume(const uint8_t value, const bool persist)
 {
     EXTERNAL_RADIO_Init();
-    s_config.mic_volume = value;
+    s_config.mic_volume = value > kMaxMicVolume ? kMaxMicVolume : value;
     applyAudioConfigToCodec();
     if (persist) {
         return savePersistedConfig();

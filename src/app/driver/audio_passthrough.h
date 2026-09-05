@@ -67,6 +67,9 @@ void AUDIO_SetAecReferenceSource(uint8_t source);
 // before AEC / network uplink. Stateful: toggling resets the filter memory
 // to avoid a transient on the first frame.
 void AUDIO_SetMicHpfEnabled(bool enabled);
+// Debug self-test: run synthetic DC and 8 kHz square-wave frames through the
+// mic HPF and report output RMS. Filter state is saved/restored.
+void AUDIO_MicHpfSelfTest(float *dc_out_rms, float *square_out_rms);
 bool AUDIO_GetMicHpfEnabled(void);
 
 // Saturating software gain on PCM16 immediately after ADC/I2S capture.

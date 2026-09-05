@@ -81,7 +81,12 @@ enum : uint8_t {
 
 constexpr uint8_t kEs8311ClockEnableAll = 0x3F;
 constexpr uint8_t kDefaultAdcRamprate = 0x04;
-constexpr uint8_t kEs8311AdcVolumeDefault = 0xBF;  // reference es8311_start: REG17 = 0xBF
+// ESP-ADF es8311_start() writes REG17 = 0xBF here, but on some ES8311
+// chips values above 0xBA make the ADC output digital zero (observed
+// 0xBB-0xC0 dead, 0xC1 erratic). Start below that cliff so even the
+// pre-config boot window has a live mic.
+constexpr uint8_t kEs8311AdcVolumeDefault = 0xBA;
+constexpr uint8_t kEs8311AdcVolumeMax = 0xBA;
 constexpr uint8_t kEs8311DacVolumeDefault = 180U;
 // REG0D bits: PDN_ANA(7) PDN_IBIASGEN(6) PDN_ADCBIASGEN(5) PDN_ADCVERFGEN(4)
 //             PDN_DACVREFGEN(3) PDN_VREF(2) VMIDSEL(1:0)
@@ -714,6 +719,14 @@ extern "C" bool ES8311_IsReady(void) {
     return s_es8311_ready;
 }
 
+extern "C" bool ES8311_ReadReg(const uint8_t reg, uint8_t *value) {
+    return es8311_read_reg(reg, value);
+}
+
+extern "C" bool ES8311_WriteReg(const uint8_t reg, const uint8_t value) {
+    return es8311_write_reg(reg, value);
+}
+
 extern "C" bool ES8311_SetAudioMode(const AUDIO_Mode_t mode) {
     if (!ES8311_Init()) {
         return false;
@@ -869,7 +882,7 @@ extern "C" bool ES8311_ApplyAudioConfig(const uint8_t mic_volume,
                                         const uint32_t adceq_a2,
                                         const uint32_t adceq_b1,
                                         const uint32_t adceq_b2) {
-    s_mic_volume = mic_volume;
+    s_mic_volume = mic_volume > kEs8311AdcVolumeMax ? kEs8311AdcVolumeMax : mic_volume;
     s_line_out_volume = line_out_volume;
     s_hp_drive_enabled = hp_drive_enabled;
 

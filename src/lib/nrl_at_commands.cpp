@@ -6,6 +6,7 @@
 #include "nrl_psram.h"
 #include "nrl_version.h"
 
+#include "driver/audio_passthrough.h"
 #include "driver/board_pins.h"
 #include "driver/display.h"
 #include "driver/es8311.h"
@@ -1320,6 +1321,64 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             return;
         }
         appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "VOX_HANG", EXTERNAL_RADIO_GetConfig()->vox_hang_ms);
+        return;
+    }
+
+    // Debug: raw ES8311 register dump (power/ADC/volume chain) to diagnose
+    // codec bring-up issues. Not available on boards without an ES8311.
+    if (stringEqualsIgnoreCase(command.command, "ES8311DUMP")) {
+        char dump[512];
+        size_t used = 0u;
+        bool ok = ES8311_IsReady();
+        for (unsigned reg = 0u; reg <= 0x45u && ok; ++reg) {
+            uint8_t value = 0u;
+            if (!ES8311_ReadReg(static_cast<uint8_t>(reg), &value)) {
+                ok = false;
+                break;
+            }
+            const int written = snprintf(dump + used, sizeof(dump) - used, "%s%02X:%02X",
+                                         reg == 0u ? "" : " ",
+                                         reg,
+                                         static_cast<unsigned>(value));
+            if (written < 0 || static_cast<size_t>(written) >= sizeof(dump) - used) {
+                ok = false;
+                break;
+            }
+            used += static_cast<size_t>(written);
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           ok ? "ES8311DUMP" : "ERR", ok ? dump : "ES8311DUMP");
+        return;
+    }
+
+    // Debug: raw ES8311 register write, hex "RR,VV" (e.g. AT+ES8311WRITE=16,24).
+    // Volatile (not persisted); used to bisect codec bring-up issues live.
+    if (stringEqualsIgnoreCase(command.command, "ES8311WRITE")) {
+        unsigned reg = 0u;
+        unsigned value = 0u;
+        char extra[4] = {};
+        const bool parsed = sscanf(command.value, "%x,%x%3s", &reg, &value, extra) == 2;
+        if (is_query || !parsed || reg > 0xFFu || value > 0xFFu || !ES8311_IsReady() ||
+            !ES8311_WriteReg(static_cast<uint8_t>(reg), static_cast<uint8_t>(value))) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "ES8311WRITE");
+            return;
+        }
+        char echo[16];
+        snprintf(echo, sizeof(echo), "%02X:%02X", reg, value);
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ES8311WRITE", echo);
+        return;
+    }
+
+    // Debug: run the mic software HPF over synthetic DC and 8 kHz square-wave
+    // frames and report output RMS (DC should die, square should pass).
+    if (stringEqualsIgnoreCase(command.command, "HPFTEST")) {
+        float dc_rms = -1.0f;
+        float square_rms = -1.0f;
+        AUDIO_MicHpfSelfTest(&dc_rms, &square_rms);
+        char report[48];
+        snprintf(report, sizeof(report), "DC=%.1f SQ8000=%.1f",
+                 static_cast<double>(dc_rms), static_cast<double>(square_rms));
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "HPFTEST", report);
         return;
     }
 

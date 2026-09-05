@@ -1008,6 +1008,45 @@ extern "C" bool AUDIO_GetMicHpfEnabled(void) {
     return s_mic_hpf_enabled;
 }
 
+extern "C" void AUDIO_MicHpfSelfTest(float *dc_out_rms, float *square_out_rms) {
+    const bool was_enabled = s_mic_hpf_enabled;
+    s_mic_hpf_enabled = false;
+    vTaskDelay(pdMS_TO_TICKS(30));
+    const float saved[8] = {s_mic_hpf1_x1, s_mic_hpf1_x2, s_mic_hpf1_y1, s_mic_hpf1_y2,
+                            s_mic_hpf2_x1, s_mic_hpf2_x2, s_mic_hpf2_y1, s_mic_hpf2_y2};
+    static int16_t buf[kFrameSamples];
+    double acc = 0.0;
+
+    mic_hpf_reset();
+    s_mic_hpf_enabled = true;
+    for (int rep = 0; rep < 20; ++rep) {
+        for (size_t i = 0; i < kFrameSamples; ++i) buf[i] = 2000;
+        mic_hpf_apply(buf, kFrameSamples);
+    }
+    for (size_t i = 0; i < kFrameSamples; ++i) acc += static_cast<double>(buf[i]) * buf[i];
+    if (dc_out_rms != nullptr) *dc_out_rms = static_cast<float>(sqrt(acc / kFrameSamples));
+
+    mic_hpf_reset();
+    for (int rep = 0; rep < 20; ++rep) {
+        for (size_t i = 0; i < kFrameSamples; ++i) buf[i] = (i & 1u) ? 8000 : -8000;
+        mic_hpf_apply(buf, kFrameSamples);
+    }
+    acc = 0.0;
+    for (size_t i = 0; i < kFrameSamples; ++i) acc += static_cast<double>(buf[i]) * buf[i];
+    if (square_out_rms != nullptr) *square_out_rms = static_cast<float>(sqrt(acc / kFrameSamples));
+
+    s_mic_hpf_enabled = false;
+    s_mic_hpf1_x1 = saved[0];
+    s_mic_hpf1_x2 = saved[1];
+    s_mic_hpf1_y1 = saved[2];
+    s_mic_hpf1_y2 = saved[3];
+    s_mic_hpf2_x1 = saved[4];
+    s_mic_hpf2_x2 = saved[5];
+    s_mic_hpf2_y1 = saved[6];
+    s_mic_hpf2_y2 = saved[7];
+    s_mic_hpf_enabled = was_enabled;
+}
+
 extern "C" void AUDIO_SetMicPcmGain(const uint16_t gain_milli) {
     const uint16_t normalized = (gain_milli >= 100u && gain_milli <= 5000u)
                                     ? gain_milli

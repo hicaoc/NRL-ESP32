@@ -19,6 +19,11 @@ bool ES8311_Init(void);
 // True if the codec initialization sequence already succeeded.
 bool ES8311_IsReady(void);
 
+// Debug/diagnostics: raw register read over the shared I2C bus. Returns false
+// when the bus transaction fails (e.g. no codec at 0x18 on this board).
+bool ES8311_ReadReg(uint8_t reg, uint8_t *value);
+bool ES8311_WriteReg(uint8_t reg, uint8_t value);
+
 // Switch the codec's external audio routing for a given audio mode.
 bool ES8311_SetAudioMode(AUDIO_Mode_t mode);
 bool ES8311_SetReceiveMode(void);
