@@ -4,9 +4,11 @@ dependencies:
   # Audio codec HAL used directly by the ES7210/ES8311/ES8389 drivers on every
   # board. On S31 the korvo BSP also pulls it (^1.5.9); declare it here too so
   # gezipai/bh4tdv (no BSP) resolve it as well.
+  # Pin beta3 explicitly: the 1.5.x line silently moved to the refactored
+  # (no work-mode) API and registry mirrors serve diverging 1.5.11 content.
+  # The S31 BSP/es8389 driver is migrated to this API (work-mode removed).
   espressif/esp_codec_dev:
-    # 2.0.0-beta removes the legacy work-mode types used by the S31 BSP.
-    version: "~1.5.9"
+    version: "==2.0.0-beta3"
   # Audio decoders (MP3/FLAC/AAC...) for the media player
   # (docs/architecture.md 3.3). The simple-decoder API also parses the
   # container/frame sync, so the player streams raw file bytes in and gets
