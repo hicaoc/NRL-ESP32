@@ -81,13 +81,17 @@ enum : uint8_t {
 
 constexpr uint8_t kEs8311ClockEnableAll = 0x3F;
 constexpr uint8_t kDefaultAdcRamprate = 0x04;
-// ESP-ADF es8311_start() writes REG17 = 0xBF here, but on some ES8311
-// chips values above 0xBA make the ADC output digital zero (observed
-// 0xBB-0xC0 dead, 0xC1 erratic). Start below that cliff so even the
-// pre-config boot window has a live mic.
-constexpr uint8_t kEs8311AdcVolumeDefault = 0xBA;
-constexpr uint8_t kEs8311AdcVolumeMax = 0xBA;
-constexpr uint8_t kEs8311DacVolumeDefault = 180U;
+// REG17 acts as ALC MAXGAIN when ALC is enabled (default below). +32 dB gives
+// the ALC plenty of boost room for quiet talkers without saturating the ADC
+// (the analog PGA + ADC full-scale ceiling is what limits loud input).
+constexpr uint8_t kEs8311AdcVolumeDefault = 0xFFU;
+// REG32 DAC volume: 0xBF == 0 dB (unity digital gain). Previous default of
+// 180 (0xB4 == -5.5 dB) made the speaker quieter than necessary with the
+// FM8002E BTL power amp (gain ~6 dB in the typical BI4UMD / BH4TDV-RF schematic).
+// 0 dB gives a clean loud output at -7.8 dBFS (the DRC peak target below) while
+// leaving headroom so occasional full-scale network packets don't clip the
+// FM8002E output stage.
+constexpr uint8_t kEs8311DacVolumeDefault = 0xBFU;
 // REG0D bits: PDN_ANA(7) PDN_IBIASGEN(6) PDN_ADCBIASGEN(5) PDN_ADCVERFGEN(4)
 //             PDN_DACVREFGEN(3) PDN_VREF(2) VMIDSEL(1:0)
 // NOTE: PDN_VREF (bit 2) has REVERSE polarity vs other PDN bits!
@@ -96,9 +100,19 @@ constexpr uint8_t kEs8311DacVolumeDefault = 180U;
 constexpr uint8_t kEs8311PowerUpAnalog = 0x06;
 constexpr uint8_t kEs8311PowerUpPgaAdc = 0x02;
 constexpr uint8_t kEs8311PowerUpDac = 0x00;
-constexpr uint8_t kDefaultDrcWinsize = 0x00;
-constexpr uint8_t kDefaultDrcLevel = 0x00;
-constexpr uint8_t kDefaultDacRamprate = 0x00;
+// Fast DRC attack/release so transient speech peaks get compressed if the
+// user ever flips DRC on. Matches the ADC-side ALC winsize; defaults off.
+constexpr uint8_t kDefaultDrcWinsize = 2U;
+// Target -7.8 / -16.1 dBFS if/when DRC is enabled. Same philosophy as the
+// mic-side ALC bookends (8 dB headroom above peak, 16 dB of useful range
+// before the noise floor). The codec starts with DRC off so AT+VOLUME
+// stays a clean linear control; the user can turn DRC on later via the
+// audio config portal if they want the speaker side auto-leveled too.
+constexpr uint8_t kDefaultDrcMaxlevel = 12U;
+constexpr uint8_t kDefaultDrcMinlevel = 4U;
+// DAC digital-volume soft ramp: 0.25 dB / 32 LRCK ~= 2 ms at 16 kHz. Eliminates
+// the zipper/pop noise that AT+VOLUME and startup unmuting otherwise produce.
+constexpr uint8_t kDefaultDacRamprate = 4U;
 constexpr uint32_t kDacEqCoefficientMask = 0x3FFFFFFFUL;
 constexpr uint32_t kAdcEqCoefficientMask = 0x3FFFFFFFUL;
 constexpr uint8_t kEs8311DacUnmute = 0x00;
@@ -130,10 +144,16 @@ static size_t s_hifi_mix_capacity = sizeof(s_hifi_mix_storage);
 static uint8_t s_mic_volume = kEs8311AdcVolumeDefault;
 static uint8_t s_line_out_volume = kEs8311DacVolumeDefault;
 static bool s_hp_drive_enabled = false;
+// DAC DRC defaults OFF. Unlike the ADC input (which benefits from ALC because
+// the user may whisper or yell into the mic), the speaker output levels come
+// from the network and are usually already volume-normalised. DRC off keeps
+// AT+VOLUME a pure linear 0.5 dB/step control, exactly what the user
+// expects. If someone wants auto-leveled speaker output they can flip this
+// on through the audio config page and the tuned winsize/levels below kick in.
 static bool s_drc_enabled = false;
 static uint8_t s_drc_winsize = kDefaultDrcWinsize;
-static uint8_t s_drc_maxlevel = kDefaultDrcLevel;
-static uint8_t s_drc_minlevel = kDefaultDrcLevel;
+static uint8_t s_drc_maxlevel = kDefaultDrcMaxlevel;
+static uint8_t s_drc_minlevel = kDefaultDrcMinlevel;
 static uint8_t s_dac_ramprate = kDefaultDacRamprate;
 static bool s_dac_eq_bypass = true;
 static uint32_t s_daceq_b0 = 0U;
@@ -141,18 +161,32 @@ static uint32_t s_daceq_b1 = 0U;
 static uint32_t s_daceq_a1 = 0U;
 static bool s_adc_dmic_enabled = false;
 static bool s_adc_linsel = true;
-static uint8_t s_adc_pga_gain = 10U;
+// PGA = 12 dB (was 30 dB). With the LMA2718B mic (-38 dBV/Pa) the old 30 dB
+// PGA pushed loud speech into ADC saturation (1 Vrms full-scale at AVDD=3.3V).
+// 12 dB keeps the analog signal < 1 Vrms up to ~120 dB SPL, well above any
+// normal voice level -- the ALC then takes care of level normalisation.
+static uint8_t s_adc_pga_gain = 4U;
 static uint8_t s_adc_ramprate = kDefaultAdcRamprate;
 static bool s_adc_dmic_sense = false;
 static bool s_adc_sync = true;
 static bool s_adc_inv = false;
 static bool s_adc_ramclr = false;
-static uint8_t s_adc_scale = 7U;
-static bool s_alc_enabled = false;
+// ADC_SCALE = 0 dB (was 24 dB). The 24 dB digital scale sat *before* the ALC
+// in the data path, so loud input clipped at the digital stage before ALC
+// could react. With ALC enabled there is no need for an extra digital scale.
+static uint8_t s_adc_scale = 0U;
+// ALC enabled by default: boosts quiet talkers up to MINLEVEL and compresses
+// loud input down to MAXLEVEL, so the mic is neither too quiet nor clipping.
+static bool s_alc_enabled = true;
 static bool s_adc_automute_enabled = false;
-static uint8_t s_alc_winsize = 0U;
-static uint8_t s_alc_maxlevel = 0U;
-static uint8_t s_alc_minlevel = 0U;
+// Fast attack/release: 0.25 dB / 8 LRCK ~= 0.5 ms at 16 kHz -- tracks speech
+// transients without pumping.
+static uint8_t s_alc_winsize = 2U;
+// Target peak -7.8 dBFS: ~8 dB headroom below 0 dBFS so downstream stages
+// (DAC + FM8002E) never see a full-scale signal.
+static uint8_t s_alc_maxlevel = 12U;
+// Target floor -16.1 dBFS: ALC boosts signals below this up toward it.
+static uint8_t s_alc_minlevel = 4U;
 static uint8_t s_adc_automute_winsize = 0U;
 static uint8_t s_adc_automute_noise_gate = 0U;
 static uint8_t s_adc_automute_volume = 0U;
@@ -882,7 +916,7 @@ extern "C" bool ES8311_ApplyAudioConfig(const uint8_t mic_volume,
                                         const uint32_t adceq_a2,
                                         const uint32_t adceq_b1,
                                         const uint32_t adceq_b2) {
-    s_mic_volume = mic_volume > kEs8311AdcVolumeMax ? kEs8311AdcVolumeMax : mic_volume;
+    s_mic_volume = mic_volume;
     s_line_out_volume = line_out_volume;
     s_hp_drive_enabled = hp_drive_enabled;
 
