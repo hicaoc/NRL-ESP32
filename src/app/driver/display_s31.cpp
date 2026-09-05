@@ -6952,8 +6952,13 @@ void refreshHome()
             char rig[72];
             SPEAKER_INFO_FormatGeo(&info, geo, sizeof(geo));
             SPEAKER_INFO_FormatRig(&info, rig, sizeof(rig));
-            snprintf(dmrid, sizeof(dmrid), "%s%s%s", geo,
+            // geo+separator+rig can exceed dmrid; compose first, then copy
+            // with an explicit bound so -Wformat-truncation sees the limit.
+            char speaker_line[sizeof(geo) + 4 + sizeof(rig)];
+            snprintf(speaker_line, sizeof(speaker_line), "%s%s%s", geo,
                      (geo[0] != '\0' && rig[0] != '\0') ? " | " : "", rig);
+            snprintf(dmrid, sizeof(dmrid), "%.*s",
+                     static_cast<int>(sizeof(dmrid) - 1u), speaker_line);
         }
     }
     setLabel(s_lbl_dmrid, s_shown_dmrid, sizeof(s_shown_dmrid), dmrid);

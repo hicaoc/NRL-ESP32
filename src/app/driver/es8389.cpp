@@ -54,7 +54,6 @@ static bool es8389_create_codec(i2s_chan_handle_t tx_handle, i2s_chan_handle_t r
     }
 
     audio_codec_i2c_cfg_t i2c_cfg = {};
-    i2c_cfg.port = I2C_NUM_0;
     i2c_cfg.addr = ES8389_CODEC_DEFAULT_ADDR;
     i2c_cfg.bus_handle = s_i2c_bus;
     s_ctrl_if = audio_codec_new_i2c_ctrl(&i2c_cfg);
@@ -86,16 +85,13 @@ static bool es8389_create_codec(i2s_chan_handle_t tx_handle, i2s_chan_handle_t r
     es8389_codec_cfg_t es8389_cfg = {};
     es8389_cfg.ctrl_if = s_ctrl_if;
     es8389_cfg.gpio_if = s_gpio_if;
-    es8389_cfg.codec_mode = ESP_CODEC_DEV_WORK_MODE_BOTH;
-    es8389_cfg.pa_pin = static_cast<int16_t>(NRL_PIN_PA_EN);
-    es8389_cfg.pa_reverted = false;
-    es8389_cfg.master_mode = false;
-    es8389_cfg.use_mclk = false;
-    es8389_cfg.digital_mic = false;
-    es8389_cfg.invert_mclk = false;
-    es8389_cfg.invert_sclk = false;
-    es8389_cfg.hw_gain = gain;
-    es8389_cfg.no_dac_ref = false;
+    es8389_cfg.sys_cfg.is_master = false;
+    es8389_cfg.sys_cfg.no_mclk = true;
+    es8389_cfg.adc_cfg.digital_mic = false;
+    es8389_cfg.dac_cfg.ref_enable = true;
+    es8389_cfg.pa_cfg.pa_pin = static_cast<int16_t>(NRL_PIN_PA_EN);
+    es8389_cfg.pa_cfg.pa_active_low = false;
+    es8389_cfg.pa_cfg.hw_gain = gain;
 
     s_codec_if = es8389_codec_new(&es8389_cfg);
     if (s_codec_if == nullptr) {
@@ -128,8 +124,9 @@ static void es8389_apply_config_levels(void) {
         ES8389_SetInputGain(config->mic_volume);
     } else {
         (void)esp_codec_dev_set_out_vol(s_codec, kDefaultOutVolume);
-        if (s_codec_if != nullptr && s_codec_if->set_mic_gain != nullptr) {
-            (void)s_codec_if->set_mic_gain(s_codec_if, kDefaultInGain);
+        if (s_codec_if != nullptr && s_codec_if->adc_if != nullptr &&
+            s_codec_if->adc_if->ops.set_vol != nullptr) {
+            (void)s_codec_if->adc_if->ops.set_vol(s_codec_if, 0, kDefaultInGain);
         }
     }
 }
@@ -239,7 +236,8 @@ extern "C" bool ES8389_SetOutputVolume(const uint8_t value) {
 }
 
 extern "C" bool ES8389_SetInputGain(const uint8_t value) {
-    if (s_codec_if == nullptr || s_codec_if->set_mic_gain == nullptr) {
+    if (s_codec_if == nullptr || s_codec_if->adc_if == nullptr ||
+        s_codec_if->adc_if->ops.set_vol == nullptr) {
         return false;
     }
     // Keep codec-dev output-only so hi-fi playback can change TX clocks
@@ -249,7 +247,7 @@ extern "C" bool ES8389_SetInputGain(const uint8_t value) {
     // output-only device handle.
     const unsigned step = (static_cast<unsigned>(value) * 14u + 127u) / 255u;
     const float gain_db = static_cast<float>(step) * 3.0f;
-    const bool ok = s_codec_if->set_mic_gain(s_codec_if, gain_db) == ESP_CODEC_DEV_OK;
+    const bool ok = s_codec_if->adc_if->ops.set_vol(s_codec_if, 0, gain_db) == ESP_CODEC_DEV_OK;
     ESP_LOGI(TAG, "mic gain: volume=%u -> %.1f dB%s",
              static_cast<unsigned>(value),
              static_cast<double>(gain_db),

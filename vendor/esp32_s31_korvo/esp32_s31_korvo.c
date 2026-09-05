@@ -287,7 +287,6 @@ esp_err_t bsp_audio_init(const i2s_std_config_t *i2s_config)
 }
 
 static esp_codec_dev_handle_t bsp_audio_codec_init(esp_codec_dev_type_t dev_type,
-                                                   esp_codec_dec_work_mode_t codec_mode,
                                                    int16_t pa_pin)
 {
     esp_err_t ret = bsp_i2c_init();
@@ -306,7 +305,6 @@ static esp_codec_dev_handle_t bsp_audio_codec_init(esp_codec_dev_type_t dev_type
     ESP_RETURN_ON_FALSE(gpio_if, NULL, TAG, "create codec GPIO interface failed");
 
     audio_codec_i2c_cfg_t i2c_cfg = {
-        .port = I2C_NUM_0,
         .addr = ES8389_CODEC_DEFAULT_ADDR,
         .bus_handle = s_i2c_bus,
     };
@@ -321,16 +319,21 @@ static esp_codec_dev_handle_t bsp_audio_codec_init(esp_codec_dev_type_t dev_type
     es8389_codec_cfg_t es8389_cfg = {
         .ctrl_if = ctrl_if,
         .gpio_if = gpio_if,
-        .codec_mode = codec_mode,
-        .pa_pin = pa_pin,
-        .pa_reverted = false,
-        .master_mode = false,
-        .use_mclk = false,
-        .digital_mic = false,
-        .invert_mclk = false,
-        .invert_sclk = false,
-        .hw_gain = gain,
-        .no_dac_ref = false,
+        .sys_cfg = {
+            .is_master = false,
+            .no_mclk = true,
+        },
+        .adc_cfg = {
+            .digital_mic = false,
+        },
+        .dac_cfg = {
+            .ref_enable = true,
+        },
+        .pa_cfg = {
+            .pa_pin = pa_pin,
+            .pa_active_low = false,
+            .hw_gain = gain,
+        },
     };
     const audio_codec_if_t *codec_if = es8389_codec_new(&es8389_cfg);
     ESP_RETURN_ON_FALSE(codec_if, NULL, TAG, "create ES8389 codec interface failed");
@@ -346,12 +349,12 @@ static esp_codec_dev_handle_t bsp_audio_codec_init(esp_codec_dev_type_t dev_type
 
 esp_codec_dev_handle_t bsp_audio_codec_speaker_init(void)
 {
-    return bsp_audio_codec_init(ESP_CODEC_DEV_TYPE_OUT, ESP_CODEC_DEV_WORK_MODE_DAC, BSP_AUDIO_PA_CTRL);
+    return bsp_audio_codec_init(ESP_CODEC_DEV_TYPE_OUT, BSP_AUDIO_PA_CTRL);
 }
 
 esp_codec_dev_handle_t bsp_audio_codec_microphone_init(void)
 {
-    return bsp_audio_codec_init(ESP_CODEC_DEV_TYPE_IN, ESP_CODEC_DEV_WORK_MODE_ADC, GPIO_NUM_NC);
+    return bsp_audio_codec_init(ESP_CODEC_DEV_TYPE_IN, GPIO_NUM_NC);
 }
 
 /* ==========================================================================
