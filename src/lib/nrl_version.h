@@ -4,7 +4,7 @@
 // NRL_FIRMWARE_VERSION can be overridden at build time via -D so CI can
 // stamp the tag (e.g. v0.0.2 -> "0.0.2") into the binary.
 #ifndef NRL_FIRMWARE_VERSION
-#define NRL_FIRMWARE_VERSION "0.8.87"
+#define NRL_FIRMWARE_VERSION "0.8.88"
 #endif
 
 #ifndef NRL_FIRMWARE_NAME

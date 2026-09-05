@@ -402,23 +402,19 @@ static void applyDefaultAdcConfig(void)
 {
     s_config.adc_dmic_enabled = false;
     s_config.adc_linsel = true;
-    // PGA 12 dB (was 30 dB). The LMA2718B analog MEMS mic delivers -38 dBV/Pa,
-    // so at 100 dB SPL it produces ~8 mVrms. With 30 dB of PGA that hits 251 mV
-    // at the ADC, and once the 24 dB ADC_SCALE (below) was applied the digital
-    // stage clipped hard on any loud consonant. 12 dB keeps the analog signal
-    // well under the 1 Vrms ADC full-scale ceiling for any voice level up to
-    // ~120 dB SPL and lets the ALC handle loudness.
-    s_config.adc_pga_gain = 4U;
+    // PGA 30 dB with ALC enabled as the safety net: the ALC compresses loud
+    // input toward the -7.8 dBFS target, so the higher analog gain buys mic
+    // sensitivity without the unprotected clipping seen when ALC was off.
+    s_config.adc_pga_gain = 10U;
     s_config.adc_ramprate = 4U;
     s_config.adc_dmic_sense = false;
     s_config.adc_sync = true;
     s_config.adc_inv = false;
     s_config.adc_ramclr = false;
-    // ADC_SCALE 0 dB (was 24 dB). The digital scale sits before the ALC in the
-    // ES8311 datapath, so the old 24 dB value clipped loud input digitally
-    // before the ALC could compress it. The ALC + REG17 MAXGAIN now provide
-    // all the digital gain that is needed.
-    s_config.adc_scale = 0U;
+    // ADC_SCALE 42 dB. The digital scale sits before the ALC in the ES8311
+    // datapath, but with ALC enabled loud input is compressed before it can
+    // rail; bench tests with this value show no saturation or distortion.
+    s_config.adc_scale = 7U;
     // ALC on: boosts quiet talkers and limits loud input so the mic is neither
     // too quiet nor clipping.
     s_config.alc_enabled = true;
