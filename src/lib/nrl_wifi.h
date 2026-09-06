@@ -44,6 +44,10 @@ WifiConnResult wifiEnsureConnected(const char *ssid, const char *pass, uint32_t 
 bool nrlWifiApStart(const char *ssid, uint8_t channel, uint8_t max_conn,
                     uint32_t ap_ip, uint32_t gw, uint32_t mask);
 bool nrlWifiApStop();
+// True while the AP interface is active at the driver level. Cleared by both
+// nrlWifiApStop() and nrlWifiStopRadio(); lets higher layers resync their own
+// bookkeeping after an external radio stop.
+bool nrlWifiApIsActive();
 // Stop the whole Wi-Fi radio (STA+AP -> WIFI_MODE_NULL / esp_wifi_stop), freeing
 // the shared radio and Wi-Fi RAM for Bluetooth A2DP. wifiEnsureConnected() restores.
 bool nrlWifiStopRadio();

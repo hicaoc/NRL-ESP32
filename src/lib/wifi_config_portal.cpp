@@ -452,6 +452,17 @@ static void performWifiPrescan()
 
 static void ensureApRunning()
 {
+    // The radio can be stopped externally (WiFi master switch off ->
+    // nrlWifiStopRadio) without going through shutdownDnsAndAp(), leaving
+    // s_ap_started stale-true so the AP would never restart. Resync our
+    // bookkeeping against the driver state before the early return below.
+    if (s_ap_started && !nrlWifiApIsActive()) {
+        s_ap_started = false;
+        if (s_dns_started) {
+            NRL_CaptiveDNS_Stop();
+            s_dns_started = false;
+        }
+    }
     if (!s_ap_should_run || s_ap_started) {
         return;
     }

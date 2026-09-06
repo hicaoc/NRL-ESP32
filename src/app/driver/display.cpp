@@ -3876,6 +3876,7 @@ void buildBi4umdMusicContent()
 
     s_shown_music_path[0] = '\1';
     refreshBi4umdMusic();
+    attachSwipeNav(content);
 }
 
 void buildBi4umdMusicListContent()
@@ -4073,10 +4074,11 @@ void buildBi4umdDebugContent()
 
 #if NRL_BOARD_IS_BI4UMD_FAMILY
 // ---------------------------------------------------------------------------
-// Swipe navigation across the four touch pages. Linear page order:
-//   SSTV TX | SSTV RX | home | APRS station list
-// A left finger swipe always walks right in that row (TX->RX->home->APRS),
-// a right swipe walks left (APRS->home->RX->TX).
+// Swipe navigation across the five touch pages. Linear page order:
+//   SSTV TX | SSTV RX | home | APRS station list | Music player
+// A left finger swipe always walks right in that row
+// (TX->RX->home->APRS->Music), a right swipe walks left
+// (Music->APRS->home->RX->TX).
 // LVGL delivers LV_EVENT_GESTURE to the pressed widget; GESTURE_BUBBLE on
 // every descendant funnels it up to the page root carrying the handler.
 // Swipes starting on a scrollable list are consumed by scrolling (LVGL core).
@@ -4136,17 +4138,26 @@ void processSwipeNav()
                 bi4umdOpenSstvPage(true);
                 s_bi4umd_sstv_from_settings = false;
             }
+        } else if (s_bi4umd_page == Bi4umdPage::Music && !forward) {
+            // Rightmost page: a right swipe walks back to the APRS list.
+            bi4umdOpenAprsPage(MenuPage::AprsList);
+            s_bi4umd_aprs_from_settings = false;
         }
         return;
     }
-    if (s_menu_page == MenuPage::AprsList && !forward) {
+    if (s_menu_page == MenuPage::AprsList) {
         s_menu_active = false;
-        bi4umdShowRadioPage(nullptr);
+        if (!forward) {
+            bi4umdShowRadioPage(nullptr);
+        } else {
+            bi4umdShowMusicPage(nullptr);
+        }
         return;
     }
     if (s_menu_page == MenuPage::Sstv) {
-        // Linear page order: SSTV TX | SSTV RX | home | APRS. A left finger
-        // swipe always walks right in that row, a right swipe walks left.
+        // Linear page order: SSTV TX | SSTV RX | home | APRS | Music. A left
+        // finger swipe always walks right in that row, a right swipe walks
+        // left.
         if (s_sstv_rx_view && !forward) {
             bi4umdOpenSstvPage(false); // RX -> TX
             s_bi4umd_sstv_from_settings = false;
@@ -4408,6 +4419,14 @@ void buildUi()
     lv_label_set_text(s_lbl_rf_rssi, "");
 #endif
 
+#if NRL_BOARD_IS_BI4UMD_FAMILY
+    // GPS fix state + satellite count in the top status bar (same slot on
+    // both family boards; bi4umd has no RSSI readout in between).
+    s_lbl_gps = makeLabel(top, &lv_font_montserrat_14, kColorWeak);
+    lv_obj_align(s_lbl_gps, LV_ALIGN_LEFT_MID, 108, 0);
+    lv_label_set_text(s_lbl_gps, LV_SYMBOL_GPS);
+#endif
+
     // ---- Centre content ----
     buildHomeContent();
 
@@ -4427,12 +4446,6 @@ void buildUi()
     s_lbl_cpu = makeLabel(bottom, &lv_font_montserrat_16, kColorSub);
     lv_obj_align(s_lbl_cpu, LV_ALIGN_RIGHT_MID, -8, 0);
     lv_label_set_text(s_lbl_cpu, "--/--");
-
-    // GPS (with satellite count) lives in the top status bar on this board;
-    // the IP/call-status line is created below the clock in the content area.
-    s_lbl_gps = makeLabel(top, &lv_font_montserrat_14, kColorWeak);
-    lv_obj_align(s_lbl_gps, LV_ALIGN_LEFT_MID, 108, 0);
-    lv_label_set_text(s_lbl_gps, LV_SYMBOL_GPS);
 #else
     // IP address on the left, per-core CPU load on the right.
     s_lbl_ip = makeLabel(bottom, &lv_font_montserrat_16, kColorIp);
@@ -4441,9 +4454,13 @@ void buildUi()
     lv_obj_align(s_lbl_ip, LV_ALIGN_LEFT_MID, 8, 0);
     lv_label_set_text(s_lbl_ip, "---");
 
+#if NRL_BOARD != NRL_BOARD_BI4UMD
+    // bi4umd carries GPS in the top bar like bh4tdv_rf; the other narrow
+    // boards keep it here in the bottom bar.
     s_lbl_gps = makeLabel(bottom, &lv_font_montserrat_16, kColorWeak);
     lv_obj_align(s_lbl_gps, LV_ALIGN_CENTER, 38, 0);
     lv_label_set_text(s_lbl_gps, LV_SYMBOL_GPS);
+#endif
 
     s_lbl_cpu = makeLabel(bottom, &lv_font_montserrat_16, kColorSub);
     lv_obj_align(s_lbl_cpu, LV_ALIGN_RIGHT_MID, -8, 0);
