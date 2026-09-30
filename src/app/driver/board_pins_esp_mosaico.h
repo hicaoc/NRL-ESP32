@@ -99,4 +99,11 @@
 // POWER_SWITCH (SAM8108 on/off controller + power button) on GPIO57.
 #define NRL_PIN_POWER_SWITCH    57
 
+// V1.2 hardware (eFuse USER_DATA 0x0101/0x0102) moves the shared I2C bus and
+// swaps the LCD clock/reset pins; handled at runtime by mosaico_variant.cpp.
+#define NRL_PIN_I2C_SDA_V1_2      56
+#define NRL_PIN_I2C_SCL_V1_2      3
+#define NRL_PIN_LCD_QSPI_CLK_V1_2 42
+#define NRL_PIN_LCD_RST_V1_2      44
+
 #endif // DRIVER_BOARD_PINS_ESP_MOSAICO_H

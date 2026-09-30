@@ -103,6 +103,12 @@ dependencies:
     version: "*"
     rules:
       - if: "target == esp32s31"
+  # ESP-Mosaico: tinyusb CDC-ACM device console on the Type-C OTG port, so the
+  # same cable flashes the board and shows logs as a COM port.
+  espressif/esp_tinyusb:
+    version: "*"
+    rules:
+      - if: "target == esp32s31"
   # LVGL (gezipai ST7789 LCD UI) is vendored at components/lvgl/ by
   # scripts/fetch_lvgl.py at build time. It is deliberately NOT listed here
   # because the IDF component manager would (a) overwrite it from the

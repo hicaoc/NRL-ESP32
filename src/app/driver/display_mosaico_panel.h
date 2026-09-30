@@ -25,6 +25,11 @@ bool MosaicoPanel_SetBrightness(uint8_t brightness);
 // Display on/off (CO5300 0x29/0x28).
 bool MosaicoPanel_SetDisplayOn(bool on);
 
+// Wait for the last draw_bitmap's DMA transfer to complete. The LVGL flush
+// must call this before lv_display_flush_ready, or LVGL re-renders into the
+// buffer while the SPI DMA is still streaming it (garbled pixels).
+bool MosaicoPanel_WaitFlushDone(uint32_t timeout_ms);
+
 #ifdef __cplusplus
 }
 #endif

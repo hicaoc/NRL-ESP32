@@ -25,6 +25,8 @@ StaticSemaphore_t s_init_mutex_buffer = {};
 portMUX_TYPE s_init_mutex_lock = portMUX_INITIALIZER_UNLOCKED;
 CachedDevice s_devices[kMaxDevices] = {};
 size_t s_device_count = 0u;
+int s_pin_sda = -1;
+int s_pin_scl = -1;
 
 bool ensureInitMutex()
 {
@@ -42,10 +44,12 @@ bool ensureInitMutex()
 bool ensureBusLocked()
 {
     if (s_bus != nullptr) return true;
+    const int sda = (s_pin_sda >= 0) ? s_pin_sda : NRL_PIN_I2C_SDA;
+    const int scl = (s_pin_scl >= 0) ? s_pin_scl : NRL_PIN_I2C_SCL;
     i2c_master_bus_config_t config = {};
     config.i2c_port = kI2cPort;
-    config.sda_io_num = static_cast<gpio_num_t>(NRL_PIN_I2C_SDA);
-    config.scl_io_num = static_cast<gpio_num_t>(NRL_PIN_I2C_SCL);
+    config.sda_io_num = static_cast<gpio_num_t>(sda);
+    config.scl_io_num = static_cast<gpio_num_t>(scl);
     config.clk_source = I2C_CLK_SRC_DEFAULT;
     config.glitch_ignore_cnt = 7;
     config.flags.enable_internal_pullup = true;
@@ -55,7 +59,7 @@ bool ensureBusLocked()
         return false;
     }
     ESP_LOGI(TAG, "master bus ready: port=%d sda=%d scl=%d",
-             static_cast<int>(kI2cPort), NRL_PIN_I2C_SDA, NRL_PIN_I2C_SCL);
+             static_cast<int>(kI2cPort), sda, scl);
     return true;
 }
 
@@ -177,4 +181,14 @@ bool I2C_MasterTransmitReceiveOnce(const uint8_t address,
         device, write_data, write_size, read_data, read_size, timeout_ms);
     i2c_master_bus_rm_device(device);
     return err == ESP_OK;
+}
+
+void I2C_OverridePins(const int sda, const int scl)
+{
+    // Only meaningful before the lazy bus creation; after that the pins are
+    // already bound to the peripheral.
+    if (s_bus == nullptr) {
+        s_pin_sda = sda;
+        s_pin_scl = scl;
+    }
 }

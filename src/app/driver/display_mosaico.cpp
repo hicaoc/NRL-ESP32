@@ -3,7 +3,7 @@
 // LVGL port (no esp_lvgl_port, same pattern as display_s31.cpp): two PSRAM
 // draw buffers in PARTIAL render mode, flush pushes dirty areas to the panel
 // over QSPI. On top of that sits the square-portrait multi-page touch UI
-// (Home / Radio / Music / Sensors / Settings) in the "AMOLED Dark" theme.
+// (Home / Music / Sensors / Settings) in the "AMOLED Dark" theme.
 
 #include "board_pins.h"
 
@@ -16,13 +16,18 @@
 #include "mosaico_sensors.h"
 #include "status_io.h"
 
+#include "../../lib/nrl_audio_bridge.h"
 #include "../../lib/nrl_net_compat.h"
 #include "../../lib/nrl_version.h"
 #include "../../lib/wifi_config_portal.h"
 #include "../../services/music_player.h"
+#include "../../services/signaling_service.h"
 #include "../../services/time_sync_service.h"
 
 #include <driver/gpio.h>
+#include <esp_cache.h>
+#include <esp_efuse.h>
+#include <esp_efuse_table.h>
 #include <esp_heap_caps.h>
 #include <esp_idf_version.h>
 #include <esp_lcd_touch_cst9220.h>
@@ -44,6 +49,10 @@ extern "C" {
 extern const lv_font_t lv_font_cjk_16 __attribute__((weak));
 extern const lv_font_t lv_font_cjk_20 __attribute__((weak));
 }
+
+// Defined in display_mosaico_panel.cpp; tracks Display_Init progress for the
+// CDC-console status dump.
+extern "C" volatile int g_mosaico_boot_stage;
 
 namespace {
 
@@ -107,36 +116,82 @@ void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
         static_cast<esp_lcd_panel_handle_t>(lv_display_get_user_data(disp));
     const int32_t w = area->x2 - area->x1 + 1;
     const int32_t h = area->y2 - area->y1 + 1;
+    // fullWidthArea (below) forces every dirty area to span the whole 480 px
+    // row: a full-width strip is 960 bytes = 15x64, so LVGL's
+    // LV_DRAW_BUF_STRIDE_ALIGN(64) row padding never kicks in and px_map is
+    // always tightly packed. Narrow-area flushes were the source of every
+    // artifact seen on this panel (sheared rows, bright dots, violet lines).
+    if (w != kWidth) {
+        ESP_LOGW(kTag, "unexpected narrow flush %ldx%ld @(%ld,%ld)",
+                 static_cast<long>(w), static_cast<long>(h),
+                 static_cast<long>(area->x1), static_cast<long>(area->y1));
+    }
+    // LVGL's software draw writes the PSRAM buffer through the CPU cache;
+    // the byte swap below then dirties it again. Clean+invalidate so the swap
+    // reads exactly what was rendered.
+    esp_cache_msync(px_map, static_cast<uint32_t>(w) * 2u * static_cast<uint32_t>(h),
+                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_DIR_M2C |
+                        ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
     // LVGL RGB565 is little-endian in memory; the CO5300 wants big-endian.
     lv_draw_sw_rgb565_swap(px_map, w * h);
+    // The QSPI DMA reads PSRAM directly (psram_dma_direct): clean the swapped
+    // data out of the cache or the panel shows stale-memory pixels.
+    esp_cache_msync(px_map, static_cast<uint32_t>(w) * 2u * static_cast<uint32_t>(h),
+                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
     esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1, area->x2 + 1,
                               area->y2 + 1, px_map);
+    // Block until the SPI DMA actually finished streaming this buffer before
+    // telling LVGL it may reuse it.
+    MosaicoPanel_WaitFlushDone(200);
     lv_display_flush_ready(disp);
+}
+
+// Force every invalidated area to a full-width strip. The CO5300 QSPI path is
+// only reliable for full-row-width transfers here (narrow windows showed
+// stride/shear/cache artifacts no matter how they were packed), and a
+// 480x~60 strip re-render costs only a few ms.
+void fullWidthArea(lv_event_t *e)
+{
+    lv_area_t *a = static_cast<lv_area_t *>(lv_event_get_param(e));
+    if (a == nullptr) {
+        return;
+    }
+    a->x1 = 0;
+    a->x2 = kWidth - 1;
 }
 
 bool initLvgl()
 {
     lv_init();
+    g_mosaico_boot_stage = 71;
 
     s_disp = lv_display_create(kWidth, kHeight);
     if (s_disp == nullptr) {
         ESP_LOGE(kTag, "display create failed");
         return false;
     }
+    g_mosaico_boot_stage = 72;
     lv_display_set_color_format(s_disp, LV_COLOR_FORMAT_RGB565);
     lv_display_set_user_data(s_disp, s_panel);
     lv_display_set_flush_cb(s_disp, lvglFlush);
 
     const size_t buf_bytes = static_cast<size_t>(kWidth) * kDrawBufLines * 2u;
-    void *buf0 = heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    void *buf1 = heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    // LVGL asserts LV_DRAW_BUF_ALIGN(=64)-aligned buffers; plain
+    // heap_caps_malloc only guarantees 8, which trips LV_ASSERT_FORMAT_MSG in
+    // lv_display_set_buffers (whose default handler is `while(1)` -- an
+    // infinite hang, seen on hardware as a black screen with a live app).
+    void *buf0 = heap_caps_aligned_alloc(64, buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    void *buf1 = heap_caps_aligned_alloc(64, buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (buf0 == nullptr || buf1 == nullptr) {
         ESP_LOGE(kTag, "draw buffer alloc failed");
         return false;
     }
+    g_mosaico_boot_stage = 73;
     lv_display_set_buffers(s_disp, buf0, buf1, buf_bytes,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_display_add_event_cb(s_disp, fullWidthArea, LV_EVENT_INVALIDATE_AREA, nullptr);
     lv_tick_set_cb(lvglTick);
+    g_mosaico_boot_stage = 74;
     return true;
 }
 
@@ -150,15 +205,19 @@ void touchRead(lv_indev_t *, lv_indev_data_t *data)
     esp_lcd_touch_read_data(s_touch);
     if (esp_lcd_touch_get_data(s_touch, points, &count, 1) == ESP_OK && count > 0) {
         // The touch controller does not follow the panel's MADCTL rotation;
-        // remap native coordinates into the rotated logical frame.
+        // remap native coordinates into the rotated logical frame. With
+        // swap_xy+mirror_x (rot 90) the panel shows logical (x,y) at physical
+        // (W-1-y, x), so the inverse map is x=ty, y=W-1-tx; rot 270 is the
+        // mirror image. (The two landscape cases must not be swapped --
+        // 0/180 are self-symmetric and unaffected.)
         const int tx = static_cast<int>(points[0].x);
         const int ty = static_cast<int>(points[0].y);
         int x = tx;
         int y = ty;
         switch (s_rotation) {
-            case 90:  x = kWidth - 1 - ty;  y = tx; break;
+            case 90:  x = ty;               y = kWidth - 1 - tx; break;
             case 180: x = kWidth - 1 - tx;  y = kHeight - 1 - ty; break;
-            case 270: x = ty;               y = kHeight - 1 - tx; break;
+            case 270: x = kHeight - 1 - ty; y = tx; break;
             default: break;
         }
         data->point.x = static_cast<int16_t>(x);
@@ -183,6 +242,16 @@ bool initTouch()
     esp_lcd_panel_io_i2c_config_t io_cfg = {};
     io_cfg.dev_addr = ESP_LCD_TOUCH_IO_I2C_CST9220_ADDRESS;
     io_cfg.scl_speed_hz = 400000;
+    // Same fields as ESP_LCD_TOUCH_IO_I2C_CST9220_CONFIG(), assigned one by one
+    // (the macro's C designated initializers don't compile under C++ here).
+    io_cfg.control_phase_bytes = 1;
+    io_cfg.dc_bit_offset = 0;
+    io_cfg.lcd_cmd_bits = 8;
+    io_cfg.lcd_param_bits = 8;
+    io_cfg.flags.disable_control_phase = 1;
+    // Left at 0 a failed transfer waits forever and hangs Display_Init (the
+    // official BSP sets BSP_LCD_TOUCH_I2C_TIMEOUT_MS=100 for the same reason).
+    io_cfg.transaction_timeout_ms = 100;
     esp_lcd_panel_io_handle_t touch_io = nullptr;
     if (esp_lcd_new_panel_io_i2c(bus, &io_cfg, &touch_io) != ESP_OK) {
         ESP_LOGW(kTag, "touch IO create failed");
@@ -193,7 +262,7 @@ bool initTouch()
     touch_cfg.x_max = kWidth;
     touch_cfg.y_max = kHeight;
     touch_cfg.rst_gpio_num = GPIO_NUM_NC;
-    touch_cfg.int_gpio_num = GPIO_NUM_NC;
+    touch_cfg.int_gpio_num = (gpio_num_t)NRL_PIN_TOUCH_INT;
     touch_cfg.levels.reset = 0;
     touch_cfg.levels.interrupt = 0;
     if (esp_lcd_touch_new_i2c_cst9220(touch_io, &touch_cfg, &s_touch) != ESP_OK) {
@@ -227,7 +296,6 @@ struct TrEntry {
 const TrEntry kTr[] = {
     // Tabs
     {"Home", "主页"},
-    {"Radio", "对讲"},
     {"Music", "音乐"},
     {"Sensors", "传感器"},
     {"Settings", "设置"},
@@ -239,17 +307,13 @@ const TrEntry kTr[] = {
     {"Close", "关闭"},
     // Home cards
     {"SERVER", "服务器"},
+    {"DEVICE IP", "设备 IP"},
     {"WIFI", "无线网络"},
     {"BATTERY", "电池"},
     {"HEADING", "航向"},
     {"No gauge", "无电量计"},
-    // Radio page
-    {"READY", "就绪"},
-    {"TRANSMITTING", "发射中"},
+    // PTT bar
     {"HOLD", "按住"},
-    {"Push-to-talk on the NRL network", "通过 NRL 网络按住讲话"},
-    {"TX auto-off: %u s", "发射超时自动关闭: %u 秒"},
-    {"TX auto-off: off", "发射超时: 无"},
     // Music page
     {"NET RADIO", "网络电台"},
     {"Play", "播放"},
@@ -271,8 +335,12 @@ const TrEntry kTr[] = {
     {"sensor absent", "传感器缺席"},
     // Settings page
     {"BRIGHTNESS", "亮度"},
+    {"MIC VOLUME", "麦克风音量"},
+    {"SPEAKER VOLUME", "扬声器音量"},
     {"Language", "语言"},
     {"Auto-rotate", "自动旋转"},
+    {"Rotation", "屏幕方向"},
+    {"Vibration", "震动反馈"},
     {"WiFi Setup", "WiFi 设置"},
     {"Hotspot Info", "热点信息"},
     {"ABOUT", "关于"},
@@ -436,6 +504,64 @@ void setAutoRotate(bool enabled)
     }
 }
 
+// ---- Manual rotation (NVS "mosaico"/"rotation", cycles 0/90/180/270) ---------
+// The Settings button picks the orientation directly; when auto-rotate is on
+// the IMU may override it later, when off this is the only way to rotate.
+
+void saveRotation()
+{
+    nvs_handle_t nvs;
+    if (nvs_open("mosaico", NVS_READWRITE, &nvs) == ESP_OK) {
+        (void)nvs_set_u8(nvs, "rotation", static_cast<uint8_t>(s_rotation / 90));
+        (void)nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+}
+
+void loadRotation()
+{
+    nvs_handle_t nvs;
+    if (nvs_open("mosaico", NVS_READONLY, &nvs) == ESP_OK) {
+        uint8_t value = 0;
+        if (nvs_get_u8(nvs, "rotation", &value) == ESP_OK && value <= 3u) {
+            applyRotation(static_cast<int>(value) * 90);
+        }
+        nvs_close(nvs);
+    }
+}
+
+// ---- Haptic feedback (button vibration, NVS "mosaico"/"haptic", default on) --
+
+bool s_haptic = true;
+
+void loadHaptic()
+{
+    nvs_handle_t nvs;
+    if (nvs_open("mosaico", NVS_READONLY, &nvs) == ESP_OK) {
+        uint8_t value = 1;
+        if (nvs_get_u8(nvs, "haptic", &value) == ESP_OK) {
+            s_haptic = value != 0u;
+        }
+        nvs_close(nvs);
+    }
+    STATUS_IO_SetHapticEnabled(s_haptic);
+}
+
+void setHaptic(bool enabled)
+{
+    s_haptic = enabled;
+    STATUS_IO_SetHapticEnabled(enabled);
+    nvs_handle_t nvs;
+    if (nvs_open("mosaico", NVS_READWRITE, &nvs) == ESP_OK) {
+        (void)nvs_set_u8(nvs, "haptic", enabled ? 1u : 0u);
+        (void)nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+    if (enabled) {
+        STATUS_IO_Vibrate(30);  // feel the switch turning back on
+    }
+}
+
 // NOTE: accel axis signs assume the BMI270's PCB orientation; if rotation
 // lands 90/270-swapped or 180-flipped on real hardware, fix the mapping here.
 void pollAutoRotate(uint32_t now)
@@ -480,18 +606,25 @@ void pollAutoRotate(uint32_t now)
 
 // ---- Fonts (Montserrat primary + optional CJK fallback) ---------------------
 
+lv_font_t s_font_ui_14;
 lv_font_t s_font_ui_16;
 lv_font_t s_font_ui_20;
+lv_font_t s_font_ui_28;
 
 void initFonts()
 {
+    s_font_ui_14 = lv_font_montserrat_14;
     s_font_ui_16 = lv_font_montserrat_16;
     s_font_ui_20 = lv_font_montserrat_20;
+    s_font_ui_28 = lv_font_montserrat_28;
     if (&lv_font_cjk_16 != nullptr) {
+        s_font_ui_14.fallback = &lv_font_cjk_16;
         s_font_ui_16.fallback = &lv_font_cjk_16;
     }
     if (&lv_font_cjk_20 != nullptr) {
         s_font_ui_20.fallback = &lv_font_cjk_20;
+        // No 28px CJK bitmap; fall back to the 20px glyphs for titles.
+        s_font_ui_28.fallback = &lv_font_cjk_20;
     }
 }
 
@@ -499,7 +632,6 @@ void initFonts()
 
 enum class Page : int {
     Home = 0,
-    Radio,
     Music,
     Sensors,
     Settings,
@@ -523,12 +655,14 @@ lv_obj_t *s_lbl_clock = nullptr;
 lv_obj_t *s_lbl_callsign_top = nullptr;
 lv_obj_t *s_lbl_wifi = nullptr;
 lv_obj_t *s_lbl_link = nullptr;
+lv_obj_t *s_lbl_vol = nullptr;
 lv_obj_t *s_lbl_batt = nullptr;
 
 // Change-detection caches (keep Display_Poll cheap: no redraw when unchanged).
 char s_shown_clock[16] = {};
 char s_shown_callsign[16] = {};
 char s_shown_wifi[16] = {};
+char s_shown_vol[12] = {};
 char s_shown_batt[16] = {};
 char s_shown_home_clock[16] = {};
 
@@ -536,18 +670,15 @@ char s_shown_home_clock[16] = {};
 lv_obj_t *s_home_clock = nullptr;
 lv_obj_t *s_home_date = nullptr;
 lv_obj_t *s_home_callsign = nullptr;
-lv_obj_t *s_home_server = nullptr;
-lv_obj_t *s_home_wifi = nullptr;
-lv_obj_t *s_home_wifi_sub = nullptr;
-lv_obj_t *s_home_batt = nullptr;
-lv_obj_t *s_home_batt_sub = nullptr;
-lv_obj_t *s_home_heading = nullptr;
+lv_obj_t *s_home_rx_codec = nullptr;
+lv_obj_t *s_home_net_server = nullptr;
+lv_obj_t *s_home_net_ip = nullptr;
+bool s_home_rx_shown = false;
+char s_shown_home_sig[48] = {};
 
-// Radio page.
+// PTT bar (merged into the Home page).
 lv_obj_t *s_ptt_btn = nullptr;
 lv_obj_t *s_ptt_label = nullptr;
-lv_obj_t *s_radio_state = nullptr;
-lv_obj_t *s_radio_hint = nullptr;
 bool s_ptt_tx_visual = false;
 
 // Music page.
@@ -568,6 +699,9 @@ lv_obj_t *s_sens_mag_warn = nullptr;
 
 // Settings page.
 lv_obj_t *s_settings_bright_label = nullptr;
+lv_obj_t *s_settings_mic_label = nullptr;
+lv_obj_t *s_settings_spk_label = nullptr;
+lv_obj_t *s_settings_rot_btn_label = nullptr;
 lv_obj_t *s_settings_lang_btn_label = nullptr;
 
 // Provisioning screen / overlay.
@@ -597,12 +731,16 @@ lv_obj_t *makeCard(lv_obj_t *parent, int x, int y, int w, int h, int pad = 16)
 lv_obj_t *makeLabel(lv_obj_t *parent, const char *text, const lv_font_t *font,
                     uint32_t color)
 {
-    // Route Montserrat 16/20 through their CJK-fallback twins so translated
-    // text renders; pure-ASCII output is unaffected.
-    if (font == &lv_font_montserrat_16) {
+    // Route Montserrat 14/16/20/28 through their CJK-fallback twins so
+    // translated text renders; pure-ASCII output is unaffected.
+    if (font == &lv_font_montserrat_14) {
+        font = &s_font_ui_14;
+    } else if (font == &lv_font_montserrat_16) {
         font = &s_font_ui_16;
     } else if (font == &lv_font_montserrat_20) {
         font = &s_font_ui_20;
+    } else if (font == &lv_font_montserrat_28) {
+        font = &s_font_ui_28;
     }
     lv_obj_t *label = lv_label_create(parent);
     lv_label_set_text(label, text);
@@ -672,6 +810,42 @@ void formatCallsign(char *out, size_t out_size)
              static_cast<unsigned>(cfg->callsign_ssid));
 }
 
+// ---- Remote caller (incoming NRL voice) --------------------------------------
+
+// True while remote voice is playing; out gets "CALL-SSID".
+bool remoteCaller(char *out, size_t out_size)
+{
+    char voice_call[12] = {};
+    unsigned voice_ssid = 0;
+    if (!NRLAudioBridge_GetRemoteCaller(voice_call, sizeof(voice_call), &voice_ssid) ||
+        voice_call[0] == '\0') {
+        return false;
+    }
+    snprintf(out, out_size, "%s-%u", voice_call, voice_ssid);
+    return true;
+}
+
+const char *rxCodecName()
+{
+    return (NRLAudioBridge_GetRxCodec() == 1u) ? "OPUS" : "G.711";
+}
+
+// Decoded-signaling line (DMR ID + last MDC/CTCSS/DTMF result), empty when the
+// decoders produced nothing.
+void signalingInfo(char *out, size_t out_size)
+{
+    char sig[32] = {};
+    SIGNALING_GetLastResult(sig, sizeof(sig));
+    const uint32_t dmr_id = NRLAudioBridge_GetRemoteDmrId();
+    if (dmr_id != 0u) {
+        snprintf(out, out_size, "DMRID %lu%s%s",
+                 static_cast<unsigned long>(dmr_id),
+                 sig[0] != '\0' ? " · " : "", sig);
+    } else {
+        snprintf(out, out_size, "%s", sig);
+    }
+}
+
 void formatClock(char *out, size_t out_size, struct tm *out_tm)
 {
     time_t now = time(nullptr);
@@ -717,27 +891,40 @@ void buildStatusBar(lv_obj_t *scr)
     lv_obj_set_style_pad_all(bar, 0, 0);
     lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
 
+    // Fixed, non-overlapping slots (480 px bar):
+    //   clock 34..104 | callsign 112..252 | wifi 256..312 | link ~320..336
+    //   | vol 344..388 | batt 396..452
     s_lbl_clock = makeLabel(bar, "--:--", &lv_font_montserrat_20, kColorText);
-    lv_obj_set_width(s_lbl_clock, 90);
+    lv_obj_set_width(s_lbl_clock, 70);
     lv_obj_set_style_text_align(s_lbl_clock, LV_TEXT_ALIGN_LEFT, 0);
-    lv_obj_align(s_lbl_clock, LV_ALIGN_LEFT_MID, kMargin, 0);
+    // Rounded-corner panel: keep corner content out of the clipped edge.
+    lv_obj_align(s_lbl_clock, LV_ALIGN_LEFT_MID, 34, 0);
 
     s_lbl_callsign_top = makeLabel(bar, "----------", &lv_font_montserrat_20, kColorAccent);
-    lv_obj_set_width(s_lbl_callsign_top, 200);
-    lv_obj_set_style_text_align(s_lbl_callsign_top, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(s_lbl_callsign_top, 140);
+    lv_obj_set_style_text_align(s_lbl_callsign_top, LV_TEXT_ALIGN_LEFT, 0);
     lv_label_set_long_mode(s_lbl_callsign_top, LV_LABEL_LONG_DOT);
-    lv_obj_align(s_lbl_callsign_top, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_align(s_lbl_callsign_top, LV_ALIGN_LEFT_MID, 112, 0);
 
     s_lbl_wifi = makeLabel(bar, LV_SYMBOL_WIFI, &lv_font_montserrat_16, kColorSub);
-    lv_obj_align(s_lbl_wifi, LV_ALIGN_RIGHT_MID, -118, 0);
+    lv_obj_set_width(s_lbl_wifi, 56);
+    lv_obj_set_style_text_align(s_lbl_wifi, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(s_lbl_wifi, LV_ALIGN_RIGHT_MID, -168, 0);
 
     s_lbl_link = makeLabel(bar, "\xE2\x97\x8F", &lv_font_montserrat_16, kColorSub); // ●
-    lv_obj_align(s_lbl_link, LV_ALIGN_RIGHT_MID, -88, 0);
+    lv_obj_align(s_lbl_link, LV_ALIGN_RIGHT_MID, -144, 0);
+
+    // Speaker volume readout (icon + %); the music page and the Settings
+    // speaker slider both change it.
+    s_lbl_vol = makeLabel(bar, "", &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(s_lbl_vol, 44);
+    lv_obj_set_style_text_align(s_lbl_vol, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(s_lbl_vol, LV_ALIGN_RIGHT_MID, -92, 0);
 
     s_lbl_batt = makeLabel(bar, "--", &lv_font_montserrat_16, kColorSub);
-    lv_obj_set_width(s_lbl_batt, 72);
+    lv_obj_set_width(s_lbl_batt, 56);
     lv_obj_set_style_text_align(s_lbl_batt, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_align(s_lbl_batt, LV_ALIGN_RIGHT_MID, -kMargin, 0);
+    lv_obj_align(s_lbl_batt, LV_ALIGN_RIGHT_MID, -28, 0);
 }
 
 void refreshStatusBar()
@@ -758,13 +945,12 @@ void refreshStatusBar()
     formatCallsign(callsign, sizeof(callsign));
     setLabel(s_lbl_callsign_top, s_shown_callsign, sizeof(s_shown_callsign), callsign);
 
-    // WiFi glyph colored by RSSI (or amber in AP/config mode).
-    uint32_t wifi_color = kColorSub;
-    char wifi_text[16];
+    // WiFi glyph + RSSI dBm, colored by signal (amber in AP/config mode).
+    uint32_t wifi_color;
+    char wifi_text[12];
     if (nrlWifiStaConnected()) {
         wifi_ap_record_t ap = {};
-        const bool have_ap = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
-        const int rssi = have_ap ? ap.rssi : 0;
+        const int rssi = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : 0;
         snprintf(wifi_text, sizeof(wifi_text), LV_SYMBOL_WIFI "%d", rssi);
         wifi_color = (rssi >= -65) ? kColorGood : ((rssi >= -78) ? kColorWarn : kColorBad);
     } else {
@@ -778,6 +964,16 @@ void refreshStatusBar()
     const bool linked = STATUS_IO_NrlServerLinked();
     lv_obj_set_style_text_color(s_lbl_link,
                                 lv_color_hex(linked ? kColorGood : kColorSub), 0);
+
+    // Speaker volume: mute glyph at 0, level glyph otherwise.
+    const ExternalRadioConfig *vcfg = EXTERNAL_RADIO_GetConfig();
+    const int vol_pct = (vcfg != nullptr)
+                            ? (static_cast<int>(vcfg->line_out_volume) * 100 + 127) / 255
+                            : 0;
+    char vol_text[12];
+    snprintf(vol_text, sizeof(vol_text), "%s%d",
+             vol_pct == 0 ? LV_SYMBOL_MUTE : LV_SYMBOL_VOLUME_MAX, vol_pct);
+    setLabel(s_lbl_vol, s_shown_vol, sizeof(s_shown_vol), vol_text);
 
     MosaicoSensorSnapshot snap = {};
     char batt[16];
@@ -793,8 +989,14 @@ void refreshStatusBar()
 
 // ---- Bottom nav dock --------------------------------------------------------
 
-constexpr int kTabW = 84;
-constexpr int kTabStep = 91;  // 84 + 7 gap, 5 tabs span 448 px
+// Floating pill dock, inset from the panel's rounded corners so the first and
+// last tabs are never clipped by the curved edge.
+constexpr int kDockInset = 24;
+constexpr int kTabW = 90;
+constexpr int kTabGap = 10;
+constexpr int kTabCount = static_cast<int>(Page::Count);
+constexpr int kTabX0 = (kWidth - 2 * kDockInset -
+                        (kTabCount * kTabW + (kTabCount - 1) * kTabGap)) / 2;
 
 void switchTab(int index);
 
@@ -808,25 +1010,24 @@ void tabEvent(lv_event_t *event)
 void buildDock(lv_obj_t *scr)
 {
     lv_obj_t *dock = lv_obj_create(scr);
-    lv_obj_set_pos(dock, 0, kHeight - kDockH);
-    lv_obj_set_size(dock, kWidth, kDockH);
-    lv_obj_set_style_bg_color(dock, lv_color_hex(kColorBg), 0);
+    lv_obj_set_pos(dock, kDockInset, kHeight - kDockH + 4);
+    lv_obj_set_size(dock, kWidth - 2 * kDockInset, kDockH - 8);
+    lv_obj_set_style_bg_color(dock, lv_color_hex(kColorCard), 0);
     lv_obj_set_style_bg_opa(dock, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(dock, lv_color_hex(kColorBorder), 0);
     lv_obj_set_style_border_width(dock, 1, 0);
-    lv_obj_set_style_border_side(dock, LV_BORDER_SIDE_TOP, 0);
-    lv_obj_set_style_radius(dock, 0, 0);
+    lv_obj_set_style_radius(dock, LV_RADIUS_CIRCLE, 0);  // pill
     lv_obj_set_style_pad_all(dock, 0, 0);
     lv_obj_remove_flag(dock, LV_OBJ_FLAG_SCROLLABLE);
 
-    const char *icons[5] = {LV_SYMBOL_HOME, LV_SYMBOL_CALL, LV_SYMBOL_AUDIO,
-                            LV_SYMBOL_GPS, LV_SYMBOL_SETTINGS};
-    const char *names[5] = {"Home", "Radio", "Music", "Sensors", "Settings"};
-    for (int i = 0; i < 5; ++i) {
+    const char *icons[kTabCount] = {LV_SYMBOL_HOME, LV_SYMBOL_AUDIO,
+                                    LV_SYMBOL_GPS, LV_SYMBOL_SETTINGS};
+    const char *names[kTabCount] = {"Home", "Music", "Sensors", "Settings"};
+    for (int i = 0; i < kTabCount; ++i) {
         lv_obj_t *btn = lv_button_create(dock);
-        lv_obj_set_pos(btn, kMargin + i * kTabStep, 4);
-        lv_obj_set_size(btn, kTabW, 56);
-        lv_obj_set_style_radius(btn, 12, 0);
+        lv_obj_set_pos(btn, kTabX0 + i * (kTabW + kTabGap), 6);
+        lv_obj_set_size(btn, kTabW, 44);
+        lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_border_width(btn, 0, 0);
         lv_obj_add_event_cb(btn, tabEvent, LV_EVENT_CLICKED,
                             reinterpret_cast<void *>(static_cast<intptr_t>(i)));
@@ -843,7 +1044,7 @@ void buildDock(lv_obj_t *scr)
 void updateTabHighlight()
 {
     const int active = static_cast<int>(s_page);
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < kTabCount; ++i) {
         if (s_tab_btns[i] == nullptr) {
             continue;
         }
@@ -859,7 +1060,6 @@ void updateTabHighlight()
 // ---- Page builders (into s_content, content coords: 0..479 x 0..351) --------
 
 void buildHomePage();
-void buildRadioPage();
 void buildMusicPage();
 void buildSensorsPage();
 void buildSettingsPage();
@@ -872,16 +1072,17 @@ void buildPage()
     s_home_clock = nullptr;
     s_home_date = nullptr;
     s_home_callsign = nullptr;
-    s_home_server = nullptr;
-    s_home_wifi = nullptr;
-    s_home_wifi_sub = nullptr;
-    s_home_batt = nullptr;
-    s_home_batt_sub = nullptr;
-    s_home_heading = nullptr;
+    s_home_rx_codec = nullptr;
+    s_home_net_server = nullptr;
+    s_home_net_ip = nullptr;
+    // The hero labels are recreated with placeholder text; their
+    // change-detection caches must be cleared too, otherwise setLabel()
+    // sees "unchanged" and the placeholder stays until the text next
+    // changes (the clock could show --:-- for up to a minute).
+    s_shown_home_clock[0] = '\0';
+    s_shown_home_sig[0] = '\0';
     s_ptt_btn = nullptr;
     s_ptt_label = nullptr;
-    s_radio_state = nullptr;
-    s_radio_hint = nullptr;
     s_music_track = nullptr;
     s_music_state = nullptr;
     s_music_url = nullptr;
@@ -895,11 +1096,13 @@ void buildPage()
     s_sens_mag = nullptr;
     s_sens_mag_warn = nullptr;
     s_settings_bright_label = nullptr;
+    s_settings_mic_label = nullptr;
+    s_settings_spk_label = nullptr;
+    s_settings_rot_btn_label = nullptr;
     s_settings_lang_btn_label = nullptr;
     lv_obj_clean(s_content);
     switch (s_page) {
         case Page::Home: buildHomePage(); break;
-        case Page::Radio: buildRadioPage(); break;
         case Page::Music: buildMusicPage(); break;
         case Page::Sensors: buildSensorsPage(); break;
         case Page::Settings: buildSettingsPage(); break;
@@ -922,7 +1125,7 @@ void switchTab(int index)
     if (changed) {
         STATUS_IO_Vibrate(30);
         if (s_ptt_tx_visual) {
-            // Leaving the Radio page mid-transmission releases the soft key.
+            // Leaving the Home page mid-transmission releases the soft key.
             STATUS_IO_SetSoftPtt(false);
             s_ptt_tx_visual = false;
         }
@@ -945,116 +1148,10 @@ void contentGestureEvent(lv_event_t *)
 
 // ---- Home page ----------------------------------------------------------------
 
-void buildHomePage()
-{
-    lv_obj_t *hero = makeCard(s_content, kMargin, 8, kWidth - 2 * kMargin, 156, 12);
-
-    s_home_clock = makeLabel(hero, "--:--", &lv_font_montserrat_48, kColorText);
-    lv_obj_align(s_home_clock, LV_ALIGN_CENTER, 0, -32);
-
-    s_home_date = makeLabel(hero, "", &lv_font_montserrat_20, kColorSub);
-    lv_obj_align(s_home_date, LV_ALIGN_CENTER, 0, 12);
-
-    s_home_callsign = makeLabel(hero, "----------", &lv_font_montserrat_28, kColorAccent);
-    lv_obj_align(s_home_callsign, LV_ALIGN_CENTER, 0, 50);
-
-    // 2x2 status grid: y 172 / 264, h 84 (content coords).
-    const int row1 = 172;
-    const int row2 = 264;
-    const int col2 = kMargin + kCardW + 8;
-
-    lv_obj_t *server = makeCard(s_content, kMargin, row1, kCardW, 84, 10);
-    cardCaption(server, "SERVER");
-    s_home_server = makeLabel(server, "--", &lv_font_montserrat_20, kColorText);
-    lv_obj_set_pos(s_home_server, 0, 22);
-
-    lv_obj_t *wifi = makeCard(s_content, col2, row1, kCardW, 84, 10);
-    cardCaption(wifi, "WIFI");
-    s_home_wifi = makeLabel(wifi, "--", &lv_font_montserrat_20, kColorText);
-    lv_obj_set_pos(s_home_wifi, 0, 22);
-    s_home_wifi_sub = makeLabel(wifi, "", &lv_font_montserrat_14, kColorSub);
-    lv_obj_set_pos(s_home_wifi_sub, 0, 48);
-
-    lv_obj_t *batt = makeCard(s_content, kMargin, row2, kCardW, 84, 10);
-    cardCaption(batt, "BATTERY");
-    s_home_batt = makeLabel(batt, "--", &lv_font_montserrat_20, kColorText);
-    lv_obj_set_pos(s_home_batt, 0, 22);
-    s_home_batt_sub = makeLabel(batt, "", &lv_font_montserrat_14, kColorSub);
-    lv_obj_set_pos(s_home_batt_sub, 0, 48);
-
-    lv_obj_t *heading = makeCard(s_content, col2, row2, kCardW, 84, 10);
-    cardCaption(heading, "HEADING");
-    s_home_heading = makeLabel(heading, "--", &lv_font_montserrat_20, kColorViolet);
-    lv_obj_set_pos(s_home_heading, 0, 22);
-}
-
-void refreshHomePage()
-{
-    if (s_home_clock == nullptr) {
-        return;
-    }
-    char text[48];
-    struct tm tm_now = {};
-    formatClock(text, sizeof(text), &tm_now);
-    setLabel(s_home_clock, s_shown_home_clock, sizeof(s_shown_home_clock), text);
-
-    if (tm_now.tm_year + 1900 >= 2024) {
-        snprintf(text, sizeof(text), "%04d-%02d-%02d %s", tm_now.tm_year + 1900,
-                 tm_now.tm_mon + 1, tm_now.tm_mday, weekdayName(tm_now.tm_wday));
-    } else {
-        snprintf(text, sizeof(text), "----");
-    }
-    lv_label_set_text(s_home_date, text);
-
-    char callsign[16];
-    formatCallsign(callsign, sizeof(callsign));
-    lv_label_set_text(s_home_callsign, callsign);
-
-    const bool linked = STATUS_IO_NrlServerLinked();
-    lv_label_set_text(s_home_server, tr(linked ? "Linked" : "Offline"));
-    lv_obj_set_style_text_color(s_home_server,
-                                lv_color_hex(linked ? kColorGood : kColorSub), 0);
-
-    if (nrlWifiStaConnected()) {
-        wifi_ap_record_t ap = {};
-        const int rssi =
-            (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : 0;
-        snprintf(text, sizeof(text), "%d dBm", rssi);
-        lv_label_set_text(s_home_wifi, text);
-        char ip[20] = {};
-        nrlIpToString(nrlWifiStaIp(), ip, sizeof(ip));
-        lv_label_set_text(s_home_wifi_sub, ip);
-    } else {
-        lv_label_set_text(s_home_wifi, tr("AP mode"));
-        lv_label_set_text(s_home_wifi_sub, "");
-    }
-
-    MosaicoSensorSnapshot snap = {};
-    if (sensorSnapshot(&snap) && snap.gauge_present) {
-        snprintf(text, sizeof(text), "%u%%  %u.%02uV",
-                 static_cast<unsigned>(snap.battery_soc_percent),
-                 static_cast<unsigned>(snap.battery_mv / 1000u),
-                 static_cast<unsigned>((snap.battery_mv % 1000u) / 10u));
-        lv_label_set_text(s_home_batt, text);
-        lv_label_set_text(s_home_batt_sub,
-                          snap.battery_charging ? tr("Charging") : "");
-    } else {
-        lv_label_set_text(s_home_batt, tr("No gauge"));
-        lv_label_set_text(s_home_batt_sub, "");
-    }
-
-    if (sensorSnapshot(&snap) && snap.mag2_valid) {
-        snprintf(text, sizeof(text), "%.0f\xC2\xB0 %s", static_cast<double>(snap.heading_deg),
-                 compassPoint(snap.heading_deg));
-        lv_label_set_text(s_home_heading, text);
-    } else {
-        lv_label_set_text(s_home_heading, "--");
-    }
-}
-
-// ---- Radio page (walkie-talkie core) -------------------------------------------
-
-void setPttVisual(bool tx)
+// PTT bar content: red TX styling while transmitting, otherwise the
+// hold-to-talk prompt. Incoming-caller info lives in the hero above, so the
+// bar deliberately stays quiet during RX.
+void setPttBar(bool tx)
 {
     s_ptt_tx_visual = tx;
     if (s_ptt_btn == nullptr || s_ptt_label == nullptr) {
@@ -1067,7 +1164,7 @@ void setPttVisual(bool tx)
     lv_obj_set_style_text_color(s_ptt_label,
                                 lv_color_hex(tx ? kColorBad : kColorAccent), 0);
     char text[24];
-    snprintf(text, sizeof(text), "PTT\n%s", tx ? "TX" : tr("HOLD"));
+    snprintf(text, sizeof(text), "PTT  %s", tx ? "TX" : tr("HOLD"));
     lv_label_set_text(s_ptt_label, text);
 }
 
@@ -1077,30 +1174,62 @@ void pttEvent(lv_event_t *event)
         case LV_EVENT_PRESSED:
             STATUS_IO_SetSoftPtt(true);
             STATUS_IO_Vibrate(30);
-            setPttVisual(true);
+            setPttBar(true);
             break;
         case LV_EVENT_RELEASED:
         case LV_EVENT_PRESS_LOST:
             STATUS_IO_SetSoftPtt(false);
-            setPttVisual(false);
+            setPttBar(false);
             break;
         default:
             break;
     }
 }
 
-void buildRadioPage()
+void buildHomePage()
 {
-    s_radio_state = makeLabel(s_content, "", &lv_font_montserrat_20, kColorSub);
-    lv_obj_set_width(s_radio_state, kWidth - 2 * kMargin);
-    lv_obj_set_style_text_align(s_radio_state, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(s_radio_state, kMargin, 8);
+    lv_obj_t *hero = makeCard(s_content, kMargin, 8, kWidth - 2 * kMargin, 140, 12);
 
-    // Big round press-and-hold PTT (208 px > the 48 px touch minimum).
+    s_home_clock = makeLabel(hero, "--:--", &lv_font_montserrat_48, kColorText);
+    lv_obj_set_width(s_home_clock, kWidth - 2 * kMargin - 24);
+    lv_obj_set_style_text_align(s_home_clock, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_home_clock, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_home_clock, LV_ALIGN_CENTER, 0, -28);
+
+    s_home_date = makeLabel(hero, "", &lv_font_montserrat_20, kColorSub);
+    lv_obj_align(s_home_date, LV_ALIGN_CENTER, 0, 10);
+
+    s_home_callsign = makeLabel(hero, "----------", &lv_font_montserrat_28, kColorAccent);
+    lv_obj_align(s_home_callsign, LV_ALIGN_CENTER, 0, 44);
+
+    // RX codec tag ("OPUS"/"G.711"), top-right of the hero; only visible
+    // while a caller is on air.
+    s_home_rx_codec = makeLabel(hero, "", &lv_font_montserrat_14, kColorAccent);
+    lv_obj_align(s_home_rx_codec, LV_ALIGN_TOP_RIGHT, 0, 0);
+
+    // Merged net card: NRL server address | this device's IP, one wide row.
+    lv_obj_t *net = makeCard(s_content, kMargin, 156, kWidth - 2 * kMargin, 68, 10);
+    const int half = (kWidth - 2 * kMargin - 20) / 2;  // two columns inside
+
+    lv_obj_t *server_cap = makeLabel(net, tr("SERVER"), &lv_font_montserrat_14, kColorSub);
+    lv_obj_set_pos(server_cap, 0, 0);
+    s_home_net_server = makeLabel(net, "--", &lv_font_montserrat_20, kColorText);
+    lv_obj_set_width(s_home_net_server, half);
+    lv_label_set_long_mode(s_home_net_server, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(s_home_net_server, 0, 22);
+
+    lv_obj_t *ip_cap = makeLabel(net, tr("DEVICE IP"), &lv_font_montserrat_14, kColorSub);
+    lv_obj_set_pos(ip_cap, half + 10, 0);
+    s_home_net_ip = makeLabel(net, "--", &lv_font_montserrat_20, kColorText);
+    lv_obj_set_width(s_home_net_ip, half);
+    lv_label_set_long_mode(s_home_net_ip, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(s_home_net_ip, half + 10, 22);
+
+    // Full-width press-and-hold PTT bar (merged from the old Radio page).
     s_ptt_btn = lv_button_create(s_content);
-    lv_obj_set_size(s_ptt_btn, 208, 208);
-    lv_obj_set_pos(s_ptt_btn, (kWidth - 208) / 2, 48);
-    lv_obj_set_style_radius(s_ptt_btn, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_pos(s_ptt_btn, kMargin, 232);
+    lv_obj_set_size(s_ptt_btn, kWidth - 2 * kMargin, 116);
+    lv_obj_set_style_radius(s_ptt_btn, 24, 0);
     lv_obj_set_style_border_width(s_ptt_btn, 3, 0);
     lv_obj_set_style_bg_color(s_ptt_btn, lv_color_hex(kColorBtnPress), LV_STATE_PRESSED);
     lv_obj_add_event_cb(s_ptt_btn, pttEvent, LV_EVENT_PRESSED, nullptr);
@@ -1110,51 +1239,80 @@ void buildRadioPage()
     s_ptt_label = makeLabel(s_ptt_btn, "PTT", &lv_font_montserrat_28, kColorAccent);
     lv_obj_set_style_text_align(s_ptt_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(s_ptt_label);
-    setPttVisual(STATUS_IO_IsPttActive());
 
-    s_radio_hint = makeLabel(s_content, "", &lv_font_montserrat_16, kColorSub);
-    lv_obj_set_width(s_radio_hint, kWidth - 2 * kMargin);
-    lv_obj_set_style_text_align(s_radio_hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(s_radio_hint, kMargin, 272);
-
-    lv_obj_t *hint2 = makeLabel(s_content, tr("Push-to-talk on the NRL network"),
-                                &lv_font_montserrat_16, kColorSub);
-    lv_obj_set_width(hint2, kWidth - 2 * kMargin);
-    lv_obj_set_style_text_align(hint2, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(hint2, kMargin, 300);
+    // STATUS_IO_IsPttActive() is the *inbound* network-audio latch (drives the
+    // AUDIO LED); the local-transmit state (physical/soft PTT keyed) is the
+    // bridge's PttActive, same source the Korvo radio page uses.
+    setPttBar(NRLAudioBridge_PttActive());
 }
 
-void refreshRadioPage()
+void refreshHomePage()
 {
-    if (s_radio_state == nullptr) {
+    if (s_home_clock == nullptr) {
         return;
     }
-    const bool linked = STATUS_IO_NrlServerLinked();
-    const bool tx = STATUS_IO_IsPttActive();
-    if (tx != s_ptt_tx_visual) {
-        setPttVisual(tx); // an external PTT source changed the state
-    }
-    char text[64];
-    if (tx) {
-        snprintf(text, sizeof(text), "%s", tr("TRANSMITTING"));
-    } else {
-        snprintf(text, sizeof(text), "%s  ·  %s",
-                 tr(linked ? "Linked" : "Offline"), tr("READY"));
-    }
-    lv_label_set_text(s_radio_state, text);
-    lv_obj_set_style_text_color(s_radio_state,
-                                lv_color_hex(tx ? kColorBad
-                                                : (linked ? kColorGood : kColorWarn)),
-                                0);
+    char text[48];
+    struct tm tm_now = {};
+    formatClock(text, sizeof(text), &tm_now);  // fills tm_now for the date row
 
-    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
-    const unsigned timeout = (cfg != nullptr) ? cfg->ptt_timeout_s : 0u;
-    if (timeout > 0u) {
-        snprintf(text, sizeof(text), tr("TX auto-off: %u s"), timeout);
-    } else {
-        snprintf(text, sizeof(text), "%s", tr("TX auto-off: off"));
+    // Incoming NRL voice takes over the hero: the clock becomes the caller's
+    // "CALL-SSID", the codec tag appears at its top-right, and the local
+    // callsign row carries the decoded signaling (DMR ID / MDC / CTCSS).
+    char remote[16] = {};
+    const bool rx = remoteCaller(remote, sizeof(remote));
+    if (rx != s_home_rx_shown) {
+        s_home_rx_shown = rx;
+        s_shown_home_clock[0] = '\0';  // force a text refresh in the new role
+        lv_obj_set_style_text_color(s_home_clock,
+                                    lv_color_hex(rx ? kColorGood : kColorText), 0);
+        lv_obj_set_style_text_color(s_home_callsign,
+                                    lv_color_hex(rx ? kColorSub : kColorAccent), 0);
     }
-    lv_label_set_text(s_radio_hint, text);
+    if (rx) {
+        setLabel(s_home_clock, s_shown_home_clock, sizeof(s_shown_home_clock), remote);
+        lv_label_set_text(s_home_rx_codec, rxCodecName());
+        char info[sizeof(s_shown_home_sig)];
+        signalingInfo(info, sizeof(info));
+        setLabel(s_home_callsign, s_shown_home_sig, sizeof(s_shown_home_sig), info);
+    } else {
+        lv_label_set_text(s_home_rx_codec, "");
+        setLabel(s_home_clock, s_shown_home_clock, sizeof(s_shown_home_clock), text);
+        char callsign[16];
+        formatCallsign(callsign, sizeof(callsign));
+        setLabel(s_home_callsign, s_shown_home_sig, sizeof(s_shown_home_sig), callsign);
+    }
+
+    if (tm_now.tm_year + 1900 >= 2024) {
+        snprintf(text, sizeof(text), "%04d-%02d-%02d %s", tm_now.tm_year + 1900,
+                 tm_now.tm_mon + 1, tm_now.tm_mday, weekdayName(tm_now.tm_wday));
+    } else {
+        snprintf(text, sizeof(text), "----");
+    }
+    lv_label_set_text(s_home_date, text);
+
+    const bool linked = STATUS_IO_NrlServerLinked();
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    lv_label_set_text(s_home_net_server,
+                      (cfg != nullptr && cfg->server_host[0] != '\0')
+                          ? cfg->server_host
+                          : "--");
+    lv_obj_set_style_text_color(s_home_net_server,
+                                lv_color_hex(linked ? kColorGood : kColorText), 0);
+
+    char ip[20] = {};
+    if (nrlWifiStaConnected()) {
+        nrlIpToString(nrlWifiStaIp(), ip, sizeof(ip));
+    } else {
+        nrlIpToString(nrlWifiApIp(), ip, sizeof(ip));
+    }
+    lv_label_set_text(s_home_net_ip, ip[0] != '\0' ? ip : "--");
+
+    // PTT bar: TX styling while transmitting; quiet while receiving (the
+    // hero above already carries the caller's badge and codec).
+    const bool tx = NRLAudioBridge_PttActive();
+    if (tx != s_ptt_tx_visual) {
+        setPttBar(tx);
+    }
 }
 
 // ---- Music page (net radio; local library needs NAND) ---------------------------
@@ -1432,6 +1590,63 @@ void brightnessEvent(lv_event_t *event)
 
 void rebuildMainUi();
 
+// Mic / speaker volume slider (0..100 % <-> 0..255 config). user_data flags
+// the mic slider; applies live and persists on release.
+void volumeSliderEvent(lv_event_t *event)
+{
+    const bool is_mic = static_cast<bool>(reinterpret_cast<intptr_t>(
+        lv_event_get_user_data(event)));
+    lv_obj_t *slider = static_cast<lv_obj_t *>(lv_event_get_target(event));
+    const lv_event_code_t code = lv_event_get_code(event);
+    if (code == LV_EVENT_VALUE_CHANGED) {
+        const int pct = static_cast<int>(lv_slider_get_value(slider));
+        const int volume = (pct * 255 + 50) / 100;
+        if (is_mic) {
+            EXTERNAL_RADIO_SetMicVolume(static_cast<uint8_t>(volume), false);
+        } else {
+            EXTERNAL_RADIO_SetLineOutVolume(static_cast<uint8_t>(volume), false);
+        }
+        lv_obj_t *label = is_mic ? s_settings_mic_label : s_settings_spk_label;
+        if (label != nullptr) {
+            char text[8];
+            snprintf(text, sizeof(text), "%d", pct);
+            lv_label_set_text(label, text);
+        }
+    } else if (code == LV_EVENT_RELEASED) {
+        (void)EXTERNAL_RADIO_SaveConfig();
+    }
+}
+
+// Slider card identical in geometry to the brightness card; returns the
+// value readout label through out_label.
+void buildVolumeCard(lv_obj_t *page, int y, const char *caption, int initial_pct,
+                     bool is_mic, lv_obj_t **out_label)
+{
+    lv_obj_t *card = makeCard(page, kMargin, y, kWidth - 2 * kMargin, 92, 12);
+    cardCaption(card, caption);
+    lv_obj_t *slider = lv_slider_create(card);
+    lv_obj_set_pos(slider, 0, 40);
+    lv_obj_set_size(slider, kWidth - 2 * kMargin - 24 - 88, 24);
+    lv_slider_set_range(slider, 0, 100);
+    lv_obj_set_style_bg_color(slider, lv_color_hex(kColorBorder), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(slider, lv_color_hex(kColorAccent), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(slider, lv_color_hex(kColorText), LV_PART_KNOB);
+    lv_obj_set_style_pad_all(slider, 6, LV_PART_KNOB);
+    lv_obj_set_ext_click_area(slider, 12);
+    lv_slider_set_value(slider, initial_pct, LV_ANIM_OFF);
+    lv_obj_add_event_cb(slider, volumeSliderEvent, LV_EVENT_VALUE_CHANGED,
+                        reinterpret_cast<void *>(static_cast<intptr_t>(is_mic)));
+    lv_obj_add_event_cb(slider, volumeSliderEvent, LV_EVENT_RELEASED,
+                        reinterpret_cast<void *>(static_cast<intptr_t>(is_mic)));
+
+    char text[8];
+    snprintf(text, sizeof(text), "%d", initial_pct);
+    *out_label = makeLabel(card, text, &lv_font_montserrat_20, kColorAccent);
+    lv_obj_set_pos(*out_label, kWidth - 2 * kMargin - 24 - 76, 38);
+    lv_obj_set_width(*out_label, 76);
+    lv_obj_set_style_text_align(*out_label, LV_TEXT_ALIGN_RIGHT, 0);
+}
+
 void langEvent(lv_event_t *)
 {
     setUiLang(s_lang == 0 ? 1 : 0);
@@ -1504,6 +1719,24 @@ void autoRotateEvent(lv_event_t *event)
     setAutoRotate(lv_obj_has_state(sw, LV_STATE_CHECKED));
 }
 
+void hapticEvent(lv_event_t *event)
+{
+    lv_obj_t *sw = static_cast<lv_obj_t *>(lv_event_get_target(event));
+    setHaptic(lv_obj_has_state(sw, LV_STATE_CHECKED));
+}
+
+void rotationEvent(lv_event_t *)
+{
+    const int rot = (s_rotation + 90) % 360;
+    applyRotation(rot);
+    saveRotation();
+    if (s_settings_rot_btn_label != nullptr) {
+        char text[8];
+        snprintf(text, sizeof(text), "%d\xC2\xB0", rot);  // "90°" etc.
+        lv_label_set_text(s_settings_rot_btn_label, text);
+    }
+}
+
 void buildSettingsPage()
 {
     // Scrollable page body: the cards below exceed the 352 px content height.
@@ -1522,13 +1755,16 @@ void buildSettingsPage()
     lv_obj_t *bright = makeCard(page, kMargin, 8, kWidth - 2 * kMargin, 92, 12);
     cardCaption(bright, "BRIGHTNESS");
     lv_obj_t *slider = lv_slider_create(bright);
-    lv_obj_set_pos(slider, 0, 44);
-    lv_obj_set_size(slider, kWidth - 2 * kMargin - 24 - 88, 16);
+    lv_obj_set_pos(slider, 0, 40);
+    lv_obj_set_size(slider, kWidth - 2 * kMargin - 24 - 88, 24);
     lv_slider_set_range(slider, 0, 255);
     lv_obj_set_style_bg_color(slider, lv_color_hex(kColorBorder), LV_PART_MAIN);
     lv_obj_set_style_bg_color(slider, lv_color_hex(kColorAccent), LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(slider, lv_color_hex(kColorText), LV_PART_KNOB);
-    lv_obj_set_style_pad_all(slider, 0, LV_PART_KNOB);
+    // A fat knob and a generous hit area: a bare 16 px bar is nearly
+    // impossible to grab with a fingertip.
+    lv_obj_set_style_pad_all(slider, 6, LV_PART_KNOB);
+    lv_obj_set_ext_click_area(slider, 12);
     lv_slider_set_value(slider, s_brightness, LV_ANIM_OFF);
     lv_obj_add_event_cb(slider, brightnessEvent, LV_EVENT_VALUE_CHANGED, nullptr);
     lv_obj_add_event_cb(slider, brightnessEvent, LV_EVENT_RELEASED, nullptr);
@@ -1540,8 +1776,19 @@ void buildSettingsPage()
     lv_obj_set_width(s_settings_bright_label, 76);
     lv_obj_set_style_text_align(s_settings_bright_label, LV_TEXT_ALIGN_RIGHT, 0);
 
+    // Mic / speaker volume.
+    const ExternalRadioConfig *acfg = EXTERNAL_RADIO_GetConfig();
+    const int mic_pct = (acfg != nullptr)
+                            ? (static_cast<int>(acfg->mic_volume) * 100 + 127) / 255
+                            : 0;
+    const int spk_pct = (acfg != nullptr)
+                            ? (static_cast<int>(acfg->line_out_volume) * 100 + 127) / 255
+                            : 0;
+    buildVolumeCard(page, 108, tr("MIC VOLUME"), mic_pct, true, &s_settings_mic_label);
+    buildVolumeCard(page, 208, tr("SPEAKER VOLUME"), spk_pct, false, &s_settings_spk_label);
+
     // Language.
-    lv_obj_t *lang = makeCard(page, kMargin, 108, kWidth - 2 * kMargin, 64, 12);
+    lv_obj_t *lang = makeCard(page, kMargin, 308, kWidth - 2 * kMargin, 64, 12);
     lv_obj_t *lang_label = makeLabel(lang, tr("Language"), &lv_font_montserrat_20, kColorText);
     lv_obj_align(lang_label, LV_ALIGN_LEFT_MID, 0, 0);
     lv_obj_t *lang_btn = makeButton(lang, 0, 0, 140, 40, "", langEvent, nullptr);
@@ -1550,7 +1797,7 @@ void buildSettingsPage()
     lv_label_set_text(s_settings_lang_btn_label, s_lang == 0 ? "English" : "中文");
 
     // IMU auto-rotate toggle.
-    lv_obj_t *rot = makeCard(page, kMargin, 180, kWidth - 2 * kMargin, 64, 12);
+    lv_obj_t *rot = makeCard(page, kMargin, 380, kWidth - 2 * kMargin, 64, 12);
     lv_obj_t *rot_label = makeLabel(rot, tr("Auto-rotate"), &lv_font_montserrat_20, kColorText);
     lv_obj_align(rot_label, LV_ALIGN_LEFT_MID, 0, 0);
     lv_obj_t *rot_sw = lv_switch_create(rot);
@@ -1562,8 +1809,32 @@ void buildSettingsPage()
     }
     lv_obj_add_event_cb(rot_sw, autoRotateEvent, LV_EVENT_VALUE_CHANGED, nullptr);
 
+    // Manual rotation: cycle 0/90/180/270 (persisted; auto-rotate may
+    // override later when it is enabled).
+    lv_obj_t *mrot = makeCard(page, kMargin, 452, kWidth - 2 * kMargin, 64, 12);
+    lv_obj_t *mrot_label = makeLabel(mrot, tr("Rotation"), &lv_font_montserrat_20, kColorText);
+    lv_obj_align(mrot_label, LV_ALIGN_LEFT_MID, 0, 0);
+    char rot_text[8];
+    snprintf(rot_text, sizeof(rot_text), "%d\xC2\xB0", s_rotation);
+    lv_obj_t *mrot_btn = makeButton(mrot, 0, 0, 100, 40, rot_text, rotationEvent, nullptr);
+    lv_obj_align(mrot_btn, LV_ALIGN_RIGHT_MID, 0, 0);
+    s_settings_rot_btn_label = lv_obj_get_child(mrot_btn, 0);
+
+    // Button vibration feedback toggle.
+    lv_obj_t *hap = makeCard(page, kMargin, 524, kWidth - 2 * kMargin, 64, 12);
+    lv_obj_t *hap_label = makeLabel(hap, tr("Vibration"), &lv_font_montserrat_20, kColorText);
+    lv_obj_align(hap_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_t *hap_sw = lv_switch_create(hap);
+    lv_obj_set_size(hap_sw, 56, 32);
+    lv_obj_align(hap_sw, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_style_bg_color(hap_sw, lv_color_hex(kColorAccent), LV_PART_INDICATOR);
+    if (s_haptic) {
+        lv_obj_add_state(hap_sw, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(hap_sw, hapticEvent, LV_EVENT_VALUE_CHANGED, nullptr);
+
     // WiFi provisioning entry (SoftAP portal info).
-    lv_obj_t *wifi = makeCard(page, kMargin, 252, kWidth - 2 * kMargin, 64, 12);
+    lv_obj_t *wifi = makeCard(page, kMargin, 596, kWidth - 2 * kMargin, 64, 12);
     lv_obj_t *wifi_label = makeLabel(wifi, tr("WiFi Setup"), &lv_font_montserrat_20, kColorText);
     lv_obj_align(wifi_label, LV_ALIGN_LEFT_MID, 0, 0);
     lv_obj_t *wifi_btn = makeButton(wifi, 0, 0, 160, 40, tr("Hotspot Info"),
@@ -1571,7 +1842,7 @@ void buildSettingsPage()
     lv_obj_align(wifi_btn, LV_ALIGN_RIGHT_MID, 0, 0);
 
     // About.
-    lv_obj_t *about = makeCard(page, kMargin, 324, kWidth - 2 * kMargin, 92, 12);
+    lv_obj_t *about = makeCard(page, kMargin, 668, kWidth - 2 * kMargin, 92, 12);
     cardCaption(about, "ABOUT");
     snprintf(text, sizeof(text), "%s %s", tr("Firmware"), "v" NRL_FIRMWARE_VERSION);
     lv_obj_t *fw = makeLabel(about, text, &lv_font_montserrat_16, kColorText);
@@ -1591,13 +1862,13 @@ void buildProvisioning()
     s_content = nullptr;
     s_lbl_clock = nullptr;
     s_overlay = nullptr;
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < kTabCount; ++i) {
         s_tab_btns[i] = nullptr;
         s_tab_labels[i] = nullptr;
     }
     lv_obj_set_style_bg_color(scr, lv_color_hex(kColorBg), 0);
 
-    lv_obj_t *title = makeLabel(scr, "WiFi Setup / 设备配网", &lv_font_montserrat_28,
+    lv_obj_t *title = makeLabel(scr, "WiFi Setup / 设备配网", &s_font_ui_28,
                                 kColorAccent);
     lv_obj_set_width(title, kWidth - 32);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
@@ -1685,6 +1956,7 @@ void rebuildMainUi()
     memset(s_shown_clock, 0, sizeof(s_shown_clock));
     memset(s_shown_callsign, 0, sizeof(s_shown_callsign));
     memset(s_shown_wifi, 0, sizeof(s_shown_wifi));
+    memset(s_shown_vol, 0, sizeof(s_shown_vol));
     memset(s_shown_batt, 0, sizeof(s_shown_batt));
     memset(s_shown_home_clock, 0, sizeof(s_shown_home_clock));
     buildMainUi();
@@ -1695,7 +1967,6 @@ void refreshActivePage()
 {
     switch (s_page) {
         case Page::Home: refreshHomePage(); break;
-        case Page::Radio: refreshRadioPage(); break;
         case Page::Music: refreshMusicPage(); break;
         case Page::Sensors: refreshSensorsPage(); break;
         default: break;
@@ -1714,21 +1985,32 @@ extern "C" void Display_Init(void)
         ESP_LOGE(kTag, "panel init failed");
         return;
     }
+    ESP_LOGI(kTag, "stage: lvgl");
     if (!initLvgl()) {
         return;
     }
+    g_mosaico_boot_stage = 10;
     initFonts();
     loadUiLang();   // restore saved language before the first page is built
     loadBrightness();
     loadAutoRotate();
+    loadRotation();
+    loadHaptic();
+    ESP_LOGI(kTag, "stage: touch");
     initTouch();
+    g_mosaico_boot_stage = 11;
+    ESP_LOGI(kTag, "stage: ui build");
     if (s_provisioning_mode) {
         buildProvisioning();
         refreshProvisioning();
     } else {
         buildMainUi();
     }
+    g_mosaico_boot_stage = 12;
+    ESP_LOGI(kTag, "stage: first render");
     lv_refr_now(nullptr);
+    g_mosaico_boot_stage = 13;
+    ESP_LOGI(kTag, "stage: first render done");
     s_ready = true;
     ESP_LOGI(kTag, "ready: %dx%d QSPI AMOLED", kWidth, kHeight);
 }
@@ -1736,6 +2018,56 @@ extern "C" void Display_Init(void)
 extern "C" bool Display_IsReady(void)
 {
     return s_ready;
+}
+
+// Printed by mosaico_usb_console.cpp whenever a host opens the CDC port, so
+// the display/touch state is visible without a power-cycle.
+extern "C" void MosaicoDisp_DumpStatus(void)
+{
+    ESP_LOGI(kTag, "status: ready=%d prov=%d panel=%s touch=%s rotation=%d bright=%u page=%d stage=%d",
+             s_ready, s_provisioning_mode,
+             s_panel != nullptr ? "ok" : "none",
+             s_touch != nullptr ? "ok" : "none",
+             s_rotation, static_cast<unsigned>(s_brightness),
+             static_cast<int>(s_page), static_cast<int>(g_mosaico_boot_stage));
+
+    // Hardware revision from eFuse USER_DATA (same scheme as the official BSP):
+    // v1.2 moves I2C to GPIO56/3 and swaps LCD SCL/RST, so this decides pins.
+    uint16_t hwver = 0;
+    if (esp_efuse_read_field_blob(ESP_EFUSE_USER_DATA, &hwver, 16) == ESP_OK) {
+        ESP_LOGI(kTag, "hw version from eFuse: v%u.%u (raw=0x%04X)",
+                 static_cast<unsigned>(hwver >> 8), static_cast<unsigned>(hwver & 0xFF),
+                 static_cast<unsigned>(hwver));
+    }
+    // Live I2C bus health probe: codec 0x19, touch 0x5A, IMU 0x69, mag 0x11/0x12,
+    // gauge 0x55. A NAK everywhere means the bus itself is dead (stuck low).
+    ESP_LOGI(kTag, "i2c probe: es8311(19)=%d cst9220(5A)=%d bmi270(69)=%d bmm(11)=%d bmm(12)=%d bq(55)=%d",
+             I2C_MasterProbe(0x19, 50), I2C_MasterProbe(0x5A, 50),
+             I2C_MasterProbe(0x69, 50), I2C_MasterProbe(0x11, 50),
+             I2C_MasterProbe(0x12, 50), I2C_MasterProbe(0x55, 50));
+    // Live level of the GPIO7 function/PTT button (0 = pressed).
+    ESP_LOGI(kTag, "btn gpio%d level=%d", NRL_PIN_BTN_PTT,
+             gpio_get_level((gpio_num_t)NRL_PIN_BTN_PTT));
+    // Local transmit gate (physical/soft PTT) vs. the on-screen TX indication.
+    ESP_LOGI(kTag, "ptt: tx_gate=%d bridge_ptt=%d inbound_audio=%d linked=%d",
+             STATUS_IO_IsSqlActive(), NRLAudioBridge_PttActive(),
+             STATUS_IO_IsPttActive(), STATUS_IO_NrlServerLinked());
+#if CONFIG_FREERTOS_USE_TRACE_FACILITY
+    // vTaskList shows which task is blocked where (state + stack watermark) --
+    // the main task hangs somewhere in Display_Init and we need to see it.
+    char *list = static_cast<char *>(heap_caps_malloc(2048, MALLOC_CAP_INTERNAL));
+    if (list != nullptr) {
+        vTaskList(list);
+        ESP_LOGI(kTag, "tasks:\n%s", list);
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+        // Runtime counters: comparing two dumps tells whether core 0 is alive
+        // (IDLE0 counter advancing) or interrupt-locked.
+        vTaskGetRunTimeStats(list);
+        ESP_LOGI(kTag, "runtime:\n%s", list);
+#endif
+        heap_caps_free(list);
+    }
+#endif
 }
 
 extern "C" void Display_SetProvisioningMode(bool enabled)

@@ -5,6 +5,9 @@
 #include "driver/board_pins.h"
 #include "driver/es7210.h"
 #include "driver/i2c1.h"
+#if NRL_BOARD == NRL_BOARD_ESP_MOSAICO
+#include "driver/mosaico_variant.h"
+#endif
 
 #include <driver/gpio.h>
 #include <esp_log.h>
@@ -729,10 +732,18 @@ extern "C" bool ES8311_Init(void) {
     // Boards with a switched codec LDO (ESP-Mosaico) must power the codec
     // rail before any I2C traffic; the ES8311 sits behind a level shifter
     // on CODEC_3V3.
-    gpio_reset_pin((gpio_num_t)NRL_PIN_CODEC_PW);
-    gpio_set_direction((gpio_num_t)NRL_PIN_CODEC_PW, GPIO_MODE_OUTPUT);
-    gpio_set_level((gpio_num_t)NRL_PIN_CODEC_PW, 1);
-    vTaskDelay(pdMS_TO_TICKS(20));
+#if NRL_BOARD == NRL_BOARD_ESP_MOSAICO
+    // v1.2 keeps the codec rail always on and reuses GPIO56 as I2C SDA.
+    if (MosaicoVariant_IsV1_2()) {
+        // rail already on; nothing to drive
+    } else
+#endif
+    {
+        gpio_reset_pin((gpio_num_t)NRL_PIN_CODEC_PW);
+        gpio_set_direction((gpio_num_t)NRL_PIN_CODEC_PW, GPIO_MODE_OUTPUT);
+        gpio_set_level((gpio_num_t)NRL_PIN_CODEC_PW, 1);
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
 #endif
 
     AUDIO_SetMode(AUDIO_MODE_RECEIVE);

@@ -24,6 +24,10 @@ void STATUS_IO_SetSoftPtt(bool held);
 // Pulse the vibration motor for `ms` milliseconds (ESP-Mosaico; no-op on
 // boards without one). Non-blocking: Poll() turns the motor off.
 void STATUS_IO_Vibrate(uint32_t ms);
+// Button vibration-feedback master switch (ESP-Mosaico). When off,
+// STATUS_IO_Vibrate is a no-op; the incoming-call ring is unaffected.
+void STATUS_IO_SetHapticEnabled(bool enabled);
+bool STATUS_IO_HapticEnabled(void);
 bool STATUS_IO_IsSqlActive(void);
 bool STATUS_IO_IsPttActive(void);
 

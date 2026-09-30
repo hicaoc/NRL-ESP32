@@ -40,7 +40,7 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
 
-DEFAULT_VERSION = "9.5.0"
+DEFAULT_VERSION = "9.6.0"
 LVGL_VERSION = os.environ.get("LVGL_VERSION", DEFAULT_VERSION)
 DEFAULT_URL = f"https://github.com/lvgl/lvgl/archive/refs/tags/v{LVGL_VERSION}.tar.gz"
 LVGL_URL = os.environ.get("LVGL_FETCH_URL", DEFAULT_URL)
@@ -76,7 +76,11 @@ def _resolve_project_dir() -> Path:
 PROJECT_DIR = _resolve_project_dir()
 DEST_DIR = PROJECT_DIR / "components" / "lvgl"
 MARKER_FILE = DEST_DIR / "lvgl.h"
-VERSION_FILE = DEST_DIR / "lv_version.h"
+# 9.6.0 moved the version header into include/lvgl/; the legacy root shim only
+# holds a deprecation #warning.
+VERSION_FILE = DEST_DIR / "include" / "lvgl" / "lv_version.h"
+if not VERSION_FILE.exists() and (DEST_DIR / "lv_version.h").exists():
+    VERSION_FILE = DEST_DIR / "lv_version.h"
 
 
 def _log(msg: str) -> None:

@@ -28,4 +28,8 @@ bool I2C_MasterTransmitReceiveOnce(uint8_t address,
                                    uint8_t *read_data, size_t read_size,
                                    int timeout_ms);
 
+// Board-level pin override for hardware revisions that move the bus
+// (ESP-Mosaico v1.2). Must be called before the first bus use.
+void I2C_OverridePins(int sda, int scl);
+
 #endif // DRIVER_I2C_H

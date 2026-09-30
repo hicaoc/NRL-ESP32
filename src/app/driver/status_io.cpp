@@ -26,6 +26,14 @@
 #include <led_strip.h>
 #endif
 
+#if NRL_BOARD == NRL_BOARD_ESP_MOSAICO
+#include "mosaico_variant.h"
+// V1.2 boards route GPIO3 to I2C SCL, so the status LED exists on v1.0 only.
+static inline int pinLedNet() { return MosaicoVariant_StatusLedPin(); }
+#else
+#define pinLedNet() NRL_PIN_LED_NET
+#endif
+
 #ifdef ENABLE_OPENCV
 #include "../opencv/Arduino.hpp"
 #endif
@@ -205,6 +213,9 @@ unsigned long s_ptt_press_ms = 0UL;  // press-down time of the current press
 
 #if defined(NRL_PIN_VIBRATION_MOTOR) && NRL_PIN_VIBRATION_MOTOR >= 0
 unsigned long s_motor_off_ms = 0UL;
+// Button haptic-feedback master switch (Settings page). The incoming-call
+// ring bypasses it: an alert is not feedback.
+bool s_haptic_enabled = true;
 #endif
 
 #if defined(NRL_HAS_ADC_BUTTONS) && NRL_HAS_ADC_BUTTONS
@@ -795,10 +806,10 @@ extern "C" void STATUS_IO_Init(void)
 
     initOutputPin(NRL_PIN_LED_PTT);
     initOutputPin(NRL_PIN_LED_AUDIO);
-    initOutputPin(NRL_PIN_LED_NET);
+    initOutputPin(pinLedNet());
     writeLed(NRL_PIN_LED_PTT,   false);
     writeLed(NRL_PIN_LED_AUDIO, false);
-    writeLed(NRL_PIN_LED_NET,   false);
+    writeLed(pinLedNet(),   false);
 
 #if defined(NRL_PIN_VIBRATION_MOTOR) && NRL_PIN_VIBRATION_MOTOR >= 0
     initOutputPin(NRL_PIN_VIBRATION_MOTOR);
@@ -845,7 +856,7 @@ extern "C" void STATUS_IO_Init(void)
     s_led_selftest_start_ms = nrl_millis_now();
     writeLed(NRL_PIN_LED_PTT,   true);
     writeLed(NRL_PIN_LED_AUDIO, true);
-    writeLed(NRL_PIN_LED_NET,   true);
+    writeLed(pinLedNet(),   true);
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
     // The RF board's status LEDs hang off the PCA9555 instead of GPIOs.
     (void)BH4TDV_RF_IO_SetStatusLeds(true, true, true);
@@ -958,7 +969,7 @@ extern "C" void STATUS_IO_Poll(void)
     writeLed(NRL_PIN_LED_AUDIO, s_net_audio_active);
     // White LED: solid while the server heartbeat is alive, slow blink while
     // it is missing (no link yet / lost).
-    writeLed(NRL_PIN_LED_NET, heartbeat_ok ? true : blinkPhase(now, kSlowBlinkMs));
+    writeLed(pinLedNet(), heartbeat_ok ? true : blinkPhase(now, kSlowBlinkMs));
 
 #if NRL_BOARD == NRL_BOARD_S31_KORVO
     // Fold the three discrete-LED meanings into the single RGB pixel:
@@ -1029,7 +1040,11 @@ extern "C" void STATUS_IO_Poll(void)
     if (FMO_QSO_IncomingRing()) {
         if (now - s_last_ring_buzz_ms >= 1000UL) {
             s_last_ring_buzz_ms = now;
-            STATUS_IO_Vibrate(150);
+#if defined(NRL_PIN_VIBRATION_MOTOR) && NRL_PIN_VIBRATION_MOTOR >= 0
+            // Ring bypasses the haptic-feedback switch (raw motor pulse).
+            gpio_set_level((gpio_num_t)NRL_PIN_VIBRATION_MOTOR, 1);
+            s_motor_off_ms = now + 150UL;
+#endif
         }
     } else {
         s_last_ring_buzz_ms = 0UL;
@@ -1216,10 +1231,28 @@ extern "C" void STATUS_IO_Poll(void)
 
 #endif // NRL_BOARD
 
+extern "C" void STATUS_IO_SetHapticEnabled(const bool enabled)
+{
+#if defined(NRL_PIN_VIBRATION_MOTOR) && NRL_PIN_VIBRATION_MOTOR >= 0
+    s_haptic_enabled = enabled;
+#else
+    (void)enabled;
+#endif
+}
+
+extern "C" bool STATUS_IO_HapticEnabled(void)
+{
+#if defined(NRL_PIN_VIBRATION_MOTOR) && NRL_PIN_VIBRATION_MOTOR >= 0
+    return s_haptic_enabled;
+#else
+    return false;
+#endif
+}
+
 extern "C" void STATUS_IO_Vibrate(const uint32_t ms)
 {
 #if defined(NRL_PIN_VIBRATION_MOTOR) && NRL_PIN_VIBRATION_MOTOR >= 0
-    if (ms == 0u) {
+    if (ms == 0u || !s_haptic_enabled) {
         return;
     }
     gpio_set_level((gpio_num_t)NRL_PIN_VIBRATION_MOTOR, 1);

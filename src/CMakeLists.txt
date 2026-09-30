@@ -64,6 +64,8 @@ set(app_sources
     app/driver/display_mosaico.cpp
     app/driver/display_mosaico_panel.cpp
     app/driver/mosaico_sensors.cpp
+    app/driver/mosaico_usb_console.cpp
+    app/driver/mosaico_variant.cpp
     app/driver/es7210.cpp
     app/driver/es8311.cpp
     app/driver/es8389.cpp
@@ -220,7 +222,7 @@ endif()
 if(IDF_TARGET STREQUAL "esp32s31")
     list(APPEND app_priv_requires usb espressif__usb_host_msc espressif__led_strip fatfs
                                   espressif__esp_websocket_client
-                                  esp_driver_jpeg)
+                                  esp_driver_jpeg espressif__esp_tinyusb)
 endif()
 
 # led_strip is vendored (vendor/espressif__led_strip, manifest-less so the

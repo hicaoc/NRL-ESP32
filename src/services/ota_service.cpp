@@ -471,7 +471,7 @@ bool otaWorkPending()
     bool pending = false;
     if (xSemaphoreTake(s_ota.lock, pdMS_TO_TICKS(50)) == pdTRUE) {
         pending = s_ota.check_requested || s_ota.update_requested ||
-                  (s_ota.status.configured &&
+                  (s_ota.status.configured && nrlNetworkConnected() &&
                    (nowMs() - s_ota.status.last_check_ms >= kCheckPeriodMs ||
                     (s_ota.status.last_check_ms == 0u && nowMs() - s_boot_ms >= kBootCheckDelayMs)));
         xSemaphoreGive(s_ota.lock);
@@ -510,7 +510,10 @@ void otaTask(void *)
         bool do_check = false, do_update = false, update_after_check = false;
         char version[NRL_OTA_VERSION_MAX] = {};
         xSemaphoreTake(s_ota.lock, portMAX_DELAY);
-        const bool due = s_ota.status.configured &&
+        // Never attempt a check while there is no upstream network at all
+        // (provisioning SoftAP, STA down): the HTTPS request cannot succeed,
+        // and backdating the failure would retry every second forever.
+        const bool due = s_ota.status.configured && nrlNetworkConnected() &&
                          (nowMs() - s_ota.status.last_check_ms >= kCheckPeriodMs ||
                           (s_ota.status.last_check_ms == 0u && nowMs() - s_boot_ms >= kBootCheckDelayMs));
         // A TLS handshake spikes tens of KB of internal RAM; running one

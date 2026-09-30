@@ -51,10 +51,13 @@
 #include "driver/status_io.h"
 #include "driver/environment_sensors.h"
 #include "driver/mosaico_sensors.h"
+#include "driver/mosaico_usb_console.h"
+#include "driver/mosaico_variant.h"
 #include "driver/i2c_device_discovery.h"
 #include "driver/sr110u.h"
 #include "main_loop_profile.h"
 
+#include <driver/gpio.h>
 #include <string.h>
 
 namespace {
@@ -475,6 +478,32 @@ static bool initFullApp()
 static void initApp()
 {
     logDramMark("boot");
+#if NRL_BOARD == NRL_BOARD_ESP_MOSAICO
+    // Hardware revision first: v1.2 moves I2C to GPIO56/3, swaps LCD SCL/RST
+    // and drops the status LED (GPIO3 becomes SCL). Everything below depends
+    // on the pinout this selects.
+    MosaicoVariant_Init();
+    // USB CDC console on the Type-C OTG port first, so every log line after
+    // this is visible on the enumerated COM port.
+    (void)MOSAICO_USB_CONSOLE_Init();
+    // VCC_PW (GPIO60, low active) switches the VCC_3V3 rail that feeds the
+    // orange status LED, the LCD/touch connector and the expansion headers.
+    // Enable it first thing: the STATUS_IO_Init LED self-test below is our
+    // earliest visible boot indicator, and the display/touch need the rail too.
+    gpio_reset_pin((gpio_num_t)NRL_PIN_LCD_PWR_EN);
+    gpio_set_direction((gpio_num_t)NRL_PIN_LCD_PWR_EN, GPIO_MODE_OUTPUT);
+    gpio_set_level((gpio_num_t)NRL_PIN_LCD_PWR_EN, NRL_PIN_LCD_PWR_EN_ACTIVE_LEVEL);
+    // CODEC_PW (GPIO56, high active): the ES8311 sits behind BSS138 level
+    // shifters on the shared I2C bus; with its rail off the unpowered
+    // translator drags SDA/SCL down and every other device (touch, sensors,
+    // gauge) NAKs. Power it up front, not just at ES8311_Init. On v1.2 the
+    // codec rail is always on and GPIO56 is the I2C SDA -- skip it there.
+    if (!MosaicoVariant_IsV1_2()) {
+        gpio_reset_pin((gpio_num_t)NRL_PIN_CODEC_PW);
+        gpio_set_direction((gpio_num_t)NRL_PIN_CODEC_PW, GPIO_MODE_OUTPUT);
+        gpio_set_level((gpio_num_t)NRL_PIN_CODEC_PW, 1);
+    }
+#endif
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
     // Latch safe expander outputs (PTT/PD off, low power) before the slow
     // full-bus scan: until this runs, the PCA9555 pins are floating inputs

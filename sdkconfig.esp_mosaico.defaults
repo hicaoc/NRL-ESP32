@@ -135,12 +135,19 @@ CONFIG_SPIRAM_SPEED_250M=y
 # the direct-GDBA panel path.
 CONFIG_SPI_FLASH_AUTO_SUSPEND=y
 
-# --- Console on UART0 (not USB-Serial-JTAG) ---
-# Mosaico's Type-C port is the native USB OTG (no UART bridge); UART0
-# (TX58/RX59) is exposed on the right expansion header and the BaseBoard
-# debug pads. Route ESP_LOG and the AT console to that UART.
-# CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG is not set
-CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+# --- Console on USB Serial/JTAG ---
+# S31 does not support the OTG ROM-CDC console (SOC_USB_OTG_CONSOLE_SUPPORTED
+# is absent), so the USB console is the USB Serial/JTAG controller. It
+# enumerates as a COM port while the app runs. UART0 (TX58/RX59) remains on
+# the right expansion header as a fallback.
+# CONFIG_ESP_CONSOLE_UART_DEFAULT is not set
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# --- tinyusb CDC-ACM device console on the Type-C OTG port (ESP-Mosaico) ---
+# The app brings up a CDC-ACM device on the USB OTG HS port at boot and
+# redirects stdout/stderr to it (mosaico_usb_console.cpp), so the Type-C
+# cable enumerates a COM port with the full ESP_LOG output while the app runs.
+CONFIG_TINYUSB_CDC_ENABLED=y
 
 # --- Bluetooth: Classic BT + HFP Audio Gateway (for a BT headset) ---
 # S31 has Classic BT in silicon (SOC_BT_CLASSIC_SUPPORTED). HFP needs the
