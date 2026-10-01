@@ -195,6 +195,13 @@ bool initLvgl()
     return true;
 }
 
+// Touch press start point (logical coords), recorded on the press edge and
+// kept after release so the gesture handler can tell an edge swipe-in from
+// an in-page scroll.
+int s_touch_start_x = -1;
+int s_touch_start_y = -1;
+bool s_touch_down = false;
+
 void touchRead(lv_indev_t *, lv_indev_data_t *data)
 {
     if (s_touch == nullptr || data == nullptr) {
@@ -223,8 +230,14 @@ void touchRead(lv_indev_t *, lv_indev_data_t *data)
         data->point.x = static_cast<int16_t>(x);
         data->point.y = static_cast<int16_t>(y);
         data->state = LV_INDEV_STATE_PRESSED;
+        if (!s_touch_down) {
+            s_touch_down = true;
+            s_touch_start_x = x;
+            s_touch_start_y = y;
+        }
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
+        s_touch_down = false;
     }
 }
 
@@ -262,7 +275,11 @@ bool initTouch()
     touch_cfg.x_max = kWidth;
     touch_cfg.y_max = kHeight;
     touch_cfg.rst_gpio_num = GPIO_NUM_NC;
-    touch_cfg.int_gpio_num = (gpio_num_t)NRL_PIN_TOUCH_INT;
+    // Poll the controller on every read instead of gating on the INT pin:
+    // the CST9220's INT is a per-report pulse, so INT-gated reads mostly get
+    // skipped and LVGL sees the touch point frozen at the initial contact --
+    // which kills all drag detection (page swipe gestures, sliders, scroll).
+    touch_cfg.int_gpio_num = GPIO_NUM_NC;
     touch_cfg.levels.reset = 0;
     touch_cfg.levels.interrupt = 0;
     if (esp_lcd_touch_new_i2c_cst9220(touch_io, &touch_cfg, &s_touch) != ESP_OK) {
@@ -313,7 +330,8 @@ const TrEntry kTr[] = {
     {"HEADING", "航向"},
     {"No gauge", "无电量计"},
     // PTT bar
-    {"HOLD", "按住"},
+    {"HOLD TO TALK", "按住发射"},
+    {"TRANSMITTING", "发射中"},
     // Music page
     {"NET RADIO", "网络电台"},
     {"Play", "播放"},
@@ -671,14 +689,14 @@ lv_obj_t *s_home_clock = nullptr;
 lv_obj_t *s_home_date = nullptr;
 lv_obj_t *s_home_callsign = nullptr;
 lv_obj_t *s_home_rx_codec = nullptr;
+lv_obj_t *s_home_ptt_hint = nullptr;
 lv_obj_t *s_home_net_server = nullptr;
 lv_obj_t *s_home_net_ip = nullptr;
 bool s_home_rx_shown = false;
 char s_shown_home_sig[48] = {};
 
-// PTT bar (merged into the Home page).
+// PTT surface (the Home hero card itself is the press-and-hold area).
 lv_obj_t *s_ptt_btn = nullptr;
-lv_obj_t *s_ptt_label = nullptr;
 bool s_ptt_tx_visual = false;
 
 // Music page.
@@ -775,6 +793,9 @@ lv_obj_t *makeButton(lv_obj_t *parent, int x, int y, int w, int h,
                      const char *text, lv_event_cb_t cb, void *user_data)
 {
     lv_obj_t *btn = lv_button_create(parent);
+    // LVGL objects default to scrollable=1; a scrollable ancestor suppresses
+    // all gesture detection, so strip it from every widget we create.
+    lv_obj_remove_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_pos(btn, x, y);
     lv_obj_set_size(btn, w, h);
     lv_obj_set_style_radius(btn, 12, 0);
@@ -876,6 +897,63 @@ int batteryMvRaw()
 }
 
 // ---- Status bar -------------------------------------------------------------
+
+void switchTab(int index);
+// Shared volume stepper (music page buttons + edge swipe-in gesture).
+void adjustVolumePct(int delta);
+
+// Swipe handling. Gestures always land on the SCREEN: every LVGL child gets
+// gesture_bubble=1 by default, so LV_EVENT_GESTURE bubbles all the way up to
+// scr no matter where the finger started. One handler covers both the
+// horizontal page swipe and the vertical edge swipe-in volume control.
+void screenGestureEvent(lv_event_t *)
+{
+    const lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
+    if (dir == LV_DIR_LEFT || dir == LV_DIR_RIGHT) {
+        const int current = static_cast<int>(s_page);
+        if (dir == LV_DIR_LEFT) {
+            switchTab((current + 1) % static_cast<int>(Page::Count));
+        } else {
+            switchTab((current + static_cast<int>(Page::Count) - 1) %
+                      static_cast<int>(Page::Count));
+        }
+        return;
+    }
+    if (dir != LV_DIR_TOP && dir != LV_DIR_BOTTOM) {
+        return;
+    }
+    // Vertical swipe that STARTED in the status bar or the dock: into the
+    // screen = volume up, back out = volume down.
+    const bool from_top = s_touch_start_y >= 0 && s_touch_start_y < kContentY;
+    const bool from_bottom = s_touch_start_y >= kHeight - kDockH;
+    if (!from_top && !from_bottom) {
+        return;
+    }
+    const bool inward = (from_top && dir == LV_DIR_BOTTOM) ||
+                        (from_bottom && dir == LV_DIR_TOP);
+    adjustVolumePct(inward ? 5 : -5);
+    STATUS_IO_Vibrate(15);
+}
+
+void adjustVolumePct(int delta)
+{
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    if (cfg == nullptr) {
+        return;
+    }
+    int pct = (static_cast<int>(cfg->line_out_volume) * 100 + 127) / 255 + delta;
+    if (pct < 0) {
+        pct = 0;
+    } else if (pct > 100) {
+        pct = 100;
+    }
+    const int volume = (pct * 255 + 50) / 100;
+    if (volume != static_cast<int>(cfg->line_out_volume)) {
+        EXTERNAL_RADIO_SetLineOutVolume(static_cast<uint8_t>(volume), false);
+        s_volume_dirty = true;
+        s_volume_change_ms = millis();
+    }
+}
 
 void buildStatusBar(lv_obj_t *scr)
 {
@@ -1019,12 +1097,12 @@ void buildDock(lv_obj_t *scr)
     lv_obj_set_style_radius(dock, LV_RADIUS_CIRCLE, 0);  // pill
     lv_obj_set_style_pad_all(dock, 0, 0);
     lv_obj_remove_flag(dock, LV_OBJ_FLAG_SCROLLABLE);
-
     const char *icons[kTabCount] = {LV_SYMBOL_HOME, LV_SYMBOL_AUDIO,
                                     LV_SYMBOL_GPS, LV_SYMBOL_SETTINGS};
     const char *names[kTabCount] = {"Home", "Music", "Sensors", "Settings"};
     for (int i = 0; i < kTabCount; ++i) {
         lv_obj_t *btn = lv_button_create(dock);
+        lv_obj_remove_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_pos(btn, kTabX0 + i * (kTabW + kTabGap), 6);
         lv_obj_set_size(btn, kTabW, 44);
         lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, 0);
@@ -1073,6 +1151,7 @@ void buildPage()
     s_home_date = nullptr;
     s_home_callsign = nullptr;
     s_home_rx_codec = nullptr;
+    s_home_ptt_hint = nullptr;
     s_home_net_server = nullptr;
     s_home_net_ip = nullptr;
     // The hero labels are recreated with placeholder text; their
@@ -1082,7 +1161,6 @@ void buildPage()
     s_shown_home_clock[0] = '\0';
     s_shown_home_sig[0] = '\0';
     s_ptt_btn = nullptr;
-    s_ptt_label = nullptr;
     s_music_track = nullptr;
     s_music_state = nullptr;
     s_music_url = nullptr;
@@ -1134,38 +1212,26 @@ void switchTab(int index)
     updateTabHighlight();
 }
 
-void contentGestureEvent(lv_event_t *)
-{
-    const lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
-    const int current = static_cast<int>(s_page);
-    if (dir == LV_DIR_LEFT) {
-        switchTab((current + 1) % static_cast<int>(Page::Count));
-    } else if (dir == LV_DIR_RIGHT) {
-        switchTab((current + static_cast<int>(Page::Count) - 1) %
-                  static_cast<int>(Page::Count));
-    }
-}
-
 // ---- Home page ----------------------------------------------------------------
 
-// PTT bar content: red TX styling while transmitting, otherwise the
-// hold-to-talk prompt. Incoming-caller info lives in the hero above, so the
-// bar deliberately stays quiet during RX.
-void setPttBar(bool tx)
+// TX styling on the hero card (which doubles as the PTT surface): red border
+// and a "TRANSMITTING" hint while keyed, subtle "HOLD TO TALK" hint when idle.
+// Incoming-caller info shares the same card (clock row), so no separate RX
+// styling is needed here.
+void setHeroPtt(bool tx)
 {
     s_ptt_tx_visual = tx;
-    if (s_ptt_btn == nullptr || s_ptt_label == nullptr) {
+    if (s_ptt_btn == nullptr) {
         return;
     }
-    lv_obj_set_style_bg_color(s_ptt_btn,
-                              lv_color_hex(tx ? kColorPttTxBg : kColorCard), 0);
     lv_obj_set_style_border_color(s_ptt_btn,
-                                  lv_color_hex(tx ? kColorBad : kColorAccent), 0);
-    lv_obj_set_style_text_color(s_ptt_label,
-                                lv_color_hex(tx ? kColorBad : kColorAccent), 0);
-    char text[24];
-    snprintf(text, sizeof(text), "PTT  %s", tx ? "TX" : tr("HOLD"));
-    lv_label_set_text(s_ptt_label, text);
+                                  lv_color_hex(tx ? kColorBad : kColorBorder), 0);
+    lv_obj_set_style_border_width(s_ptt_btn, tx ? 3 : 1, 0);
+    if (s_home_ptt_hint != nullptr) {
+        lv_label_set_text(s_home_ptt_hint, tx ? tr("TRANSMITTING") : tr("HOLD TO TALK"));
+        lv_obj_set_style_text_color(s_home_ptt_hint,
+                                    lv_color_hex(tx ? kColorBad : kColorSub), 0);
+    }
 }
 
 void pttEvent(lv_event_t *event)
@@ -1174,12 +1240,12 @@ void pttEvent(lv_event_t *event)
         case LV_EVENT_PRESSED:
             STATUS_IO_SetSoftPtt(true);
             STATUS_IO_Vibrate(30);
-            setPttBar(true);
+            setHeroPtt(true);
             break;
         case LV_EVENT_RELEASED:
         case LV_EVENT_PRESS_LOST:
             STATUS_IO_SetSoftPtt(false);
-            setPttBar(false);
+            setHeroPtt(false);
             break;
         default:
             break;
@@ -1188,27 +1254,49 @@ void pttEvent(lv_event_t *event)
 
 void buildHomePage()
 {
-    lv_obj_t *hero = makeCard(s_content, kMargin, 8, kWidth - 2 * kMargin, 140, 12);
+    // The hero card IS the PTT button: press-and-hold anywhere on it to
+    // transmit. Bigger card, bigger targets.
+    lv_obj_t *hero = lv_button_create(s_content);
+    lv_obj_set_pos(hero, kMargin, 8);
+    lv_obj_set_size(hero, kWidth - 2 * kMargin, 268);
+    lv_obj_set_style_bg_color(hero, lv_color_hex(kColorCard), 0);
+    lv_obj_set_style_bg_color(hero, lv_color_hex(kColorBtnPress), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(hero, lv_color_hex(kColorBorder), 0);
+    lv_obj_set_style_border_width(hero, 1, 0);
+    lv_obj_set_style_radius(hero, 20, 0);
+    lv_obj_set_style_pad_all(hero, 12, 0);
+    lv_obj_remove_flag(hero, LV_OBJ_FLAG_SCROLLABLE);
+    // Horizontal swipes still switch pages; vertical press keys up the radio.
+    lv_obj_add_flag(hero, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_event_cb(hero, pttEvent, LV_EVENT_PRESSED, nullptr);
+    lv_obj_add_event_cb(hero, pttEvent, LV_EVENT_RELEASED, nullptr);
+    lv_obj_add_event_cb(hero, pttEvent, LV_EVENT_PRESS_LOST, nullptr);
+    s_ptt_btn = hero;
 
     s_home_clock = makeLabel(hero, "--:--", &lv_font_montserrat_48, kColorText);
     lv_obj_set_width(s_home_clock, kWidth - 2 * kMargin - 24);
     lv_obj_set_style_text_align(s_home_clock, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(s_home_clock, LV_LABEL_LONG_DOT);
-    lv_obj_align(s_home_clock, LV_ALIGN_CENTER, 0, -28);
+    lv_obj_align(s_home_clock, LV_ALIGN_CENTER, 0, -64);
 
     s_home_date = makeLabel(hero, "", &lv_font_montserrat_20, kColorSub);
-    lv_obj_align(s_home_date, LV_ALIGN_CENTER, 0, 10);
+    lv_obj_align(s_home_date, LV_ALIGN_CENTER, 0, -6);
 
     s_home_callsign = makeLabel(hero, "----------", &lv_font_montserrat_28, kColorAccent);
-    lv_obj_align(s_home_callsign, LV_ALIGN_CENTER, 0, 44);
+    lv_obj_align(s_home_callsign, LV_ALIGN_CENTER, 0, 36);
 
     // RX codec tag ("OPUS"/"G.711"), top-right of the hero; only visible
     // while a caller is on air.
     s_home_rx_codec = makeLabel(hero, "", &lv_font_montserrat_14, kColorAccent);
     lv_obj_align(s_home_rx_codec, LV_ALIGN_TOP_RIGHT, 0, 0);
 
-    // Merged net card: NRL server address | this device's IP, one wide row.
-    lv_obj_t *net = makeCard(s_content, kMargin, 156, kWidth - 2 * kMargin, 68, 10);
+    // Bottom of the hero: PTT affordance / TX state.
+    s_home_ptt_hint = makeLabel(hero, "", &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_style_text_align(s_home_ptt_hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_home_ptt_hint, LV_ALIGN_CENTER, 0, 104);
+
+    // Merged net card at the bottom: NRL server address | this device's IP.
+    lv_obj_t *net = makeCard(s_content, kMargin, 284, kWidth - 2 * kMargin, 68, 10);
     const int half = (kWidth - 2 * kMargin - 20) / 2;  // two columns inside
 
     lv_obj_t *server_cap = makeLabel(net, tr("SERVER"), &lv_font_montserrat_14, kColorSub);
@@ -1225,25 +1313,10 @@ void buildHomePage()
     lv_label_set_long_mode(s_home_net_ip, LV_LABEL_LONG_DOT);
     lv_obj_set_pos(s_home_net_ip, half + 10, 22);
 
-    // Full-width press-and-hold PTT bar (merged from the old Radio page).
-    s_ptt_btn = lv_button_create(s_content);
-    lv_obj_set_pos(s_ptt_btn, kMargin, 232);
-    lv_obj_set_size(s_ptt_btn, kWidth - 2 * kMargin, 116);
-    lv_obj_set_style_radius(s_ptt_btn, 24, 0);
-    lv_obj_set_style_border_width(s_ptt_btn, 3, 0);
-    lv_obj_set_style_bg_color(s_ptt_btn, lv_color_hex(kColorBtnPress), LV_STATE_PRESSED);
-    lv_obj_add_event_cb(s_ptt_btn, pttEvent, LV_EVENT_PRESSED, nullptr);
-    lv_obj_add_event_cb(s_ptt_btn, pttEvent, LV_EVENT_RELEASED, nullptr);
-    lv_obj_add_event_cb(s_ptt_btn, pttEvent, LV_EVENT_PRESS_LOST, nullptr);
-
-    s_ptt_label = makeLabel(s_ptt_btn, "PTT", &lv_font_montserrat_28, kColorAccent);
-    lv_obj_set_style_text_align(s_ptt_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_center(s_ptt_label);
-
     // STATUS_IO_IsPttActive() is the *inbound* network-audio latch (drives the
     // AUDIO LED); the local-transmit state (physical/soft PTT keyed) is the
     // bridge's PttActive, same source the Korvo radio page uses.
-    setPttBar(NRLAudioBridge_PttActive());
+    setHeroPtt(NRLAudioBridge_PttActive());
 }
 
 void refreshHomePage()
@@ -1307,11 +1380,10 @@ void refreshHomePage()
     }
     lv_label_set_text(s_home_net_ip, ip[0] != '\0' ? ip : "--");
 
-    // PTT bar: TX styling while transmitting; quiet while receiving (the
-    // hero above already carries the caller's badge and codec).
+    // PTT surface (hero card): red border + hint while transmitting.
     const bool tx = NRLAudioBridge_PttActive();
     if (tx != s_ptt_tx_visual) {
-        setPttBar(tx);
+        setHeroPtt(tx);
     }
 }
 
@@ -1337,23 +1409,8 @@ void musicVolumeEvent(lv_event_t *event)
 {
     const int delta = static_cast<int>(
         reinterpret_cast<intptr_t>(lv_event_get_user_data(event)));
-    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
-    if (cfg == nullptr) {
-        return;
-    }
-    int pct = (static_cast<int>(cfg->line_out_volume) * 100 + 127) / 255 + delta;
-    if (pct < 0) {
-        pct = 0;
-    } else if (pct > 100) {
-        pct = 100;
-    }
-    const int volume = (pct * 255 + 50) / 100;
-    if (volume != static_cast<int>(cfg->line_out_volume)) {
-        EXTERNAL_RADIO_SetLineOutVolume(static_cast<uint8_t>(volume), false);
-        s_volume_dirty = true;
-        s_volume_change_ms = millis();
-        refreshMusicPage();
-    }
+    adjustVolumePct(delta);
+    refreshMusicPage();
 }
 
 void buildMusicPage()
@@ -1859,6 +1916,7 @@ void buildProvisioning()
 {
     lv_obj_t *scr = lv_screen_active();
     lv_obj_clean(scr);
+    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);  // see buildMainUi
     s_content = nullptr;
     s_lbl_clock = nullptr;
     s_overlay = nullptr;
@@ -1926,6 +1984,14 @@ void buildMainUi()
 {
     lv_obj_t *scr = lv_screen_active();
     lv_obj_clean(scr);
+    // Screens default to scrollable=1, and indev_gesture() bails out whenever
+    // a scrollable ancestor exists -- that single default silently disabled
+    // every swipe gesture on this UI.
+    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    // All swipe gestures bubble up to the screen (gesture_bubble defaults to
+    // 1 on every child), so one handler here covers page swipes anywhere and
+    // edge swipe-ins from the bar/dock.
+    lv_obj_add_event_cb(scr, screenGestureEvent, LV_EVENT_GESTURE, nullptr);
     lv_obj_set_style_bg_color(scr, lv_color_hex(kColorBg), 0);
     s_overlay = nullptr;
     s_prov_ssid = nullptr;
@@ -1942,9 +2008,9 @@ void buildMainUi()
     lv_obj_set_style_radius(s_content, 0, 0);
     lv_obj_set_style_pad_all(s_content, 0, 0);
     lv_obj_remove_flag(s_content, LV_OBJ_FLAG_SCROLLABLE);
-    // Clickable so bare areas receive the swipe gesture; cards bubble theirs up.
+    // Clickable so bare areas can be the press target; the resulting swipe
+    // gesture still bubbles up to the screen handler (gesture_bubble).
     lv_obj_add_flag(s_content, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_content, contentGestureEvent, LV_EVENT_GESTURE, nullptr);
 
     buildPage();
     updateTabHighlight();
