@@ -122,7 +122,8 @@ extern "C" bool SERIAL_PORT_CONFIG_IsAllowedPin(const int gpio)
     }
 #elif NRL_BOARD == NRL_BOARD_GEZIPAI
     switch (gpio) {
-        case 8: case 9: case 10: case 11: case 12: case 13: case 14:
+        // GPIO14 is reserved for NRL_PIN_PTT_OUT (external-radio keying).
+        case 8: case 9: case 10: case 11: case 12: case 13:
         case 22: case 23: case 24: case 25: case 33: case 34: case 35:
         case 36: case 37: case 43: case 44:
             return true;

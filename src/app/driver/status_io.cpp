@@ -816,6 +816,12 @@ extern "C" void STATUS_IO_Init(void)
     gpio_set_level((gpio_num_t)NRL_PIN_VIBRATION_MOTOR, 0);
 #endif
 
+#if defined(NRL_PIN_PTT_OUT) && NRL_PIN_PTT_OUT >= 0
+    // External-radio PTT keying output (active high); idle low at boot.
+    initOutputPin(NRL_PIN_PTT_OUT);
+    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, 0);
+#endif
+
 #if NRL_BOARD == NRL_BOARD_S31_KORVO
     // The S31 has a single addressable WS2812 on GPIO37 instead of the three
     // discrete LEDs above. Drive it via the vendored BSP and clear it.
@@ -881,6 +887,9 @@ extern "C" void STATUS_IO_SetPttActive(const bool active)
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
     (void)BH4TDV_RF_IO_SetRadioPtt(s_net_audio_active);
 #endif
+#if defined(NRL_PIN_PTT_OUT) && NRL_PIN_PTT_OUT >= 0
+    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, s_net_audio_active ? 1 : 0);
+#endif
     if (!ledSelftestActive(nrl_millis_now())) {
         writeLed(NRL_PIN_LED_AUDIO, s_net_audio_active);
     }
@@ -892,6 +901,9 @@ extern "C" void STATUS_IO_SetFmoPttActive(const bool active)
     s_net_audio_active = s_nrl_audio_active || s_fmo_audio_active;
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
     (void)BH4TDV_RF_IO_SetRadioPtt(s_net_audio_active);
+#endif
+#if defined(NRL_PIN_PTT_OUT) && NRL_PIN_PTT_OUT >= 0
+    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, s_net_audio_active ? 1 : 0);
 #endif
     if (!ledSelftestActive(nrl_millis_now())) {
         writeLed(NRL_PIN_LED_AUDIO, s_net_audio_active);

@@ -25,6 +25,11 @@
 #define NRL_PIN_LED_NET         17
 
 #define NRL_PIN_PA_EN           46
+
+// External-radio PTT keying output: driven high while inbound network voice
+// (NRL downlink or FMO call) is being played, keying an attached radio so it
+// re-transmits the call on RF. Mirrors the BH4TDV 3188 PTT_OUT behaviour.
+#define NRL_PIN_PTT_OUT         14
 #define NRL_HAS_ES7210          1
 #define NRL_AUDIO_CODEC_ES8311  1
 #define NRL_AUDIO_CODEC_ES8389  0
