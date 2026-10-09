@@ -171,6 +171,21 @@ if((NRL_BOARD_ID STREQUAL "NRL_BOARD_BI4UMD" OR
     endif()
 endif()
 
+# The freshly fetched LVGL deprecates several Kconfig options and src-folder
+# includes still used by stale sdkconfigs and by esp_lvgl_adapter; its headers
+# emit #warning, which -Werror=cpp promotes to an error. Demote #warning for
+# these third-party components only (mirrors the bt/smb2 demotions above).
+# Both are absent from some board builds, so gate on the build component list.
+idf_build_get_property(nrl_build_components BUILD_COMPONENTS)
+if(lvgl IN_LIST nrl_build_components)
+    idf_component_get_property(lvgl_warn_lib lvgl COMPONENT_LIB)
+    target_compile_options(${lvgl_warn_lib} PRIVATE -Wno-error=cpp)
+endif()
+if(espressif__esp_lvgl_adapter IN_LIST nrl_build_components)
+    idf_component_get_property(lvgl_adapter_lib espressif__esp_lvgl_adapter COMPONENT_LIB)
+    target_compile_options(${lvgl_adapter_lib} PRIVATE -Wno-error=cpp)
+endif()
+
 # libsmb2 is used on every board in 0.7.8. Compile its legacy C sources with
 # non-fatal compatibility warnings regardless of the selected target.
 idf_component_get_property(smb2_lib sahlberg__libsmb2 COMPONENT_LIB)

@@ -327,6 +327,30 @@ CONFIG_LV_PPA_BURST_LENGTH=128
 CONFIG_LV_DRAW_SW_ASM_NONE=y
 # CONFIG_LV_DRAW_SW_ASM_RISCV_V is not set
 # CONFIG_LV_USE_FREETYPE is not set
+# LVGL 9.6.0 grew the s31_korvo binary past the 7 MiB app partition. The Korvo
+# UI uses only obj/bar/button/dropdown/image/keyboard/label/list/slider/
+# switch/textarea (keyboard internally needs buttonmatrix), so trim the rest.
+# CONFIG_LV_USE_ANIMIMG is not set
+# CONFIG_LV_USE_ARC is not set
+# CONFIG_LV_USE_ARCLABEL is not set
+# CONFIG_LV_USE_CALENDAR is not set
+# CONFIG_LV_USE_CANVAS is not set
+# CONFIG_LV_USE_CHART is not set
+# CONFIG_LV_USE_CHECKBOX is not set
+# CONFIG_LV_USE_IMAGEBUTTON is not set
+# CONFIG_LV_USE_LED is not set
+# CONFIG_LV_USE_LINE is not set
+# CONFIG_LV_USE_MENU is not set
+# CONFIG_LV_USE_MSGBOX is not set
+# CONFIG_LV_USE_ROLLER is not set
+# CONFIG_LV_USE_SCALE is not set
+# CONFIG_LV_USE_SPAN is not set
+# CONFIG_LV_USE_SPINBOX is not set
+# CONFIG_LV_USE_SPINNER is not set
+# CONFIG_LV_USE_TABLE is not set
+# CONFIG_LV_USE_TABVIEW is not set
+# CONFIG_LV_USE_TILEVIEW is not set
+# CONFIG_LV_USE_WIN is not set
 CONFIG_CAMERA_OV3660=y
 CONFIG_CAMERA_OV3660_DVP_JPEG_1280X720_12FPS=y
 CONFIG_CAMERA_OV3660_DVP_DEFAULT_FMT_JPEG_1280X720_12FPS=y

@@ -49,7 +49,7 @@ extern "C" bool FMO_FRAME_Parse(const uint8_t *frame, const size_t frame_size,
     }
 
     memset(info, 0, sizeof(*info));
-    info->session = readLe16(frame + 6u);
+    info->uid = readLe32(frame + 6u);
     memcpy(info->callsign, frame + 10u, 6u);
     info->callsign[6] = '\0';
     info->started_at = readLe32(frame + 22u);
@@ -100,7 +100,7 @@ extern "C" bool FMO_FRAME_Parse(const uint8_t *frame, const size_t frame_size,
 
 extern "C" size_t FMO_FRAME_BuildOpus(
     uint8_t *output, const size_t capacity, const char *callsign,
-    const uint16_t session, const uint32_t started_at, const uint32_t timestamp,
+    const uint32_t uid, const uint32_t started_at, const uint32_t timestamp,
     const uint8_t *const packets[], const size_t packet_sizes[],
     const size_t packet_count, const uint8_t buffer_depth)
 {
@@ -122,7 +122,7 @@ extern "C" size_t FMO_FRAME_BuildOpus(
 
     memset(output, 0, total);
     output[0] = 1u;
-    writeLe16(output + 6u, session);
+    writeLe32(output + 6u, uid);
     const size_t callsign_size = strnlen(callsign, 6u);
     for (size_t i = 0; i < callsign_size; ++i) {
         const char ch = callsign[i];

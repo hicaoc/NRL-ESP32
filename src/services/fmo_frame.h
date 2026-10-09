@@ -16,7 +16,7 @@ typedef enum {
 
 typedef struct {
     char callsign[7];
-    uint16_t session;
+    uint32_t uid;
     uint32_t started_at;
     uint32_t timestamp;
     uint16_t block_count;
@@ -31,8 +31,9 @@ bool FMO_FRAME_Parse(const uint8_t *frame, size_t frame_size,
                      FmoFrameInfo *info, FmoFrameBlockHandler handler,
                      void *context);
 
+// +6 u32 是说话人本机证书的 uid（服务器按连接身份校验，填错/随机会被拒）。
 size_t FMO_FRAME_BuildOpus(uint8_t *output, size_t capacity,
-                           const char *callsign, uint16_t session,
+                           const char *callsign, uint32_t uid,
                            uint32_t started_at, uint32_t timestamp,
                            const uint8_t *const packets[],
                            const size_t packet_sizes[], size_t packet_count,

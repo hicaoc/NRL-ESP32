@@ -161,7 +161,7 @@ static size_t s_tx_packet_sizes[kTxPacketsPerFrame];
 static size_t s_tx_packet_count = 0u;
 static uint32_t s_tx_packet_total = 0u;
 static uint32_t s_tx_frame_count = 0u;
-static uint16_t s_tx_session = 0u;
+static uint32_t s_tx_uid = 0u;
 static uint32_t s_tx_started_ms = 0u;
 static char s_tx_callsign[16] = {};
 NRL_PSRAM_BSS static uint8_t s_tx_frame[kRawMaxSize];
@@ -926,7 +926,7 @@ static bool txFlush(void)
     const uint8_t *packets[kTxPacketsPerFrame];
     for (size_t i = 0; i < s_tx_packet_count; ++i) packets[i] = s_tx_packets[i];
     const size_t frame_size = FMO_FRAME_BuildOpus(
-        s_tx_frame, sizeof(s_tx_frame), s_tx_callsign, s_tx_session,
+        s_tx_frame, sizeof(s_tx_frame), s_tx_callsign, s_tx_uid,
         s_tx_started_ms, s_tx_started_ms + s_tx_packet_total * 40u, packets,
         s_tx_packet_sizes, s_tx_packet_count, s_tx_frame_count < 3u ? 0u : 9u);
     if (frame_size == 0u) return false;
@@ -977,8 +977,8 @@ static bool txBegin(void)
     s_tx_packet_count = 0u;
     s_tx_packet_total = 0u;
     s_tx_frame_count = 0u;
-    s_tx_session = static_cast<uint16_t>(esp_random());
-    if (s_tx_session == 0u) s_tx_session = 1u;
+    // 帧头 +6 的 uid 是本机证书 uid（服务器按连接身份校验，随机值会被拒）。
+    s_tx_uid = identity.uid;
     const uint64_t epoch_ms = static_cast<uint64_t>(time(nullptr)) * 1000ULL +
                               static_cast<uint64_t>(esp_timer_get_time() / 1000) % 1000ULL;
     s_tx_started_ms = static_cast<uint32_t>(epoch_ms);
