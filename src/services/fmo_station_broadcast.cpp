@@ -61,6 +61,7 @@ static FmoStationBroadcastStatus s_status = {};
 static bool s_config_loaded = false;
 static int64_t s_last_send_ms = 0;     // last successful packet
 static int64_t s_last_attempt_ms = 0;  // last send attempt (rate limiter)
+static volatile bool s_manual_send = false;  // FMO_STATION_BCAST_SendNow request
 static TaskHandle_t s_task = nullptr;
 // Online-count roster (~4 KiB static): distinct heartbeat uids inside the
 // 120 s window. s_nvs_peak is the historical peak known to be in flash.
@@ -743,6 +744,22 @@ void broadcastTask(void *)
             }
         }
 
+        // Out-of-cycle manual send ("立即广播"): independent of enabled/mode,
+        // but the config still must be complete and the rate limit applies.
+        if (s_manual_send) {
+            s_manual_send = false;
+            FmoStationBroadcastConfig completed = config;
+            if (!completeConfig(&completed)) {
+                setReject(FMO_STATION_BCAST_REJECT_CONFIG);
+            } else if (s_last_attempt_ms != 0 &&
+                       now_ms - s_last_attempt_ms < kMinSendIntervalMs) {
+                setReject(FMO_STATION_BCAST_REJECT_RATE_LIMIT);
+            } else {
+                s_last_attempt_ms = now_ms != 0 ? now_ms : 1;
+                broadcastOnce(completed);
+            }
+        }
+
         // --- BEACON personal beacon: independent 10-minute timer (§8.6).
         // Unlike the STATION broadcast there is no super/own-server gate.
         ensureBeaconConfigLoaded();
@@ -854,6 +871,18 @@ extern "C" void FMO_STATION_BCAST_GetStatus(FmoStationBroadcastStatus *status)
 extern "C" bool FMO_STATION_BCAST_GatesOk(void)
 {
     return FMO_IsSuperOnOwnServer();
+}
+
+extern "C" bool FMO_STATION_BCAST_SendNow(void)
+{
+    if (s_task == nullptr) return false;
+    // Up-front gates 1-4; broadcastOnce re-checks everything at send time and
+    // the time floor (gate 5) can only be evaluated there.
+    if (!FMO_IsSuperOnOwnServer() || !APRS_SERVICE_IsNetVerified()) {
+        return false;
+    }
+    s_manual_send = true;
+    return true;
 }
 
 extern "C" void FMO_STATION_BCAST_FeedHeartbeat(const uint32_t uid)

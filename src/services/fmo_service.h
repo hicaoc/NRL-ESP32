@@ -67,6 +67,16 @@ size_t FMO_ServerCount(void);
 bool FMO_GetServer(size_t index, FmoServer *server);
 bool FMO_SelectServer(size_t index, bool persist);
 
+// Direct-connect "my own server" without waiting for its APRS STATION
+// broadcast (mirrors nrl-pulse connect_own_server): the server entry is
+// synthesized from this device's identity certificate -- callsign, uid and
+// the certificate fingerprint double as the server's identity (the server
+// runs with the station owner's certificate), only host/port come from the
+// caller. The link then logs in with role "super" because the callsigns
+// match, which unlocks the STATION broadcast gates. Requires a ready
+// identity certificate; host must be non-empty.
+bool FMO_ConnectOwnServer(const char *host, uint16_t port, bool persist);
+
 // Publish on the FMO MQTT link (used by the QSO signaling to post the
 // established-QSO record to FMO/QSO/UID/<peer uid>). Returns false when the
 // link is down or the publish could not be queued.

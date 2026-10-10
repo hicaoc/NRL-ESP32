@@ -832,15 +832,16 @@ extern "C" void STATUS_IO_Init(void)
         ESP_LOGW(TAG, "WS2812 status LED init failed");
     }
 #elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD || NRL_BOARD == NRL_BOARD_BH4TDV_RF || NRL_BOARD == NRL_BOARD_BI4UMD
-    const led_strip_config_t strip_config = {
-        .strip_gpio_num = NRL_PIN_WS2812_STATUS,
-        .max_leds = 1,
-        .led_model = LED_MODEL_WS2812,
-        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
-        .flags = {
-            .invert_out = NRL_WS2812_INVERT_OUT,
-        },
-    };
+    // Field-assignment init instead of a designated initializer: the managed
+    // led_strip versions differ per board (newer ones add a `timings` member
+    // to led_strip_config_t), and -Werror=missing-field-initializers rejects
+    // partial designated initializers on those.
+    led_strip_config_t strip_config = {};
+    strip_config.strip_gpio_num = NRL_PIN_WS2812_STATUS;
+    strip_config.max_leds = 1;
+    strip_config.led_model = LED_MODEL_WS2812;
+    strip_config.color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB;
+    strip_config.flags.invert_out = NRL_WS2812_INVERT_OUT;
     const led_strip_rmt_config_t rmt_config = {
         .clk_src = RMT_CLK_SRC_DEFAULT,
         .resolution_hz = 10 * 1000 * 1000,

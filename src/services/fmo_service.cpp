@@ -1541,6 +1541,30 @@ extern "C" bool FMO_SelectServer(const size_t index, const bool persist)
     return FMO_SetConfig(&config, persist);
 }
 
+extern "C" bool FMO_ConnectOwnServer(const char *host, const uint16_t port,
+                                     const bool persist)
+{
+    if (host == nullptr || host[0] == '\0' || port == 0u) return false;
+    FmoIdentityStatus identity = {};
+    if (FMO_CERT_GetStatus(&identity) != ESP_OK || !identity.ready) {
+        return false;
+    }
+    FmoServer server = {};
+    snprintf(server.name, sizeof(server.name), "%s（本机直连）",
+             identity.callsign);
+    snprintf(server.host, sizeof(server.host), "%s", host);
+    snprintf(server.callsign, sizeof(server.callsign), "%s", identity.callsign);
+    server.port = port;
+    server.uid = identity.uid;
+    memcpy(server.fingerprint, identity.fingerprint,
+           sizeof(server.fingerprint));
+    server.has_fingerprint = true;
+    FmoConfig config = {};
+    FMO_GetConfig(&config);
+    config.server = server;
+    return FMO_SetConfig(&config, persist);
+}
+
 extern "C" bool FMO_PublishMessage(const char *topic, const char *data,
                                    const int len)
 {

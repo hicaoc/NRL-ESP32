@@ -170,6 +170,15 @@ void FMO_STATION_BCAST_GetAutoCounts(uint32_t *online, uint32_t *peak);
 // callsign == certificate callsign). Used by web/AT for up-front validation.
 bool FMO_STATION_BCAST_GatesOk(void);
 
+// Queue one out-of-cycle STATION broadcast ("立即广播"), sent by the
+// broadcast task on its next tick regardless of enabled/mode (the config
+// still must be complete: country/host/port/name). Gates 1-4 are checked
+// up front here and re-checked at send time; the 60 s minimum rate limit
+// still applies (a limited attempt shows as last_reject ==
+// FMO_STATION_BCAST_REJECT_RATE_LIMIT). Returns false when the up-front
+// gates do not hold right now.
+bool FMO_STATION_BCAST_SendNow(void);
+
 #ifdef __cplusplus
 }
 #endif
