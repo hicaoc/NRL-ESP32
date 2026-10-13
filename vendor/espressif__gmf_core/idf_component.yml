@@ -1,0 +1,12 @@
+description: Espressif General Multimedia Framework (gmf-core) module
+documentation: https://github.com/espressif/esp-gmf/blob/main/gmf_core/README.md
+issues: https://github.com/espressif/esp-gmf/issues
+repository: git://github.com/espressif/esp-gmf.git
+repository_info:
+  commit_sha: 3da67108f06044689e94773cee65b0bc93356094
+  path: ./gmf_core
+tags:
+- gmf
+- multimedia
+url: https://github.com/espressif/esp-gmf/tree/main/gmf_core
+version: 1.0.0
