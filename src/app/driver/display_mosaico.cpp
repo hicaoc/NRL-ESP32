@@ -11,6 +11,7 @@
 
 #include "display.h"
 #include "display_mosaico_panel.h"
+#include "display_mosaico_sensors.h"
 #include "external_radio.h"
 #include "i2c1.h"
 #include "mosaico_sensors.h"
@@ -351,6 +352,12 @@ const TrEntry kTr[] = {
     {"MAGNETOMETER (uT)", "磁力计 (uT)"},
     {"Interference", "磁场干扰"},
     {"sensor absent", "传感器缺席"},
+    // Sensor detail pages
+    {"Back", "返回"},
+    {"N", "北"},
+    {"E", "东"},
+    {"S", "南"},
+    {"W", "西"},
     // Settings page
     {"BRIGHTNESS", "亮度"},
     {"MIC VOLUME", "麦克风音量"},
@@ -653,10 +660,12 @@ enum class Page : int {
     Music,
     Sensors,
     Settings,
-    Count,
+    Count,                    // dock tab count
+    SensorDetail = Count,     // full-screen sensor detail; not a dock tab
 };
 
 Page s_page = Page::Home;
+int s_detail_sensor = MOSAICO_SENSOR_DETAIL_HEADING;
 bool s_time_sync_started = false;
 uint32_t s_last_bar_ms = 0u;
 uint32_t s_last_page_ms = 0u;
@@ -665,6 +674,7 @@ uint32_t s_volume_change_ms = 0u;
 
 // Persistent chrome.
 lv_obj_t *s_content = nullptr;
+lv_obj_t *s_dock = nullptr;
 lv_obj_t *s_tab_btns[static_cast<int>(Page::Count)] = {};
 lv_obj_t *s_tab_labels[static_cast<int>(Page::Count)] = {};
 
@@ -714,6 +724,14 @@ lv_obj_t *s_sens_heading_sub = nullptr;
 lv_obj_t *s_sens_batt = nullptr;
 lv_obj_t *s_sens_mag = nullptr;
 lv_obj_t *s_sens_mag_warn = nullptr;
+// Mini live graphics inside the overview cards (tap-through decorations).
+lv_obj_t *s_sens_accel_dot = nullptr;
+int s_sens_accel_dot_x = 0;
+int s_sens_accel_dot_y = 0;
+lv_obj_t *s_sens_heading_arrow = nullptr;
+lv_point_precise_t s_sens_heading_arrow_pts[2] = {};
+lv_obj_t *s_sens_batt_arc = nullptr;
+lv_obj_t *s_sens_mag_arc = nullptr;
 
 // Settings page.
 lv_obj_t *s_settings_bright_label = nullptr;
@@ -909,6 +927,14 @@ void adjustVolumePct(int delta);
 void screenGestureEvent(lv_event_t *)
 {
     const lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
+    // Sensor detail pages: up-swipe returns to the overview; left/right tab
+    // switching and the edge volume swipe are disabled while a detail is up.
+    if (s_page == Page::SensorDetail) {
+        if (dir == LV_DIR_TOP) {
+            MosaicoUi_ExitSensorDetail();
+        }
+        return;
+    }
     if (dir == LV_DIR_LEFT || dir == LV_DIR_RIGHT) {
         const int current = static_cast<int>(s_page);
         if (dir == LV_DIR_LEFT) {
@@ -1097,6 +1123,7 @@ void buildDock(lv_obj_t *scr)
     lv_obj_set_style_radius(dock, LV_RADIUS_CIRCLE, 0);  // pill
     lv_obj_set_style_pad_all(dock, 0, 0);
     lv_obj_remove_flag(dock, LV_OBJ_FLAG_SCROLLABLE);
+    s_dock = dock;
     const char *icons[kTabCount] = {LV_SYMBOL_HOME, LV_SYMBOL_AUDIO,
                                     LV_SYMBOL_GPS, LV_SYMBOL_SETTINGS};
     const char *names[kTabCount] = {"Home", "Music", "Sensors", "Settings"};
@@ -1121,7 +1148,10 @@ void buildDock(lv_obj_t *scr)
 
 void updateTabHighlight()
 {
-    const int active = static_cast<int>(s_page);
+    // A sensor detail page keeps the Sensors tab highlighted.
+    const int active = (s_page == Page::SensorDetail)
+                           ? static_cast<int>(Page::Sensors)
+                           : static_cast<int>(s_page);
     for (int i = 0; i < kTabCount; ++i) {
         if (s_tab_btns[i] == nullptr) {
             continue;
@@ -1173,17 +1203,31 @@ void buildPage()
     s_sens_batt = nullptr;
     s_sens_mag = nullptr;
     s_sens_mag_warn = nullptr;
+    s_sens_accel_dot = nullptr;
+    s_sens_heading_arrow = nullptr;
+    s_sens_batt_arc = nullptr;
+    s_sens_mag_arc = nullptr;
     s_settings_bright_label = nullptr;
     s_settings_mic_label = nullptr;
     s_settings_spk_label = nullptr;
     s_settings_rot_btn_label = nullptr;
     s_settings_lang_btn_label = nullptr;
+    // Detail pages run with the dock hidden and claim the freed space.
+    const bool detail = (s_page == Page::SensorDetail);
+    lv_obj_set_size(s_content, kWidth,
+                    detail ? (kHeight - kContentY - 8) : kContentH);
+    if (s_dock != nullptr) {
+        lv_obj_set_hidden(s_dock, detail);
+    }
     lv_obj_clean(s_content);
     switch (s_page) {
         case Page::Home: buildHomePage(); break;
         case Page::Music: buildMusicPage(); break;
         case Page::Sensors: buildSensorsPage(); break;
         case Page::Settings: buildSettingsPage(); break;
+        case Page::SensorDetail:
+            MosaicoSensorDetail_Build(s_content, s_detail_sensor);
+            break;
         default: break;
     }
     s_last_page_ms = 0u; // force an immediate live refresh
@@ -1498,6 +1542,62 @@ void refreshMusicPage()
 
 // ---- Sensors page (live, ~4 Hz) -------------------------------------------------
 
+void sensorCardEvent(lv_event_t *event)
+{
+    const int sensor = static_cast<int>(reinterpret_cast<intptr_t>(
+        lv_event_get_user_data(event)));
+    s_detail_sensor = sensor;
+    s_page = Page::SensorDetail;
+    STATUS_IO_Vibrate(30);
+    buildPage();
+    updateTabHighlight();
+}
+
+// Overview card that opens the matching detail page on tap.
+lv_obj_t *sensorCard(lv_obj_t *parent, int x, int y, int w, int h, int detail_id)
+{
+    lv_obj_t *card = makeCard(parent, x, y, w, h, 12);
+    lv_obj_set_clickable(card, true);
+    lv_obj_set_style_bg_color(card, lv_color_hex(kColorBtnPress), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(card, sensorCardEvent, LV_EVENT_CLICKED,
+                        reinterpret_cast<void *>(static_cast<intptr_t>(detail_id)));
+    return card;
+}
+
+// Small decorative gauge ring for the overview cards (0-100, non-interactive).
+lv_obj_t *miniArc(lv_obj_t *card, int x, int y, int d, uint32_t color)
+{
+    lv_obj_t *arc = lv_arc_create(card);
+    lv_obj_set_clickable(arc, false);
+    lv_obj_set_scrollable(arc, false);
+    lv_obj_set_gesture_bubble(arc, true);
+    lv_obj_set_pos(arc, x, y);
+    lv_obj_set_size(arc, d, d);
+    lv_arc_set_range(arc, 0, 100);
+    lv_arc_set_rotation(arc, 270);
+    lv_arc_set_bg_angles(arc, 0, 360);
+    lv_obj_set_style_arc_color(arc, lv_color_hex(kColorBorder), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(arc, lv_color_hex(color), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(arc, 5, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(arc, 5, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(arc, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(arc, 0, LV_PART_KNOB);
+    lv_arc_set_value(arc, 0);
+    return arc;
+}
+
+lv_obj_t *miniDot(lv_obj_t *card, int x, int y, int d, uint32_t color)
+{
+    lv_obj_t *dot = lv_obj_create(card);
+    lv_obj_set_scrollable(dot, false);
+    lv_obj_set_pos(dot, x, y);
+    lv_obj_set_size(dot, d, d);
+    lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(dot, lv_color_hex(color), 0);
+    lv_obj_set_style_border_width(dot, 0, 0);
+    return dot;
+}
+
 void buildSensorsPage()
 {
     // Scrollable page body: the magnetometer card sits below the 2x2 grid.
@@ -1514,37 +1614,72 @@ void buildSensorsPage()
     const int row2 = 180;
     const int col2 = kMargin + kCardW + 8;
 
-    lv_obj_t *accel = makeCard(page, kMargin, 8, kCardW, 164, 12);
+    lv_obj_t *accel = sensorCard(page, kMargin, 8, kCardW, 164,
+                                 MOSAICO_SENSOR_DETAIL_ACCEL);
     cardCaption(accel, "ACCEL (g)");
     s_sens_accel = makeLabel(accel, "--", &lv_font_montserrat_16, kColorText);
     lv_obj_set_pos(s_sens_accel, 0, 24);
+    // Mini bubble level (bottom-right corner of the card).
+    lv_obj_t *ring = lv_obj_create(accel);
+    lv_obj_set_scrollable(ring, false);
+    lv_obj_set_pos(ring, 142, 88);
+    lv_obj_set_size(ring, 44, 44);
+    lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(ring, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(ring, lv_color_hex(kColorBorder), 0);
+    lv_obj_set_style_border_width(ring, 1, 0);
+    s_sens_accel_dot = miniDot(accel, 158, 104, 12, kColorAccent);
+    s_sens_accel_dot_x = 158;
+    s_sens_accel_dot_y = 104;
 
-    lv_obj_t *gyro = makeCard(page, col2, 8, kCardW, 164, 12);
+    lv_obj_t *gyro = sensorCard(page, col2, 8, kCardW, 164,
+                                MOSAICO_SENSOR_DETAIL_GYRO);
     cardCaption(gyro, "GYRO (dps)");
     s_sens_gyro = makeLabel(gyro, "--", &lv_font_montserrat_16, kColorText);
     lv_obj_set_pos(s_sens_gyro, 0, 24);
+    // X/Y/Z series color key.
+    miniDot(gyro, 136, 112, 10, kColorBad);
+    miniDot(gyro, 158, 112, 10, kColorGood);
+    miniDot(gyro, 180, 112, 10, 0x60A5FA);
 
-    lv_obj_t *heading = makeCard(page, kMargin, row2, kCardW, 164, 12);
+    lv_obj_t *heading = sensorCard(page, kMargin, row2, kCardW, 164,
+                                   MOSAICO_SENSOR_DETAIL_HEADING);
     cardCaption(heading, "HEADING");
     s_sens_heading = makeLabel(heading, "--", &lv_font_montserrat_28, kColorViolet);
     lv_obj_set_pos(s_sens_heading, 0, 28);
     s_sens_heading_sub = makeLabel(heading, "", &lv_font_montserrat_16, kColorSub);
     lv_obj_set_pos(s_sens_heading_sub, 0, 76);
+    // Mini live arrow (bottom-right corner).
+    s_sens_heading_arrow = lv_line_create(heading);
+    lv_obj_set_style_line_width(s_sens_heading_arrow, 3, 0);
+    lv_obj_set_style_line_color(s_sens_heading_arrow, lv_color_hex(kColorViolet), 0);
+    lv_obj_set_style_line_rounded(s_sens_heading_arrow, true, 0);
+    lv_obj_set_gesture_bubble(s_sens_heading_arrow, true);
+    lv_obj_set_pos(s_sens_heading_arrow, 150, 96);
+    s_sens_heading_arrow_pts[0].x = 18;
+    s_sens_heading_arrow_pts[0].y = 22;
+    s_sens_heading_arrow_pts[1].x = 18;
+    s_sens_heading_arrow_pts[1].y = 0;
+    lv_line_set_points(s_sens_heading_arrow, s_sens_heading_arrow_pts, 2);
 
-    lv_obj_t *batt = makeCard(page, col2, row2, kCardW, 164, 12);
+    lv_obj_t *batt = sensorCard(page, col2, row2, kCardW, 164,
+                                MOSAICO_SENSOR_DETAIL_BATTERY);
     cardCaption(batt, "BATTERY");
     s_sens_batt = makeLabel(batt, "--", &lv_font_montserrat_16, kColorText);
     lv_obj_set_pos(s_sens_batt, 0, 24);
+    s_sens_batt_arc = miniArc(batt, 140, 82, 52, kColorAccent);
 
     // Dual BMM150 raw fields. The two sensors sit at different spots on the
     // board, so a large difference means local magnetic interference (speaker
     // magnet, metal) rather than the geomagnetic field.
-    lv_obj_t *mag = makeCard(page, kMargin, 352, kWidth - 2 * kMargin, 128, 12);
+    lv_obj_t *mag = sensorCard(page, kMargin, 352, kWidth - 2 * kMargin, 128,
+                               MOSAICO_SENSOR_DETAIL_MAG);
     cardCaption(mag, "MAGNETOMETER (uT)");
     s_sens_mag = makeLabel(mag, "--", &lv_font_montserrat_16, kColorText);
     lv_obj_set_pos(s_sens_mag, 0, 24);
     s_sens_mag_warn = makeLabel(mag, "", &lv_font_montserrat_16, kColorWarn);
     lv_obj_set_pos(s_sens_mag_warn, 0, 92);
+    s_sens_mag_arc = miniArc(mag, 360, 24, 56, kColorViolet);
 }
 
 void refreshSensorsPage()
@@ -1561,6 +1696,15 @@ void refreshSensorsPage()
                  static_cast<double>(snap.accel_x_g),
                  static_cast<double>(snap.accel_y_g),
                  static_cast<double>(snap.accel_z_g));
+        if (s_sens_accel_dot != nullptr) {
+            float bx = snap.accel_x_g;
+            float by = snap.accel_y_g;
+            bx = bx > 1.0f ? 1.0f : (bx < -1.0f ? -1.0f : bx);
+            by = by > 1.0f ? 1.0f : (by < -1.0f ? -1.0f : by);
+            lv_obj_set_pos(s_sens_accel_dot,
+                           s_sens_accel_dot_x + static_cast<int>(bx * 14.0f),
+                           s_sens_accel_dot_y + static_cast<int>(by * 14.0f));
+        }
     } else {
         snprintf(text, sizeof(text), "%s", tr("sensor absent"));
     }
@@ -1582,6 +1726,16 @@ void refreshSensorsPage()
         snprintf(text, sizeof(text), "%s%s", compassPoint(snap.heading_deg),
                  snap.mag3_valid ? "  ·2" : "");
         lv_label_set_text(s_sens_heading_sub, text);
+        if (s_sens_heading_arrow != nullptr) {
+            const float rad = snap.heading_deg * 0.01745329251f;
+            const float s = sinf(rad);
+            const float c = cosf(rad);
+            s_sens_heading_arrow_pts[0].x = 18.0f - 5.0f * s;
+            s_sens_heading_arrow_pts[0].y = 18.0f + 5.0f * c;
+            s_sens_heading_arrow_pts[1].x = 18.0f + 16.0f * s;
+            s_sens_heading_arrow_pts[1].y = 18.0f - 16.0f * c;
+            lv_obj_invalidate(s_sens_heading_arrow);
+        }
     } else {
         lv_label_set_text(s_sens_heading, "--");
         lv_label_set_text(s_sens_heading_sub, tr("sensor absent"));
@@ -1597,6 +1751,15 @@ void refreshSensorsPage()
                  static_cast<int>(snap.battery_current_ma),
                  static_cast<unsigned>(snap.battery_soc_percent), charge);
         lv_label_set_text(s_sens_batt, text);
+        if (s_sens_batt_arc != nullptr) {
+            lv_arc_set_value(s_sens_batt_arc, snap.battery_soc_percent);
+            const uint32_t color = snap.battery_charging
+                                       ? kColorGood
+                                       : (snap.battery_soc_percent < 20 ? kColorBad
+                                                                        : kColorAccent);
+            lv_obj_set_style_arc_color(s_sens_batt_arc, lv_color_hex(color),
+                                       LV_PART_INDICATOR);
+        }
     } else {
         lv_label_set_text(s_sens_batt, tr("No gauge"));
     }
@@ -1608,6 +1771,14 @@ void refreshSensorsPage()
                  static_cast<double>(snap.mag3_x_ut), static_cast<double>(snap.mag3_y_ut),
                  static_cast<double>(snap.mag3_z_ut));
         lv_label_set_text(s_sens_mag, text);
+        if (s_sens_mag_arc != nullptr) {
+            const float mx = snap.mag2_valid ? snap.mag2_x_ut : snap.mag3_x_ut;
+            const float my = snap.mag2_valid ? snap.mag2_y_ut : snap.mag3_y_ut;
+            const float mz = snap.mag2_valid ? snap.mag2_z_ut : snap.mag3_z_ut;
+            const float field = sqrtf(mx * mx + my * my + mz * mz);
+            lv_arc_set_value(s_sens_mag_arc,
+                             static_cast<int32_t>(field > 100.0f ? 100.0f : field));
+        }
         // Vector difference between the two sensors -> local interference level.
         const float dx = snap.mag2_x_ut - snap.mag3_x_ut;
         const float dy = snap.mag2_y_ut - snap.mag3_y_ut;
@@ -2035,11 +2206,51 @@ void refreshActivePage()
         case Page::Home: refreshHomePage(); break;
         case Page::Music: refreshMusicPage(); break;
         case Page::Sensors: refreshSensorsPage(); break;
+        case Page::SensorDetail: MosaicoSensorDetail_Refresh(); break;
         default: break;
     }
 }
 
 } // namespace
+
+// ---- Shared UI context for the sensor detail pages ---------------------------
+// (display_mosaico_sensors.cpp reaches these through display_mosaico_sensors.h)
+
+const char *MosaicoUi_Tr(const char *text)
+{
+    return tr(text);
+}
+
+const char *MosaicoUi_CompassPoint(float deg)
+{
+    return compassPoint(deg);
+}
+
+const lv_font_t *MosaicoUi_Font(int px)
+{
+    switch (px) {
+        case 14: return &s_font_ui_14;
+        case 16: return &s_font_ui_16;
+        case 20: return &s_font_ui_20;
+        default: return &s_font_ui_28;
+    }
+}
+
+lv_obj_t *MosaicoUi_MakeLabel(lv_obj_t *parent, const char *text,
+                              const lv_font_t *font, uint32_t color)
+{
+    return makeLabel(parent, text, font, color);
+}
+
+bool MosaicoUi_SensorSnapshot(MosaicoSensorSnapshot *out)
+{
+    return sensorSnapshot(out);
+}
+
+void MosaicoUi_ExitSensorDetail(void)
+{
+    switchTab(static_cast<int>(Page::Sensors));
+}
 
 extern "C" void Display_Init(void)
 {
@@ -2175,9 +2386,14 @@ extern "C" void Display_Poll(void)
         refreshStatusBar();
     }
     pollAutoRotate(now);
-    // Sensors run at ~4 Hz; other pages share the 500 ms status cadence.
-    const uint32_t page_interval =
-        (s_page == Page::Sensors) ? kSensorsRefreshMs : kBarRefreshMs;
+    // Sensors run at ~4 Hz; the compass/level detail pages at ~10 Hz; other
+    // pages share the 500 ms status cadence.
+    uint32_t page_interval = kBarRefreshMs;
+    if (s_page == Page::Sensors) {
+        page_interval = kSensorsRefreshMs;
+    } else if (s_page == Page::SensorDetail) {
+        page_interval = MosaicoSensorDetail_RefreshMs();
+    }
     if (s_last_page_ms == 0u || (now - s_last_page_ms) >= page_interval) {
         s_last_page_ms = now;
         refreshActivePage();

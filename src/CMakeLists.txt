@@ -63,6 +63,7 @@ set(app_sources
     app/driver/display_s31.cpp
     app/driver/display_mosaico.cpp
     app/driver/display_mosaico_panel.cpp
+    app/driver/display_mosaico_sensors.cpp
     app/driver/mosaico_sensors.cpp
     app/driver/mosaico_usb_console.cpp
     app/driver/mosaico_variant.cpp
