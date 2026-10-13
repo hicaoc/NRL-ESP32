@@ -330,6 +330,7 @@ static void initAdcButtons()
         ESP_LOGW(TAG, "S31 ADC button calibration failed");
     }
 #endif
+#if NRL_BOARD != NRL_BOARD_S31_KORVO
 #if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
     adc_cali_curve_fitting_config_t cali_cfg = {};
     cali_cfg.unit_id = ADC_UNIT_1;
@@ -350,6 +351,7 @@ static void initAdcButtons()
             s_button_adc_cali_ready = true;
         }
     }
+#endif
 #endif
     s_button_adc_ready = true;
 }
