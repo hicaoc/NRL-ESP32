@@ -35,11 +35,15 @@ dependencies:
     # override must happen here at the component-manager level.
     override_path: "../vendor/espressif__gmf_core"
   espressif/gmf_io:
-    version: "^1.0"
+    # Pinned exactly: the vendored gmf_core above is 1.0.0, and newer registry
+    # releases of the gmf_* family assume newer gmf_core APIs
+    # (esp_gmf_arg_constraint_t, element->lock). Ranges drift on clean checkouts
+    # (CI) where dependencies.lock is absent; keep in sync with the local lock.
+    version: "==1.1.0"
   espressif/gmf_audio:
-    version: "^1.0"
+    version: "==1.0.1~1"
   espressif/esp_audio_effects:
-    version: "^1.3"
+    version: "==1.4.2"
   # Hardware-accelerated sample rate / channel conversion (ESP32-S31 ASRC
   # peripheral; automatic software fallback on ESP32-S3). Used by
   # voice_resampler and the BT A2DP resampler in music_player.
@@ -47,7 +51,7 @@ dependencies:
     version: "^1.0"
   # HLS (m3u8) source as a GMF IO for internet radio streams.
   espressif/esp_hls_stream:
-    version: "^1.0"
+    version: "==1.0.3"
   # USB flash drive playback: USB-OTG Host MSC -> FatFS at /usb
   # (docs/architecture.md 3.5). S31-only -- that's the board with the
   # USB-OTG host port.
