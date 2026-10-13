@@ -5,10 +5,7 @@
 #ifndef DRIVER_DISPLAY_MOSAICO_SENSORS_H
 #define DRIVER_DISPLAY_MOSAICO_SENSORS_H
 
-#include <lvgl.h>
-#include <stdint.h>
-
-#include "mosaico_sensors.h"
+#include "display_mosaico_ui.h"
 
 // Detail page ids, matching the tappable cards on the sensors overview.
 enum MosaicoSensorDetailId {
@@ -20,18 +17,7 @@ enum MosaicoSensorDetailId {
     MOSAICO_SENSOR_DETAIL_COUNT
 };
 
-// ---- Shared UI context, implemented by display_mosaico.cpp -----------------
-
-const char *MosaicoUi_Tr(const char *text);
-const char *MosaicoUi_CompassPoint(float deg);
-const lv_font_t *MosaicoUi_Font(int px);  // 14/16/20/28, CJK fallback attached
-lv_obj_t *MosaicoUi_MakeLabel(lv_obj_t *parent, const char *text,
-                              const lv_font_t *font, uint32_t color);
-bool MosaicoUi_SensorSnapshot(MosaicoSensorSnapshot *out);
-void MosaicoUi_ExitSensorDetail(void);  // back to the sensors overview page
-
-// ---- Detail pages, implemented by display_mosaico_sensors.cpp --------------
-
+// Implemented by display_mosaico_sensors.cpp.
 void MosaicoSensorDetail_Build(lv_obj_t *content, int sensor);
 void MosaicoSensorDetail_Refresh(void);
 uint32_t MosaicoSensorDetail_RefreshMs(void);

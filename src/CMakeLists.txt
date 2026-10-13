@@ -62,6 +62,7 @@ set(app_sources
     app/driver/sr110u.cpp
     app/driver/display_s31.cpp
     app/driver/display_mosaico.cpp
+    app/driver/display_mosaico_ota.cpp
     app/driver/display_mosaico_panel.cpp
     app/driver/display_mosaico_sensors.cpp
     app/driver/mosaico_sensors.cpp

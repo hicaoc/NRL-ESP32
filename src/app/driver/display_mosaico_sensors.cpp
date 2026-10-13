@@ -90,9 +90,12 @@ void backEvent(lv_event_t *)
     MosaicoUi_ExitSensorDetail();
 }
 
+} // namespace
+
 // Shared chrome: transparent full-size non-scrollable page, a "< Back" touch
 // target (fallback for the up-swipe) and the page title. Returns the page.
-lv_obj_t *buildChrome(lv_obj_t *content, const char *title)
+lv_obj_t *MosaicoUi_BuildDetailChrome(lv_obj_t *content, const char *title,
+                                      lv_event_cb_t back_cb)
 {
     lv_obj_t *page = lv_obj_create(content);
     lv_obj_set_pos(page, 0, 0);
@@ -114,15 +117,24 @@ lv_obj_t *buildChrome(lv_obj_t *content, const char *title)
     lv_obj_set_style_border_color(back, lv_color_hex(kColorBorder), 0);
     lv_obj_set_style_border_width(back, 1, 0);
     lv_obj_set_gesture_bubble(back, true);
-    lv_obj_add_event_cb(back, backEvent, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(back, back_cb, LV_EVENT_CLICKED, nullptr);
     char back_text[32];
-    snprintf(back_text, sizeof(back_text), LV_SYMBOL_LEFT " %s", tr("Back"));
-    lv_obj_t *back_label = makeLabel(back, back_text, 20, kColorAccent);
+    snprintf(back_text, sizeof(back_text), LV_SYMBOL_LEFT " %s", MosaicoUi_Tr("Back"));
+    lv_obj_t *back_label =
+        MosaicoUi_MakeLabel(back, back_text, MosaicoUi_Font(20), kColorAccent);
     lv_obj_center(back_label);
 
-    lv_obj_t *title_label = makeLabel(page, tr(title), 20, kColorSub);
+    lv_obj_t *title_label =
+        MosaicoUi_MakeLabel(page, MosaicoUi_Tr(title), MosaicoUi_Font(20), kColorSub);
     lv_obj_align(title_label, LV_ALIGN_TOP_MID, 0, 16);
     return page;
+}
+
+namespace {
+
+lv_obj_t *buildChrome(lv_obj_t *content, const char *title)
+{
+    return MosaicoUi_BuildDetailChrome(content, title, backEvent);
 }
 
 // Round readout ring: non-interactive arc used as a gauge background.

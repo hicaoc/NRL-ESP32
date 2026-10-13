@@ -10,6 +10,7 @@
 #if NRL_BOARD == NRL_BOARD_ESP_MOSAICO
 
 #include "display.h"
+#include "display_mosaico_ota.h"
 #include "display_mosaico_panel.h"
 #include "display_mosaico_sensors.h"
 #include "external_radio.h"
@@ -358,6 +359,24 @@ const TrEntry kTr[] = {
     {"E", "东"},
     {"S", "南"},
     {"W", "西"},
+    // OTA detail page
+    {"System Update", "系统更新"},
+    {"OTA Server", "OTA 服务器"},
+    {"Check Update", "检查更新"},
+    {"Install", "安装"},
+    {"Checking for updates...", "正在检查更新..."},
+    {"Installing firmware...", "正在安装固件..."},
+    {"Installing firmware... %u%%", "正在安装固件... %u%%"},
+    {"Firmware install requested...", "已请求安装固件..."},
+    {"Update check requested...", "已请求检查更新..."},
+    {"OTA error: %s", "OTA 错误: %s"},
+    {"No versions available", "无可用版本"},
+    {"Tap Check Update to query available versions.", "点击「检查更新」查询可用版本。"},
+    {"Latest: %s  |  %u version(s) available", "最新: %s  |  共 %u 个版本"},
+    {"Selected version is already installed.", "所选版本已是当前固件。"},
+    {"Check failed: OTA server not configured.", "检查失败: OTA 服务器未配置。"},
+    {"Install failed: check available versions first.", "安装失败: 请先检查可用版本。"},
+    {"OTA status unavailable: out of memory.", "无法获取 OTA 状态: 内存不足。"},
     // Settings page
     {"BRIGHTNESS", "亮度"},
     {"MIC VOLUME", "麦克风音量"},
@@ -662,6 +681,7 @@ enum class Page : int {
     Settings,
     Count,                    // dock tab count
     SensorDetail = Count,     // full-screen sensor detail; not a dock tab
+    OtaDetail,                // full-screen OTA detail; not a dock tab
 };
 
 Page s_page = Page::Home;
@@ -927,11 +947,13 @@ void adjustVolumePct(int delta);
 void screenGestureEvent(lv_event_t *)
 {
     const lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
-    // Sensor detail pages: up-swipe returns to the overview; left/right tab
-    // switching and the edge volume swipe are disabled while a detail is up.
-    if (s_page == Page::SensorDetail) {
+    // Detail pages (sensor / OTA): up-swipe returns to the page that opened
+    // them; left/right tab switching and the edge volume swipe are disabled
+    // while a detail is up.
+    if (s_page == Page::SensorDetail || s_page == Page::OtaDetail) {
         if (dir == LV_DIR_TOP) {
-            MosaicoUi_ExitSensorDetail();
+            switchTab(static_cast<int>(s_page == Page::OtaDetail ? Page::Settings
+                                                                 : Page::Sensors));
         }
         return;
     }
@@ -1148,10 +1170,12 @@ void buildDock(lv_obj_t *scr)
 
 void updateTabHighlight()
 {
-    // A sensor detail page keeps the Sensors tab highlighted.
+    // Detail pages keep the tab that opened them highlighted.
     const int active = (s_page == Page::SensorDetail)
                            ? static_cast<int>(Page::Sensors)
-                           : static_cast<int>(s_page);
+                           : (s_page == Page::OtaDetail)
+                                 ? static_cast<int>(Page::Settings)
+                                 : static_cast<int>(s_page);
     for (int i = 0; i < kTabCount; ++i) {
         if (s_tab_btns[i] == nullptr) {
             continue;
@@ -1213,7 +1237,7 @@ void buildPage()
     s_settings_rot_btn_label = nullptr;
     s_settings_lang_btn_label = nullptr;
     // Detail pages run with the dock hidden and claim the freed space.
-    const bool detail = (s_page == Page::SensorDetail);
+    const bool detail = (s_page == Page::SensorDetail || s_page == Page::OtaDetail);
     lv_obj_set_size(s_content, kWidth,
                     detail ? (kHeight - kContentY - 8) : kContentH);
     if (s_dock != nullptr) {
@@ -1228,6 +1252,7 @@ void buildPage()
         case Page::SensorDetail:
             MosaicoSensorDetail_Build(s_content, s_detail_sensor);
             break;
+        case Page::OtaDetail: MosaicoOtaDetail_Build(s_content); break;
         default: break;
     }
     s_last_page_ms = 0u; // force an immediate live refresh
@@ -1965,6 +1990,14 @@ void rotationEvent(lv_event_t *)
     }
 }
 
+void otaEntryEvent(lv_event_t *)
+{
+    s_page = Page::OtaDetail;
+    STATUS_IO_Vibrate(30);
+    buildPage();
+    updateTabHighlight();
+}
+
 void buildSettingsPage()
 {
     // Scrollable page body: the cards below exceed the 352 px content height.
@@ -2069,8 +2102,18 @@ void buildSettingsPage()
                                     provisioningInfoEvent, nullptr);
     lv_obj_align(wifi_btn, LV_ALIGN_RIGHT_MID, 0, 0);
 
+    // OTA system update entry (tappable card -> OTA detail page).
+    lv_obj_t *ota = makeCard(page, kMargin, 668, kWidth - 2 * kMargin, 64, 12);
+    lv_obj_set_clickable(ota, true);
+    lv_obj_set_style_bg_color(ota, lv_color_hex(kColorBtnPress), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(ota, otaEntryEvent, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *ota_label = makeLabel(ota, tr("System Update"), &lv_font_montserrat_20, kColorText);
+    lv_obj_align(ota_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_t *ota_arrow = makeLabel(ota, LV_SYMBOL_RIGHT, &lv_font_montserrat_20, kColorSub);
+    lv_obj_align(ota_arrow, LV_ALIGN_RIGHT_MID, 0, 0);
+
     // About.
-    lv_obj_t *about = makeCard(page, kMargin, 668, kWidth - 2 * kMargin, 92, 12);
+    lv_obj_t *about = makeCard(page, kMargin, 740, kWidth - 2 * kMargin, 92, 12);
     cardCaption(about, "ABOUT");
     snprintf(text, sizeof(text), "%s %s", tr("Firmware"), "v" NRL_FIRMWARE_VERSION);
     lv_obj_t *fw = makeLabel(about, text, &lv_font_montserrat_16, kColorText);
@@ -2207,6 +2250,7 @@ void refreshActivePage()
         case Page::Music: refreshMusicPage(); break;
         case Page::Sensors: refreshSensorsPage(); break;
         case Page::SensorDetail: MosaicoSensorDetail_Refresh(); break;
+        case Page::OtaDetail: MosaicoOtaDetail_Refresh(); break;
         default: break;
     }
 }
@@ -2250,6 +2294,11 @@ bool MosaicoUi_SensorSnapshot(MosaicoSensorSnapshot *out)
 void MosaicoUi_ExitSensorDetail(void)
 {
     switchTab(static_cast<int>(Page::Sensors));
+}
+
+void MosaicoUi_ExitOtaDetail(void)
+{
+    switchTab(static_cast<int>(Page::Settings));
 }
 
 extern "C" void Display_Init(void)
@@ -2393,6 +2442,8 @@ extern "C" void Display_Poll(void)
         page_interval = kSensorsRefreshMs;
     } else if (s_page == Page::SensorDetail) {
         page_interval = MosaicoSensorDetail_RefreshMs();
+    } else if (s_page == Page::OtaDetail) {
+        page_interval = kSensorsRefreshMs;
     }
     if (s_last_page_ms == 0u || (now - s_last_page_ms) >= page_interval) {
         s_last_page_ms = now;
