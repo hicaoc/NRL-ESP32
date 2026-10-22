@@ -76,6 +76,13 @@ BOARDS = {
         lvgl=False,
         extra=[],
     ),
+    "bh4tdv_2900w": dict(
+        target="esp32s3",
+        macro="NRL_BOARD_BH4TDV_2900W",
+        sdkconfig=["sdkconfig.bh4tdv_2900w.defaults"],
+        lvgl=False,
+        extra=[],
+    ),
     "s31_korvo": dict(
         target="esp32s31",
         macro="NRL_BOARD_S31_KORVO",

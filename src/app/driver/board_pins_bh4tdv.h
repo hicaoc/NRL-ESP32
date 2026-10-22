@@ -13,7 +13,9 @@
 // Radio control / status.
 #define NRL_PIN_PTT_OUT         8
 #define NRL_PIN_SQL1            17
-#define NRL_PIN_SQL2            18
+// The 3188 has no physical SQL2 input; -1 disables it so the floating pin can
+// never false-trigger the network uplink.
+#define NRL_PIN_SQL2            -1
 #define NRL_PIN_STATUS_IO1      1
 #define NRL_PIN_STATUS_IO2      2
 #define NRL_PIN_STATUS_PTT_LED  42

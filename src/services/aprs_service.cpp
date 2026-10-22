@@ -309,6 +309,8 @@ const char *boardType()
     return "bi4umd";
 #elif NRL_BOARD == NRL_BOARD_BH4TDV
     return "bh4tdv";
+#elif NRL_BOARD == NRL_BOARD_BH4TDV_2900W
+    return "bh4tdv_2900w";
 #elif NRL_BOARD == NRL_BOARD_S31_KORVO
     return "s31_korvo";
 #elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
@@ -1367,7 +1369,8 @@ bool sendBeacon()
                                       (status_now - s_gps_last_fix_ms) < kGpsFixFreshMs;
         const int16_t status_satellites =
             (status_gps_fresh && s_gps_satellites >= 0) ? s_gps_satellites : -1;
-#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD_IS_BI4UMD_FAMILY
+#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD_IS_BI4UMD_FAMILY || \
+    NRL_BOARD == NRL_BOARD_BH4TDV_2900W
         // Report the ADC result verbatim, including 0 V or implausible
         // high/low readings: those values are useful battery/sense diagnostics
         // and must not be hidden by a "reasonable voltage" filter.

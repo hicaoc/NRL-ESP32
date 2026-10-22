@@ -61,6 +61,12 @@ jobs:
             sdkconfig: sdkconfig.bh4tdv.defaults
             lvgl: "false"
             extra_args: ""
+          - board: bh4tdv_2900w
+            target: esp32s3
+            board_macro: NRL_BOARD_BH4TDV_2900W
+            sdkconfig: sdkconfig.bh4tdv_2900w.defaults
+            lvgl: "false"
+            extra_args: ""
           - board: s31_korvo
             target: esp32s31
             board_macro: NRL_BOARD_S31_KORVO

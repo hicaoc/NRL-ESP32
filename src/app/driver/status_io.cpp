@@ -1,9 +1,15 @@
 #include "status_io.h"
 
 #include "board_pins.h"
+#include "external_radio.h"
+#include "vox.h"
 
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
 #include "bh4tdv_rf_io.h"
+#endif
+
+#if defined(NRL_PIN_LOOP_TEST_BUTTON) && NRL_PIN_LOOP_TEST_BUTTON >= 0
+#include "audio_passthrough.h"
 #endif
 
 #if NRL_BOARD_IS_GEZIPAI_FAMILY || NRL_BOARD == NRL_BOARD_S31_KORVO || \
@@ -1100,25 +1106,99 @@ bool s_ptt_active = false;
 bool s_nrl_ptt_active = false;
 bool s_fmo_ptt_active = false;
 bool s_soft_ptt_active = false;
+// Loopback self-test is a fourth, independent PTT source: while the LOOP
+// button is held the radio is keyed so the looped mic audio is transmitted.
+bool s_loop_ptt_active = false;
 unsigned long s_last_heartbeat_rx_ms = 0UL;
 int s_last_sql1_level = -1;
 int s_last_sql2_level = -1;
 
+// Squelch polarity is runtime-configurable (AT+SQL1_POL / AT+SQL2_POL, web
+// portal); the NRL_SQLx_ACTIVE_LEVEL macros are only the boot defaults. The
+// pull direction always opposes the active level so a floating input never
+// looks triggered.
+static int sql1ActiveLevel()
+{
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    return ((cfg != nullptr ? cfg->sql1_active_level : NRL_SQL1_ACTIVE_LEVEL) != 0u) ? 1 : 0;
+}
+
+static int sql2ActiveLevel()
+{
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    return ((cfg != nullptr ? cfg->sql2_active_level : NRL_SQL2_ACTIVE_LEVEL) != 0u) ? 1 : 0;
+}
+
 static bool sql1Active()
 {
-    return gpio_get_level((gpio_num_t)NRL_PIN_SQL1) == 1;
+    return gpio_get_level((gpio_num_t)NRL_PIN_SQL1) == sql1ActiveLevel();
 }
 
 static bool sql2Active()
 {
-    return gpio_get_level((gpio_num_t)NRL_PIN_SQL2) == 0;
+    return NRL_PIN_SQL2 >= 0 &&
+           gpio_get_level((gpio_num_t)NRL_PIN_SQL2) == sql2ActiveLevel();
 }
+
+static void applySqlPullModes()
+{
+    gpio_set_pull_mode((gpio_num_t)NRL_PIN_SQL1,
+                       sql1ActiveLevel() ? GPIO_PULLDOWN_ONLY : GPIO_PULLUP_ONLY);
+    if (NRL_PIN_SQL2 >= 0) {
+        gpio_set_pull_mode((gpio_num_t)NRL_PIN_SQL2,
+                           sql2ActiveLevel() ? GPIO_PULLDOWN_ONLY : GPIO_PULLUP_ONLY);
+    }
+}
+
+#if defined(NRL_PIN_LOOP_TEST_BUTTON) && NRL_PIN_LOOP_TEST_BUTTON >= 0
+// Loop test button debounce: the level must hold for kLoopTestDebounceMs
+// before the local mic->DAC loopback toggles.
+constexpr unsigned long kLoopTestDebounceMs = 40UL;
+bool s_loop_test_raw = false;
+bool s_loop_test_active = false;
+unsigned long s_loop_test_change_ms = 0UL;
+
+static void pollLoopTestButton(const unsigned long now)
+{
+    const bool pressed = gpio_get_level((gpio_num_t)NRL_PIN_LOOP_TEST_BUTTON) == 0;
+    if (pressed != s_loop_test_raw) {
+        ESP_LOGI(TAG, "loop button raw=%u", pressed ? 1u : 0u);
+        s_loop_test_raw = pressed;
+        s_loop_test_change_ms = now;
+        return;
+    }
+    if (pressed == s_loop_test_active ||
+        (now - s_loop_test_change_ms) < kLoopTestDebounceMs) {
+        return;
+    }
+    s_loop_test_active = pressed;
+    ESP_LOGI(TAG, "loop test %s", pressed ? "on" : "off");
+    AUDIO_SetLocalLoopback(pressed);
+
+    // Key the radio while the loop test runs: the looped mic audio leaves the
+    // DAC into the radio's mic input, so holding PTT turns it into an
+    // end-to-end self-test. The PTT LED follows the same combined state.
+    s_loop_ptt_active = pressed;
+    const bool combined = s_nrl_ptt_active || s_fmo_ptt_active || s_soft_ptt_active || s_loop_ptt_active;
+    if (s_ptt_active != combined) {
+        ESP_LOGI(TAG, "ptt_out=%u (loop=%u)", combined ? 1u : 0u, pressed ? 1u : 0u);
+    }
+    s_ptt_active = combined;
+    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, combined ? 1 : 0);
+    if (!ledSelftestActive(nrl_millis_now())) {
+        writeLed(NRL_PIN_STATUS_PTT_LED, combined);
+    }
+}
+#endif
 
 } // namespace
 
 extern "C" bool STATUS_IO_IsSqlActive(void)
 {
-    return sql1Active() || sql2Active();
+    // VOX is a soft squelch on these radio-interface boards: voice detected on
+    // the radio's audio feed opens the network uplink gate and lights the SQL
+    // LED exactly like a hardware SQL line, so no physical SQL wire is needed.
+    return sql1Active() || sql2Active() || VOX_IsActive();
 }
 
 extern "C" bool STATUS_IO_IsPttActive(void)
@@ -1139,10 +1219,15 @@ extern "C" void STATUS_IO_Init(void)
 
     gpio_reset_pin((gpio_num_t)NRL_PIN_SQL1);
     gpio_set_direction((gpio_num_t)NRL_PIN_SQL1, GPIO_MODE_INPUT);
-    gpio_set_pull_mode((gpio_num_t)NRL_PIN_SQL1, GPIO_PULLDOWN_ONLY);
-    gpio_reset_pin((gpio_num_t)NRL_PIN_SQL2);
-    gpio_set_direction((gpio_num_t)NRL_PIN_SQL2, GPIO_MODE_INPUT);
-    gpio_set_pull_mode((gpio_num_t)NRL_PIN_SQL2, GPIO_PULLUP_ONLY);
+    if (NRL_PIN_SQL2 >= 0) {
+        gpio_reset_pin((gpio_num_t)NRL_PIN_SQL2);
+        gpio_set_direction((gpio_num_t)NRL_PIN_SQL2, GPIO_MODE_INPUT);
+    }
+    applySqlPullModes();
+
+#if defined(NRL_PIN_LOOP_TEST_BUTTON) && NRL_PIN_LOOP_TEST_BUTTON >= 0
+    initInputPullupPin(NRL_PIN_LOOP_TEST_BUTTON);
+#endif
 
     gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, 0);
     writeLed(NRL_PIN_STATUS_PTT_LED, false);
@@ -1160,7 +1245,7 @@ extern "C" void STATUS_IO_Init(void)
 extern "C" void STATUS_IO_SetPttActive(const bool active)
 {
     s_nrl_ptt_active = active;
-    const bool combined = s_nrl_ptt_active || s_fmo_ptt_active || s_soft_ptt_active;
+    const bool combined = s_nrl_ptt_active || s_fmo_ptt_active || s_soft_ptt_active || s_loop_ptt_active;
     if (s_ptt_active != combined) {
         ESP_LOGI(TAG, "ptt_out=%u", combined ? 1u : 0u);
     }
@@ -1174,7 +1259,7 @@ extern "C" void STATUS_IO_SetPttActive(const bool active)
 extern "C" void STATUS_IO_SetFmoPttActive(const bool active)
 {
     s_fmo_ptt_active = active;
-    const bool combined = s_nrl_ptt_active || s_fmo_ptt_active || s_soft_ptt_active;
+    const bool combined = s_nrl_ptt_active || s_fmo_ptt_active || s_soft_ptt_active || s_loop_ptt_active;
     if (s_ptt_active != combined) {
         ESP_LOGI(TAG, "ptt_out=%u (FMO=%u)", combined ? 1u : 0u,
                  active ? 1u : 0u);
@@ -1189,7 +1274,7 @@ extern "C" void STATUS_IO_SetFmoPttActive(const bool active)
 extern "C" void STATUS_IO_SetSoftPtt(const bool held)
 {
     s_soft_ptt_active = held;
-    const bool combined = s_nrl_ptt_active || s_fmo_ptt_active || s_soft_ptt_active;
+    const bool combined = s_nrl_ptt_active || s_fmo_ptt_active || s_soft_ptt_active || s_loop_ptt_active;
     if (s_ptt_active != combined) {
         ESP_LOGI(TAG, "ptt_out=%u (soft=%u)", combined ? 1u : 0u,
                  held ? 1u : 0u);
@@ -1215,18 +1300,38 @@ extern "C" bool STATUS_IO_NrlServerLinked(void)
 extern "C" void STATUS_IO_Poll(void)
 {
     const unsigned long now = nrl_millis_now();
+#if defined(NRL_PIN_LOOP_TEST_BUTTON) && NRL_PIN_LOOP_TEST_BUTTON >= 0
+    pollLoopTestButton(now);
+#endif
+    // Polarity is runtime-configurable; re-apply the pull modes when the
+    // config changes so a freshly flipped input does not sit at the active
+    // level on its own pull.
+    static int s_sql_pull_signature = -1;
+    const int sql1_active_level = sql1ActiveLevel();
+    const int sql2_active_level = sql2ActiveLevel();
+    const int sql_pull_signature = (sql1_active_level << 1) | sql2_active_level;
+    if (sql_pull_signature != s_sql_pull_signature) {
+        s_sql_pull_signature = sql_pull_signature;
+        applySqlPullModes();
+        ESP_LOGI(TAG, "sql polarity: sql1=%s sql2=%s",
+                 sql1_active_level ? "HI" : "LOW",
+                 sql2_active_level ? "HI" : "LOW");
+    }
     const int sql1_level = gpio_get_level((gpio_num_t)NRL_PIN_SQL1);
-    const int sql2_level = gpio_get_level((gpio_num_t)NRL_PIN_SQL2);
+    // Boards without a physical SQL2 keep it parked at the inactive level.
+    const int sql2_level = (NRL_PIN_SQL2 >= 0)
+        ? gpio_get_level((gpio_num_t)NRL_PIN_SQL2)
+        : (sql2_active_level ^ 1);
     if (sql1_level != s_last_sql1_level || sql2_level != s_last_sql2_level) {
         ESP_LOGI(TAG, "sql1=%u sql2=%u active=%u",
-                 static_cast<unsigned>(sql1_level == 1 ? 1u : 0u),
-                 static_cast<unsigned>(sql2_level == 1 ? 1u : 0u),
-                 static_cast<unsigned>((sql1_level == 1 || sql2_level == 0) ? 1u : 0u));
+                 static_cast<unsigned>(sql1_level == sql1_active_level ? 1u : 0u),
+                 static_cast<unsigned>(sql2_level == sql2_active_level ? 1u : 0u),
+                 static_cast<unsigned>((sql1_level == sql1_active_level ||
+                                        sql2_level == sql2_active_level) ? 1u : 0u));
         s_last_sql1_level = sql1_level;
         s_last_sql2_level = sql2_level;
     }
 
-    const bool sql_active = (sql1_level == 1) || (sql2_level == 0);
     const bool heartbeat_ok =
         s_last_heartbeat_rx_ms != 0UL && (now - s_last_heartbeat_rx_ms) <= kHeartbeatMissedBlinkMs;
 
@@ -1239,8 +1344,9 @@ extern "C" void STATUS_IO_Poll(void)
     }
     // IO1 is the blue status LED, used for server-alive indication.
     writeLed(NRL_PIN_STATUS_IO1, heartbeat_ok ? true : blinkPhase(now, kSlowBlinkMs));
-    // IO2 is the green status LED, used for radio SQL indication.
-    writeLed(NRL_PIN_STATUS_IO2, sql_active);
+    // IO2 is the green status LED: lit whenever the network uplink gate is
+    // open (hardware SQL or VOX soft squelch), i.e. the mic is on the air.
+    writeLed(NRL_PIN_STATUS_IO2, STATUS_IO_IsSqlActive());
     writeLed(NRL_PIN_STATUS_PTT_LED, s_ptt_active);
 }
 

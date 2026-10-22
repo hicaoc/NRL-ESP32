@@ -395,6 +395,10 @@ static bool appendSupportedAtList(uint8_t *payload,
     appendKeyValueLineIfFits(payload, capacity, used, "CODEC",
                              (NRLAudioBridge_GetVoiceCodec() == 1u) ? "OPUS" : "G711");
     appendKeyValueLineIfFits(payload, capacity, used, "PTT_MODE", ptt_mode);
+    appendKeyValueLineIfFits(payload, capacity, used, "SQL1_POL",
+                             (config != nullptr && config->sql1_active_level) ? "HI" : "LOW");
+    appendKeyValueLineIfFits(payload, capacity, used, "SQL2_POL",
+                             (config != nullptr && config->sql2_active_level) ? "HI" : "LOW");
 #if NRL_HAS_SIGNALING
     appendKeyValueLineIfFits(payload, capacity, used, "CTCSS_RX_MIC", sig.ctcss_rx_mic ? "ON" : "OFF");
     appendKeyValueLineIfFits(payload, capacity, used, "CTCSS_RX_NRL", sig.ctcss_rx_nrl ? "ON" : "OFF");
@@ -1226,8 +1230,10 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
 
     // ESP32-side software VOX (voice-operated transmit) on the mic uplink.
     // Distinct from AT+RADIO_VOX, which is the SR-110U RF module's hardware
-    // VOX level. Each setter below passes the untouched fields through from
-    // the current config, so one field can change at a time.
+    // VOX level. On the BH4TDV radio-interface boards VOX is a soft squelch:
+    // it opens the network uplink without keying the radio-facing PTT. Each
+    // setter below passes the untouched fields through from the current
+    // config, so one field can change at a time.
     if (stringEqualsIgnoreCase(command.command, "VOX")) {
         if (is_query) {
             char status[48];
@@ -1322,6 +1328,49 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             return;
         }
         appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "VOX_HANG", EXTERNAL_RADIO_GetConfig()->vox_hang_ms);
+        return;
+    }
+
+    // Squelch trigger polarity: SQL1_POL / SQL2_POL accept HI (trigger on a
+    // high level) or LOW (trigger on low, e.g. open-drain radio outputs).
+    // 1/0 and ON/OFF work too. Persisted in the device config.
+    auto handleSqlPolarity = [&](const char *name, const bool sql2) {
+        const uint8_t current_level = sql2 ? config->sql2_active_level
+                                           : config->sql1_active_level;
+        if (is_query) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               name, current_level ? "HI" : "LOW");
+            return;
+        }
+        uint8_t level = 0u;
+        if (stringEqualsIgnoreCase(command.value, "HI") ||
+            stringEqualsIgnoreCase(command.value, "HIGH")) {
+            level = 1u;
+        } else if (stringEqualsIgnoreCase(command.value, "LOW")) {
+            level = 0u;
+        } else {
+            bool as_bool = false;
+            if (!parseBoolValue(command.value, &as_bool)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", name);
+                return;
+            }
+            level = as_bool ? 1u : 0u;
+        }
+        const uint8_t sql1_level = sql2 ? config->sql1_active_level : level;
+        const uint8_t sql2_level = sql2 ? level : config->sql2_active_level;
+        if (!EXTERNAL_RADIO_SetSqlActiveLevels(sql1_level, sql2_level, true)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", name);
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           name, level ? "HI" : "LOW");
+    };
+    if (stringEqualsIgnoreCase(command.command, "SQL1_POL")) {
+        handleSqlPolarity("SQL1_POL", false);
+        return;
+    }
+    if (stringEqualsIgnoreCase(command.command, "SQL2_POL")) {
+        handleSqlPolarity("SQL2_POL", true);
         return;
     }
 

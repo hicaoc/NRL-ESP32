@@ -111,6 +111,12 @@ static volatile bool s_i2s_path_heal_pending = false;
 // A byte-desynced PCM stream produces huge sample-to-sample jumps on nearly
 // every sample; real audio almost never does. bigdiff ratio is the verdict.
 static volatile bool s_loop_stats_enabled = false;
+#if defined(NRL_PIN_LOOP_TEST_BUTTON) && NRL_PIN_LOOP_TEST_BUTTON >= 0
+// Local voice loopback test (board button, e.g. BH4TDV 2900W LOOP key): while
+// active, the captured mic frame replaces the network playback frame so the
+// ES8311 DAC plays the local mic straight back.
+static volatile bool s_local_loopback = false;
+#endif
 // Written only by the passthrough task while enabled; read after the window
 // closes. Plain (non-volatile) storage keeps -Werror=volatile happy.
 static uint32_t s_loop_frames = 0;
@@ -1010,6 +1016,22 @@ static void audio_passthrough_task(void *) {
         if (voice_mix_enabled()) {
             voice_mix_accumulate(playback_frame, kFrameSamples);
         }
+#if defined(NRL_PIN_LOOP_TEST_BUTTON) && NRL_PIN_LOOP_TEST_BUTTON >= 0
+        if (s_local_loopback) {
+            memcpy(playback_frame, frame, kFrameBytes);
+            static uint32_t s_loop_log_ms = 0;
+            const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+            if (now_ms - s_loop_log_ms >= 1000u) {
+                s_loop_log_ms = now_ms;
+                int16_t peak = 0;
+                for (size_t i = 0; i < kFrameSamples; ++i) {
+                    const int32_t mag = frame[i] < 0 ? -frame[i] : frame[i];
+                    if (mag > peak) peak = (int16_t)mag;
+                }
+                ESP_LOGI(TAG, "loopback: mic->DAC active, mic peak=%d", peak);
+            }
+        }
+#endif
         aec_network_ref_push(playback_frame, kFrameSamples);
         if (!i2s_write_frame(playback_frame)) {
             vTaskDelay(pdMS_TO_TICKS(2));
@@ -1315,6 +1337,22 @@ extern "C" void AUDIO_LoopStatsBegin(void) {
     s_loop_maxdiff = 0;
     s_loop_sum_sq = 0;
     s_loop_stats_enabled = true;
+}
+
+extern "C" void AUDIO_SetLocalLoopback(bool enabled) {
+#if defined(NRL_PIN_LOOP_TEST_BUTTON) && NRL_PIN_LOOP_TEST_BUTTON >= 0
+    s_local_loopback = enabled;
+#else
+    (void)enabled;
+#endif
+}
+
+extern "C" bool AUDIO_LocalLoopbackActive(void) {
+#if defined(NRL_PIN_LOOP_TEST_BUTTON) && NRL_PIN_LOOP_TEST_BUTTON >= 0
+    return s_local_loopback;
+#else
+    return false;
+#endif
 }
 
 extern "C" void AUDIO_LoopStatsEnd(uint32_t *frames,

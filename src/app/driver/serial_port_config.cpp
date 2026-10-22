@@ -51,6 +51,11 @@ void applyDefaults()
     // GPIO2/3. Both ports are fixed board functions and enabled by default.
     s_config.uart1_enabled = true;
     s_config.uart2_enabled = true;
+#elif NRL_BOARD == NRL_BOARD_BH4TDV_2900W
+    // No SCI/GPS serial hardware on this board; keep both ports off so the
+    // -1 pin defaults can never key a stray GPIO.
+    s_config.uart1_enabled = false;
+    s_config.uart2_enabled = false;
 #else
     s_config.uart1_enabled = true;
     s_config.uart2_enabled = true;
@@ -107,6 +112,16 @@ extern "C" bool SERIAL_PORT_CONFIG_IsAllowedPin(const int gpio)
         case 3: case 4: case 5: case 6: case 7: case 15: case 16:
         case 22: case 23: case 24: case 25: case 33: case 34: case 35:
         case 36: case 37: case 41: case 43: case 44: case 47: case 48:
+            return true;
+        default:
+            return false;
+    }
+#elif NRL_BOARD == NRL_BOARD_BH4TDV_2900W
+    switch (gpio) {
+        // Free GPIOs only: LEDs 4-6, BAT 7, YAESU/MOTO 38, PTT/SQL 39-41,
+        // I2S 9-13, I2C 14/21, BOOT 0 and the LOOP button 1 are reserved.
+        case 2: case 3: case 8: case 17: case 18:
+        case 42: case 43: case 44: case 48:
             return true;
         default:
             return false;

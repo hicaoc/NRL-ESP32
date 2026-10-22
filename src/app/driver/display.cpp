@@ -37,6 +37,128 @@
 #include "touch_bi4umd.h"
 #endif
 
+//============================ ADC battery sense ==============================
+// Battery voltage sense is shared by display and headless boards: anything
+// with NRL_HAS_BATTERY_ADC (gezipai family, BH4TDV 2900W). It lives outside
+// the display gate below so no-screen boards can report battery over APRS/AT
+// as well. The log tag stays "LCD" to match the historical output.
+#include <esp_adc/adc_cali.h>
+#include <esp_adc/adc_cali_scheme.h>
+#include <esp_adc/adc_oneshot.h>
+#include <esp_log.h>
+#include <esp_timer.h>
+
+#include "external_radio.h"
+
+namespace {
+
+const char *kBatteryTag = "LCD";
+
+} // namespace
+
+adc_oneshot_unit_handle_t s_adc = nullptr;
+adc_cali_handle_t s_adc_cali = nullptr;
+bool s_adc_ready = false;
+
+void initBatteryAdc()
+{
+#if defined(NRL_HAS_BATTERY_ADC) && NRL_HAS_BATTERY_ADC
+    adc_oneshot_unit_init_cfg_t unit_cfg = {};
+    unit_cfg.unit_id = ADC_UNIT_1;
+    if (adc_oneshot_new_unit(&unit_cfg, &s_adc) != ESP_OK) {
+        ESP_LOGI(kBatteryTag,"[LCD] battery ADC unit init failed");
+        return;
+    }
+
+    adc_oneshot_chan_cfg_t chan_cfg = {};
+    chan_cfg.atten = ADC_ATTEN_DB_12;
+    chan_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
+    if (adc_oneshot_config_channel(s_adc, NRL_BATTERY_ADC_CHANNEL, &chan_cfg) != ESP_OK) {
+        ESP_LOGI(kBatteryTag,"[LCD] battery ADC channel config failed");
+        return;
+    }
+
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+    adc_cali_curve_fitting_config_t cali_cfg = {};
+    cali_cfg.unit_id = ADC_UNIT_1;
+    cali_cfg.chan = NRL_BATTERY_ADC_CHANNEL;
+    cali_cfg.atten = ADC_ATTEN_DB_12;
+    cali_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
+    if (adc_cali_create_scheme_curve_fitting(&cali_cfg, &s_adc_cali) == ESP_OK) {
+        s_adc_ready = true;
+    }
+#endif
+#if ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+    if (!s_adc_ready) {
+        adc_cali_line_fitting_config_t cali_cfg = {};
+        cali_cfg.unit_id = ADC_UNIT_1;
+        cali_cfg.atten = ADC_ATTEN_DB_12;
+        cali_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
+        if (adc_cali_create_scheme_line_fitting(&cali_cfg, &s_adc_cali) == ESP_OK) {
+            s_adc_ready = true;
+        }
+    }
+#endif
+    if (!s_adc_ready) {
+        ESP_LOGI(kBatteryTag,"[LCD] battery ADC not calibrated (eFuse missing) -- voltage hidden");
+    }
+#else
+    ESP_LOGI(kBatteryTag,"[LCD] battery ADC not present on this board");
+#endif
+}
+
+// Reads the raw (uncalibrated) battery voltage in millivolts, or 0 if
+// unavailable. The sense pin sits behind a 1:2 divider, so the ADC reading is
+// multiplied by 3 to match the 小智 格子派 board's measurement.
+int readBatteryRawMv()
+{
+#if defined(NRL_HAS_BATTERY_ADC) && NRL_HAS_BATTERY_ADC
+    if (!s_adc_ready || s_adc == nullptr || s_adc_cali == nullptr) {
+        return 0;
+    }
+
+    long sum = 0;
+    int samples = 0;
+    for (int i = 0; i < 16; ++i) {
+        int raw = 0;
+        if (adc_oneshot_read(s_adc, NRL_BATTERY_ADC_CHANNEL, &raw) == ESP_OK) {
+            sum += raw;
+            ++samples;
+        }
+    }
+    if (samples == 0) {
+        return 0;
+    }
+
+    int voltage = 0;
+    if (adc_cali_raw_to_voltage(s_adc_cali, static_cast<int>(sum / samples), &voltage) != ESP_OK) {
+        return 0;
+    }
+    return voltage * 3;
+#else
+    return 0;
+#endif
+}
+
+// Applies the persisted calibration multiplier (battery_cal_milli / 1000) to
+// the raw voltage. Falls back to the raw value if the config cannot be read.
+int applyBatteryCalibration(const int raw_mv)
+{
+    if (raw_mv <= 0) {
+        return 0;
+    }
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    const unsigned scale = (cfg != nullptr && cfg->battery_cal_milli != 0u)
+                               ? cfg->battery_cal_milli
+                               : 1000u;
+    return static_cast<int>((static_cast<long>(raw_mv) * static_cast<long>(scale) + 500L) / 1000L);
+}
+
+int readBatteryMv()
+{
+    return applyBatteryCalibration(readBatteryRawMv());
+}
+
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && NRL_BOARD_IS_GEZIPAI_FAMILY
 
 #include "../../lib/nrl_audio_bridge.h"
@@ -308,10 +430,6 @@ uint32_t s_gezipai_sstv_revision = UINT32_MAX;
 SstvRxSource s_gezipai_sstv_source = SSTV_SOURCE_MIC;
 char s_gezipai_sstv_status_cache[80] = {};
 #endif
-
-adc_oneshot_unit_handle_t s_adc = nullptr;
-adc_cali_handle_t s_adc_cali = nullptr;
-bool s_adc_ready = false;
 
 uint32_t s_last_refresh_ms = 0u;
 uint32_t s_last_battery_ms = 0u;
@@ -1375,105 +1493,8 @@ void onTouchButton(lv_event_t *event)
 #endif
 
 //============================ ADC battery sense ==============================
-
-void initBatteryAdc()
-{
-#if defined(NRL_HAS_BATTERY_ADC) && NRL_HAS_BATTERY_ADC
-    adc_oneshot_unit_init_cfg_t unit_cfg = {};
-    unit_cfg.unit_id = ADC_UNIT_1;
-    if (adc_oneshot_new_unit(&unit_cfg, &s_adc) != ESP_OK) {
-        ESP_LOGI(TAG,"[LCD] battery ADC unit init failed");
-        return;
-    }
-
-    adc_oneshot_chan_cfg_t chan_cfg = {};
-    chan_cfg.atten = ADC_ATTEN_DB_12;
-    chan_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
-    if (adc_oneshot_config_channel(s_adc, NRL_BATTERY_ADC_CHANNEL, &chan_cfg) != ESP_OK) {
-        ESP_LOGI(TAG,"[LCD] battery ADC channel config failed");
-        return;
-    }
-
-#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
-    adc_cali_curve_fitting_config_t cali_cfg = {};
-    cali_cfg.unit_id = ADC_UNIT_1;
-    cali_cfg.chan = NRL_BATTERY_ADC_CHANNEL;
-    cali_cfg.atten = ADC_ATTEN_DB_12;
-    cali_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
-    if (adc_cali_create_scheme_curve_fitting(&cali_cfg, &s_adc_cali) == ESP_OK) {
-        s_adc_ready = true;
-    }
-#endif
-#if ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
-    if (!s_adc_ready) {
-        adc_cali_line_fitting_config_t cali_cfg = {};
-        cali_cfg.unit_id = ADC_UNIT_1;
-        cali_cfg.atten = ADC_ATTEN_DB_12;
-        cali_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
-        if (adc_cali_create_scheme_line_fitting(&cali_cfg, &s_adc_cali) == ESP_OK) {
-            s_adc_ready = true;
-        }
-    }
-#endif
-    if (!s_adc_ready) {
-        ESP_LOGI(TAG,"[LCD] battery ADC not calibrated (eFuse missing) -- voltage hidden");
-    }
-#else
-    ESP_LOGI(TAG,"[LCD] battery ADC not present on this board");
-#endif
-}
-
-// Reads the raw (uncalibrated) battery voltage in millivolts, or 0 if
-// unavailable. The sense pin sits behind a 1:2 divider, so the ADC reading is
-// multiplied by 3 to match the 小智 格子派 board's measurement.
-int readBatteryRawMv()
-{
-#if defined(NRL_HAS_BATTERY_ADC) && NRL_HAS_BATTERY_ADC
-    if (!s_adc_ready || s_adc == nullptr || s_adc_cali == nullptr) {
-        return 0;
-    }
-
-    long sum = 0;
-    int samples = 0;
-    for (int i = 0; i < 16; ++i) {
-        int raw = 0;
-        if (adc_oneshot_read(s_adc, NRL_BATTERY_ADC_CHANNEL, &raw) == ESP_OK) {
-            sum += raw;
-            ++samples;
-        }
-    }
-    if (samples == 0) {
-        return 0;
-    }
-
-    int voltage = 0;
-    if (adc_cali_raw_to_voltage(s_adc_cali, static_cast<int>(sum / samples), &voltage) != ESP_OK) {
-        return 0;
-    }
-    return voltage * 3;
-#else
-    return 0;
-#endif
-}
-
-// Applies the persisted calibration multiplier (battery_cal_milli / 1000) to
-// the raw voltage. Falls back to the raw value if the config cannot be read.
-int applyBatteryCalibration(const int raw_mv)
-{
-    if (raw_mv <= 0) {
-        return 0;
-    }
-    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
-    const unsigned scale = (cfg != nullptr && cfg->battery_cal_milli != 0u)
-                               ? cfg->battery_cal_milli
-                               : 1000u;
-    return static_cast<int>((static_cast<long>(raw_mv) * static_cast<long>(scale) + 500L) / 1000L);
-}
-
-int readBatteryMv()
-{
-    return applyBatteryCalibration(readBatteryRawMv());
-}
+// (moved above the display gate so headless boards with NRL_HAS_BATTERY_ADC
+// share the same implementation)
 
 //================================ UI build ===================================
 
@@ -6376,7 +6397,25 @@ extern "C" long Display_FramebufferBenchMBps(void) { return -1; }
 
 #elif NRL_BOARD != NRL_BOARD_S31_KORVO && NRL_BOARD != NRL_BOARD_ESP_MOSAICO
 
-extern "C" void Display_Init(void) {}
+namespace {
+
+// Headless boards poll the battery over APRS/AT on demand; cache the reading
+// briefly so every caller does not pay the 16-sample ADC burst.
+int readBatteryMvCached()
+{
+    static unsigned long s_last_read_ms = 0UL;
+    static int s_cached_mv = 0;
+    const unsigned long now = (unsigned long)(esp_timer_get_time() / 1000ULL);
+    if (s_last_read_ms == 0UL || (now - s_last_read_ms) >= 1000UL) {
+        s_last_read_ms = now;
+        s_cached_mv = readBatteryMv();
+    }
+    return s_cached_mv;
+}
+
+} // namespace
+
+extern "C" void Display_Init(void) { initBatteryAdc(); }
 extern "C" bool Display_IsReady(void) { return false; }
 extern "C" void Display_Poll(void) {}
 extern "C" void Display_SetProvisioningMode(bool) {}
@@ -6387,8 +6426,8 @@ extern "C" void Display_MenuConfirm(void) {}
 extern "C" void Display_HardwareKeyPress(enum DisplayHardwareKey) {}
 extern "C" bool Display_CwIsActive(void) { return false; }
 extern "C" void Display_CwExit(void) {}
-extern "C" int Display_GetBatteryRawMv(void) { return 0; }
-extern "C" int Display_GetBatteryCalibratedMv(void) { return 0; }
+extern "C" int Display_GetBatteryRawMv(void) { return readBatteryRawMv(); }
+extern "C" int Display_GetBatteryCalibratedMv(void) { return readBatteryMvCached(); }
 extern "C" bool Display_SetCjkFontEngine(int) { return false; }
 extern "C" int Display_GetCjkFontEngine(void) { return DISPLAY_CJK_FONT_BITMAP; }
 extern "C" long Display_FramebufferBenchMBps(void) { return -1; }

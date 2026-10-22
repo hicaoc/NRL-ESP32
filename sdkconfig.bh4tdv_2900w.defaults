@@ -1,0 +1,160 @@
+# Complete sdkconfig defaults for the BH4TDV 2900W ESP32-S3 board.
+
+# --- Linker: orphan section handling ---
+# PlatformIO's toolchain-riscv32-esp (and the xtensa one) link against picolibc,
+# which emits .fini_array / .fini_array_onexit sections (global destructors /
+# atexit). ESP-IDF's linker scripts are newlib-oriented and don't place those,
+# so with the default CONFIG_COMPILER_ORPHAN_SECTIONS_ERROR a clean link fails
+# with "unplaced orphan section `.fini_array`". The IDF-bundled toolchain used by
+# the official examples is newlib and never hits this. Demote to a warning so the
+# linker just places the (never-executed on an embedded app) sections.
+CONFIG_COMPILER_ORPHAN_SECTIONS_WARNING=y
+
+# --- esp_err_to_name lookup ---
+# Disabled because ESP-IDF 6.2 generates per-component <name>_esp_err_codes.c
+# sources via an idf_define_esp_err_codes() CMake custom command (see
+# tools/cmake/err_codes.cmake). PlatformIO espressif32 7.0.1 lists those sources
+# for compilation but never runs the generator, so the build fails with
+# "app_update_esp_err_codes.c not found". Turning the lookup off makes
+# idf_define_esp_err_codes() a no-op (no generated source). Trade-off:
+# esp_err_to_name() returns the numeric code instead of a human-readable string.
+# CONFIG_ESP_ERR_TO_NAME_LOOKUP is not set
+
+CONFIG_FREERTOS_HZ=1000
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER=y
+CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
+# CONFIG_ESPTOOLPY_FLASHSIZE_2MB is not set
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+# CONFIG_PARTITION_TABLE_SINGLE_APP is not set
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+# --- Console ---
+# Route stdio + ESP_LOG over the built-in USB-Serial-JTAG bridge so the host
+# PC keeps seeing a CDC serial port (matches the prior ARDUINO_USB_MODE=1
+# behaviour). src/lib/nrl_usb_console.cpp uses the same driver for AT-command
+# I/O.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# --- Main task stack ---
+# IDF's default main-task stack (3584 B) is too small for our boot path:
+# initApp() opens the WiFi/HTTPD/NimBLE/LVGL stacks back-to-back. Match
+# arduino-esp32's old CONFIG_ARDUINO_LOOP_STACK_SIZE=8192 and a bit more.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=24576
+
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=512
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+# CONFIG_SPIRAM_MEMTEST is not set
+# CONFIG_SR_NSN_WEBRTC is not set
+CONFIG_SR_NSN_NSNET2=y
+# CONFIG_SR_WN_WN9_HILEXIN is not set
+CONFIG_SR_MN_CN_NONE=y
+# CONFIG_SR_MN_CN_MULTINET6_QUANT is not set
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+CONFIG_MBEDTLS_PSK_MODES=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
+
+# --- WiFi voice latency tuning ---
+# AMPDU TX aggregation batches up to TX_BA_WIN frames into a single 802.11
+# aggregate before transmitting. For a tcpdump trace of our 62.5 ms G.711
+# voice flow this manifests as 2-packet bursts separated by 80-100 ms gaps
+# (the MAC waits for a TX opportunity, then dumps the queue). Disabling
+# AMPDU TX trades raw throughput for steady per-packet TX timing; we never
+# saturate WiFi bandwidth so it's the right trade for a walkie-talkie.
+# Pin the lwIP/TCPIP task to core 0 so it doesn't migrate into the audio
+# task's core mid-frame.
+CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y
+# CONFIG_LWIP_TCPIP_TASK_AFFINITY_NO_AFFINITY is not set
+
+# --- HTTP config portal ---
+# Browser POSTs often carry User-Agent/Sec-Fetch/etc. headers larger than the
+# IDF httpd defaults. Keep the portal tolerant of normal mobile/desktop
+# browsers while still bounding parser buffers.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
+CONFIG_HTTPD_MAX_URI_LEN=1024
+
+# Permit unencrypted OTA downloads for trusted LAN deployments. HTTPS remains
+# supported and should be used whenever the network path is not fully trusted.
+CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y
+
+# --- esp_audio_codec: compile only the codecs the media stack uses ---------
+# Decoders kept: AAC, MP3, FLAC, OPUS, PCM/WAV (+ M4A/TS simple-dec parsers).
+# Everything else is dead weight in the 5 MB OTA app slots (the unused codec
+# libraries alone pushed the S31 image past the partition size once the Opus
+# encoder for NRL packet type 8 landed).
+# CONFIG_AUDIO_DECODER_AMRNB_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_AMRWB_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_VORBIS_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_ADPCM_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_ALAC_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_SBC_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_LC3_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_G722_SUPPORT is not set
+# CONFIG_AUDIO_SIMPLE_DEC_OGG_SUPPORT is not set
+# Encoders: only Opus (NRL wideband voice + xiaozhi AI uplink).
+# CONFIG_AUDIO_ENCODER_AAC_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_G711_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_AMRNB_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_AMRWB_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_ADPCM_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_ALAC_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_PCM_SUPPORT is not set
+# SBC encoder stays on: the S31 A2DP source path encodes SBC in the app.
+CONFIG_AUDIO_ENCODER_SBC_SUPPORT=y
+# CONFIG_AUDIO_ENCODER_LC3_SUPPORT is not set
+# ESP32-S3-only defaults shared by gezipai and bh4tdv.
+
+# --- PSRAM speed: 80 MHz (S3 octal PSRAM) ---
+CONFIG_SPIRAM_SPEED_80M=y
+
+# --- CPU speed: 240 MHz (S3 UI/audio headroom) ---
+# CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160 is not set
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
+
+# --- Bluetooth (NimBLE host) ---
+# Gezipai and BH4TDV use BLE provisioning through src/lib/ble_config.cpp.
+# The S31 board-specific defaults use Bluedroid + Classic BT instead.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CONTROLLER_ENABLED=y
+# CONFIG_BT_BLUEDROID_ENABLED is not set
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+# CONFIG_BT_NIMBLE_ROLE_CENTRAL is not set
+# CONFIG_BT_NIMBLE_ROLE_OBSERVER is not set
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_PINNED_TO_CORE_0=y
+# CONFIG_BT_BLE_50_FEATURES_SUPPORTED is not set
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
+CONFIG_BT_BLE_42_ADV_EN=y
+CONFIG_BT_BLE_42_SCAN_EN=y
+
+# Keep Wi-Fi voice packets evenly spaced; throughput is not the bottleneck.
+# CONFIG_ESP_WIFI_AMPDU_TX_ENABLED is not set
+# --- BH4TDV partition layout ---
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="part-s3.csv"
+CONFIG_PARTITION_TABLE_FILENAME="part-s3.csv"
+
+# --- Compiler optimization: -O2  ---
+# The shared defaults inherit the legacy "default" (-Og debug) level; LVGL's
+# software renderer and the audio decoders are 2-3x slower there, which reads
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+CONFIG_LWIP_MAX_SOCKETS=16
+CONFIG_MQTT_PROTOCOL_5=y
+
+# Keep the full 64-hex-char ELF SHA-256 (the Kconfig default truncates to
+# 9 chars); the FMO device activation reports it as firmwareHash.
+CONFIG_APP_RETRIEVE_LEN_ELF_SHA=64
+
+# Keep the I2S DMA ISR in IRAM: flash erase/write stalls would otherwise
+# starve the 30ms DMA ring and leave the codec DAC in a latched bad state
+# (hollow/hoarse speaker output until the I2S channel is reinitialised).
+CONFIG_I2S_ISR_IRAM_SAFE=y

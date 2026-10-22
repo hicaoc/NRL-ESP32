@@ -1,6 +1,11 @@
 #include "vox.h"
 
 #include "status_io.h"
+#include "board_pins.h"
+
+#if defined(NRL_PIN_LOOP_TEST_BUTTON) && NRL_PIN_LOOP_TEST_BUTTON >= 0
+#include "audio_passthrough.h"
+#endif
 
 #include <math.h>
 #include <stdint.h>
@@ -26,6 +31,23 @@ unsigned s_open_run = 0U;
 unsigned s_quiet_run = 0U;
 bool s_tx_active = false;
 float s_level_db = kSilenceDb;
+
+#if NRL_BOARD == NRL_BOARD_BH4TDV || NRL_BOARD == NRL_BOARD_BH4TDV_2900W
+// On the BH4TDV radio-interface boards the mic input is the connected radio's
+// received audio, and VOX is a soft squelch for the network uplink (it feeds
+// STATUS_IO_IsSqlActive). The radio-facing PTT belongs to network downlink
+// voice (plus FMO / the LOOP self-test), so VOX must never key it.
+constexpr bool kVoxKeysRadioPtt = false;
+#else
+constexpr bool kVoxKeysRadioPtt = true;
+#endif
+
+void voxSetRadioPtt(const bool held)
+{
+    if (kVoxKeysRadioPtt) {
+        STATUS_IO_SetSoftPtt(held);
+    }
+}
 
 int clampInt(const int value, const int lo, const int hi)
 {
@@ -67,12 +89,19 @@ extern "C" void VOX_ProcessFrame(const int16_t *samples, const size_t count)
                      ? 20.0f * log10f(static_cast<float>(rms / 32768.0))
                      : kSilenceDb;
 
-    if (!s_enabled) {
+    if (!s_enabled ||
+#if defined(NRL_PIN_LOOP_TEST_BUTTON) && NRL_PIN_LOOP_TEST_BUTTON >= 0
+        // The loopback self-test must never key the radio: treat VOX as
+        // disabled while the LOOP button holds the local mic->DAC loop open,
+        // releasing any VOX-keyed PTT that was already active.
+        AUDIO_LocalLoopbackActive() ||
+#endif
+        false) {
         s_open_run = 0U;
         s_quiet_run = 0U;
         if (s_tx_active) {
             s_tx_active = false;
-            STATUS_IO_SetSoftPtt(false);
+            voxSetRadioPtt(false);
         }
         return;
     }
@@ -84,7 +113,7 @@ extern "C" void VOX_ProcessFrame(const int16_t *samples, const size_t count)
                 s_tx_active = true;
                 s_open_run = 0U;
                 s_quiet_run = 0U;
-                STATUS_IO_SetSoftPtt(true);
+                voxSetRadioPtt(true);
             }
         } else {
             s_open_run = 0U;
@@ -95,7 +124,7 @@ extern "C" void VOX_ProcessFrame(const int16_t *samples, const size_t count)
             if (s_quiet_run >= s_hang_frames) {
                 s_tx_active = false;
                 s_quiet_run = 0U;
-                STATUS_IO_SetSoftPtt(false);
+                voxSetRadioPtt(false);
             }
         } else {
             s_quiet_run = 0U;

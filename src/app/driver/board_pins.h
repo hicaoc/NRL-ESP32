@@ -13,6 +13,7 @@
 #define NRL_BOARD_BH4TDV_RF 6
 // USER CUSTOM END: BI4UMD board identity.
 #define NRL_BOARD_ESP_MOSAICO 7
+#define NRL_BOARD_BH4TDV_2900W 8
 
 #ifndef NRL_BOARD
 #define NRL_BOARD NRL_BOARD_GEZIPAI
@@ -37,6 +38,8 @@
 // USER CUSTOM END: BI4UMD board pin map.
 #elif NRL_BOARD == NRL_BOARD_BH4TDV
 #include "board_pins_bh4tdv.h"
+#elif NRL_BOARD == NRL_BOARD_BH4TDV_2900W
+#include "board_pins_bh4tdv_2900w.h"
 #elif NRL_BOARD == NRL_BOARD_S31_KORVO
 #include "board_pins_s31_korvo.h"
 #elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
@@ -45,6 +48,17 @@
 #include "board_pins_esp_mosaico.h"
 #else
 #error "Unknown NRL_BOARD: select a supported NRL_BOARD_* value"
+#endif
+
+// Squelch trigger-polarity defaults; a board may override these in its pin
+// header. They are only the boot defaults: both inputs are reconfigurable at
+// runtime (AT+SQL1_POL / AT+SQL2_POL, web portal) and the pull direction
+// always opposes the active level so a floating input never looks triggered.
+#ifndef NRL_SQL1_ACTIVE_LEVEL
+#define NRL_SQL1_ACTIVE_LEVEL   1
+#endif
+#ifndef NRL_SQL2_ACTIVE_LEVEL
+#define NRL_SQL2_ACTIVE_LEVEL   0
 #endif
 
 // CTCSS/CW/MDC1200/DTMF signaling is only built on display-equipped boards.

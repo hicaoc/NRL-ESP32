@@ -163,16 +163,26 @@ struct PersistedExternalRadioConfig {
     uint16_t vox_attack_ms;
     uint16_t vox_hang_ms;
     uint8_t vox_reserved;
+    // Squelch-polarity extension, appended after the VOX extension without a
+    // config version bump. bit0 = sql1_active_level, bit1 = sql2_active_level.
+    // Blobs written before this byte existed are one byte shorter and load
+    // with the board's NRL_SQLx_ACTIVE_LEVEL defaults.
+    uint8_t sql_active_levels;
     uint32_t crc32;
 } __attribute__((packed));
 
 static_assert(sizeof(PersistedExternalRadioConfig) <= 1024U,
               "device configuration must remain a small NVS blob");
 
-constexpr size_t kPersistedVoxExtensionBytes =
-    sizeof(PersistedExternalRadioConfig) -
-    offsetof(PersistedExternalRadioConfig, vox_enabled) - sizeof(uint32_t);
-static_assert(kPersistedVoxExtensionBytes == 8U, "VOX extension layout changed");
+// Historical layout sizes: the VOX extension is 8 bytes (vox_enabled ..
+// vox_reserved); the SQL-polarity byte was appended later. Three blob sizes
+// are accepted: base, base+VOX, and base+VOX+SQL.
+constexpr size_t kPersistedVoxExtensionBytes = 8U;
+constexpr size_t kPersistedSqlExtensionBytes = 1U;
+static_assert(offsetof(PersistedExternalRadioConfig, sql_active_levels) -
+                  offsetof(PersistedExternalRadioConfig, vox_enabled) ==
+                  kPersistedVoxExtensionBytes,
+              "VOX extension layout changed");
 
 ExternalRadioConfig s_config = {};
 bool s_loaded = false;
@@ -459,6 +469,8 @@ static void applyDefaultAudioConfig(void)
     s_config.vox_close_db = kDefaultVoxCloseDb;
     s_config.vox_attack_ms = kDefaultVoxAttackMs;
     s_config.vox_hang_ms = kDefaultVoxHangMs;
+    s_config.sql1_active_level = NRL_SQL1_ACTIVE_LEVEL;
+    s_config.sql2_active_level = NRL_SQL2_ACTIVE_LEVEL;
 }
 
 static void loadAdcRegisters(const uint8_t reg14,
@@ -680,6 +692,8 @@ static void normalizeConfig(void)
     s_config.adc_automute_winsize &= 0x0FU;
     s_config.adc_automute_noise_gate &= 0x0FU;
     s_config.adc_automute_volume &= 0x07U;
+    s_config.sql1_active_level &= 0x01U;
+    s_config.sql2_active_level &= 0x01U;
     s_config.adc_hpfs1 &= 0x1FU;
     s_config.adc_hpfs2 &= 0x1FU;
     s_config.adceq_b0 &= kAdcEqCoefficientMask;
@@ -771,11 +785,15 @@ static bool loadPersistedConfig(void)
         nvs, kConfigNvsKey, &persisted, &size);
     nvs_close(nvs);
     // Blobs saved before the VOX extension existed are kPersistedVoxExtensionBytes
-    // shorter; both sizes are accepted and an absent extension loads as defaults.
-    // The trailing CRC sits at size-4 in either layout.
+    // shorter, and blobs with VOX but without the SQL-polarity byte are
+    // kPersistedSqlExtensionBytes shorter than the current layout; all three
+    // sizes are accepted and absent extensions load as defaults.
+    // The trailing CRC sits at size-4 in every layout.
     if (read_error != ESP_OK ||
         (size != sizeof(persisted) &&
-         size != sizeof(persisted) - kPersistedVoxExtensionBytes) ||
+         size != sizeof(persisted) - kPersistedSqlExtensionBytes &&
+         size != sizeof(persisted) - kPersistedSqlExtensionBytes -
+                      kPersistedVoxExtensionBytes) ||
         persisted.magic != kConfigMagic ||
         (persisted.version != kConfigVersion &&
          persisted.version != kLegacyConfigVersion7 &&
@@ -787,7 +805,9 @@ static bool loadPersistedConfig(void)
          persisted.version != kLegacyConfigVersion1)) {
         return false;
     }
-    const bool has_vox_extension = size == sizeof(persisted);
+    const bool has_vox_extension =
+        size >= sizeof(persisted) - kPersistedSqlExtensionBytes;
+    const bool has_sql_extension = size == sizeof(persisted);
     const size_t crc_offset = size - sizeof(uint32_t);
     uint32_t stored_crc = 0U;
     memcpy(&stored_crc, reinterpret_cast<const uint8_t *>(&persisted) + crc_offset,
@@ -974,6 +994,13 @@ static bool loadPersistedConfig(void)
         s_config.vox_attack_ms = kDefaultVoxAttackMs;
         s_config.vox_hang_ms = kDefaultVoxHangMs;
     }
+    if (has_sql_extension) {
+        s_config.sql1_active_level = persisted.sql_active_levels & 0x01U;
+        s_config.sql2_active_level = (persisted.sql_active_levels >> 1) & 0x01U;
+    } else {
+        s_config.sql1_active_level = NRL_SQL1_ACTIVE_LEVEL;
+        s_config.sql2_active_level = NRL_SQL2_ACTIVE_LEVEL;
+    }
     normalizeConfig();
     // Rewrite the NVS blob at the new config version after a legacy load so
     // the next boot keeps the migrated speaker/mic defaults without wiping
@@ -1066,6 +1093,8 @@ static bool savePersistedConfig(void)
     persisted.vox_close_db = s_config.vox_close_db;
     persisted.vox_attack_ms = s_config.vox_attack_ms;
     persisted.vox_hang_ms = s_config.vox_hang_ms;
+    persisted.sql_active_levels = (s_config.sql1_active_level & 0x01U) |
+                                  ((s_config.sql2_active_level & 0x01U) << 1);
     persisted.crc32 = esp_rom_crc32_le(
         0u, reinterpret_cast<const uint8_t *>(&persisted),
         offsetof(PersistedExternalRadioConfig, crc32));
@@ -1426,6 +1455,22 @@ bool EXTERNAL_RADIO_SetVoxConfig(const bool enabled, const int open_db, const in
     s_config.vox_attack_ms = attack_ms;
     s_config.vox_hang_ms = hang_ms;
     VOX_Configure(enabled, open_db, close_db, attack_ms, hang_ms);
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetSqlActiveLevels(const uint8_t sql1_active_level,
+                                       const uint8_t sql2_active_level,
+                                       const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if (sql1_active_level > 1u || sql2_active_level > 1u) {
+        return false;
+    }
+    s_config.sql1_active_level = sql1_active_level;
+    s_config.sql2_active_level = sql2_active_level;
     if (persist) {
         return savePersistedConfig();
     }

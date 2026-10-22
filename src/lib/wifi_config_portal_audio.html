@@ -24,6 +24,10 @@
       {{VOX_OPEN_DB_INPUT}}{{VOX_CLOSE_DB_INPUT}}{{VOX_ATTACK_MS_INPUT}}{{VOX_HANG_MS_INPUT}}
       <div class="item-form span-2"><label data-i18n="voxLevel">Mic level (live)</label><span class="hint mono" id="vox-level">--</span></div>
       <script>(function(){var el=document.getElementById('vox-level');if(!el){return;}async function voxRefresh(){try{var r=await fetch('/vox_level',{cache:'no-store'});var j=await r.json();el.textContent=j.level_db.toFixed(1)+' dBFS'+(j.active?' [TX]':'');}catch(e){}}voxRefresh();setInterval(voxRefresh,1000);})();</script>
+      <div class="group-label span-2" data-i18n="sqlPolarity">SQL 触发极性</div>
+      <form class="item-form" method="post" action="/save_nrl"><label data-i18n="sql1Polarity">SQL1 触发电平</label><select name="sql1_active_level" onchange="submitSwitch(this)"><option value="0"{{SQL1_LOW_SELECTED}} data-i18n="sqlTrigLow">低电平触发</option><option value="1"{{SQL1_HIGH_SELECTED}} data-i18n="sqlTrigHigh">高电平触发</option></select></form>
+      <form class="item-form" method="post" action="/save_nrl"><label data-i18n="sql2Polarity">SQL2 触发电平</label><select name="sql2_active_level" onchange="submitSwitch(this)"><option value="0"{{SQL2_LOW_SELECTED}} data-i18n="sqlTrigLow">低电平触发</option><option value="1"{{SQL2_HIGH_SELECTED}} data-i18n="sqlTrigHigh">高电平触发</option></select></form>
+      <div class="item-form span-2"><span class="hint" data-i18n="sqlPolarityText">任意一路触发即向网络发送语音;未接线的输入悬空时不会误触发。</span></div>
     </div></div>
     {{ES8311_ADC_SECTION}}
     {{ES8311_DAC_SECTION}}

@@ -31,12 +31,13 @@ from pathlib import Path
 from typing import Any
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
-BOARDS = ("gezipai", "gezipai_4g", "bi4umd", "bh4tdv", "bh4tdv_rf", "s31_korvo", "s31_function_coreboard", "esp_mosaico")
+BOARDS = ("gezipai", "gezipai_4g", "bi4umd", "bh4tdv", "bh4tdv_2900w", "bh4tdv_rf", "s31_korvo", "s31_function_coreboard", "esp_mosaico")
 DEFAULT_PUBLISH_BOARDS = (
     "gezipai",
     "gezipai_4g",
     "bi4umd",
     "bh4tdv",
+    "bh4tdv_2900w",
     "bh4tdv_rf",
     "s31_korvo",
     "s31_function_coreboard",

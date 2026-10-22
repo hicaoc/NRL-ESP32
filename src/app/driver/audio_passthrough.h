@@ -80,6 +80,12 @@ void AUDIO_LoopStatsBegin(void);
 void AUDIO_LoopStatsEnd(uint32_t *frames, uint32_t *bigdiff,
                         uint32_t *maxdiff, uint32_t *rms);
 
+// Local voice loopback test (boards with NRL_PIN_LOOP_TEST_BUTTON): while
+// active, captured mic audio is played straight back through the DAC instead
+// of the network playback stream. No-op on boards without the button.
+void AUDIO_SetLocalLoopback(bool enabled);
+bool AUDIO_LocalLoopbackActive(void);
+
 // AEC reference source: 0 = delayed network playback, 1 = second I2S input
 // channel. Takes effect immediately while the resident AFE keeps running.
 void AUDIO_SetAecReferenceSource(uint8_t source);

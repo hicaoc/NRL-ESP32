@@ -138,6 +138,8 @@ const char *boardType()
     return "bi4umd";
 #elif NRL_BOARD == NRL_BOARD_BH4TDV
     return "bh4tdv";
+#elif NRL_BOARD == NRL_BOARD_BH4TDV_2900W
+    return "bh4tdv_2900w";
 #elif NRL_BOARD == NRL_BOARD_S31_KORVO
     return "s31_korvo";
 #elif NRL_BOARD == NRL_BOARD_ESP_MOSAICO

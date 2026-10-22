@@ -209,6 +209,7 @@ list(APPEND app_priv_requires sahlberg__libsmb2 vfs)
 # No-screen boards compile the no-op stub headers (NRL_HAS_SIGNALING=0 in
 # board_pins.h) and skip the decoder services and the mdc1200 component.
 if(NRL_BOARD_ID STREQUAL "NRL_BOARD_BH4TDV" OR
+   NRL_BOARD_ID STREQUAL "NRL_BOARD_BH4TDV_2900W" OR
    NRL_BOARD_ID STREQUAL "NRL_BOARD_S31_FUNCTION_COREBOARD")
     list(REMOVE_ITEM app_sources
         services/cw_service.cpp

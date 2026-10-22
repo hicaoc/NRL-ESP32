@@ -130,6 +130,12 @@ struct ExternalRadioConfig {
     int8_t vox_close_db;
     uint16_t vox_attack_ms;
     uint16_t vox_hang_ms;
+    // Squelch input trigger polarity: 0 = squelch opens on a LOW level,
+    // 1 = opens on HIGH. Boot defaults come from the board's
+    // NRL_SQLx_ACTIVE_LEVEL; runtime-configurable (AT+SQL1_POL / AT+SQL2_POL,
+    // web portal). Only boards with GPIO squelch inputs use these.
+    uint8_t sql1_active_level;
+    uint8_t sql2_active_level;
     SciSerialConfig sci;
     // Saved Wi-Fi networks in connection-priority order. Entry 0 mirrors the
     // legacy wifi_ssid/wifi_password fields so existing AT/BLE/LCD callers
@@ -205,6 +211,8 @@ bool EXTERNAL_RADIO_SetBatteryCalibration(uint16_t scale_milli, bool persist);
 bool EXTERNAL_RADIO_SetVoicePayloadBytes(uint16_t value, bool persist);
 // Tail-audio suppression window in milliseconds (0 disables). Accepts 0..5000.
 bool EXTERNAL_RADIO_SetTailSuppressMs(uint16_t value, bool persist);
+// Squelch trigger polarity: 0 = trigger on LOW, 1 = trigger on HIGH.
+bool EXTERNAL_RADIO_SetSqlActiveLevels(uint8_t sql1_active_level, uint8_t sql2_active_level, bool persist);
 // Software VOX (voice-operated transmit) on the mic uplink. open_db accepts
 // -80..-10, close_db -90..-15 and must be <= open_db - 2, attack_ms 0..500,
 // hang_ms 100..3000. Takes effect immediately on the running capture task.

@@ -454,6 +454,12 @@ std::string WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *c
     // controls live in the always-rendered Audio Processing panel, not the
     // ES8311-gated expert panels below.
     replaceToken(html, "{{VOX_CHECKED}}", checkedAttr(config->vox_enabled));
+    // Squelch trigger polarity selects (board-neutral; used by boards with
+    // GPIO squelch inputs).
+    replaceToken(html, "{{SQL1_LOW_SELECTED}}", config->sql1_active_level == 0u ? " selected" : "");
+    replaceToken(html, "{{SQL1_HIGH_SELECTED}}", config->sql1_active_level != 0u ? " selected" : "");
+    replaceToken(html, "{{SQL2_LOW_SELECTED}}", config->sql2_active_level == 0u ? " selected" : "");
+    replaceToken(html, "{{SQL2_HIGH_SELECTED}}", config->sql2_active_level != 0u ? " selected" : "");
     const std::string vox_open_db = fromI32(config->vox_open_db);
     replaceToken(html, "{{VOX_OPEN_DB_INPUT}}",
                  buildAutoSubmitNumber("vox_open_db", "VOX Open Threshold (-80..-10 dBFS)",

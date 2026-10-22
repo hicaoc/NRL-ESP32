@@ -28,6 +28,7 @@ CHIP_FAMILY = {
     "bi4umd": "ESP32-S3",
     "bh4tdv_rf": "ESP32-S3",
     "bh4tdv": "ESP32-S3",
+    "bh4tdv_2900w": "ESP32-S3",
     "s31_korvo": "ESP32-S31",
     "s31_function_coreboard": "ESP32-S31",
     "esp_mosaico": "ESP32-S31",

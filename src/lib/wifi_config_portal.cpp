@@ -670,6 +670,8 @@ static std::string savedValueForArg(const ExternalRadioConfig *config, const std
     if (name == "hp_drive_enabled") return config->hp_drive_enabled ? "1" : "0";
     if (name == "aec_enabled") return config->aec_enabled ? "1" : "0";
     if (name == "aec_reference_source") return std::to_string(config->aec_reference_source);
+    if (name == "sql1_active_level") return std::to_string(config->sql1_active_level);
+    if (name == "sql2_active_level") return std::to_string(config->sql2_active_level);
     if (name == "ai_noise_enabled") return config->ai_noise_enabled ? "1" : "0";
     if (name == "adc_dmic_enabled") return config->adc_dmic_enabled ? "1" : "0";
     if (name == "adc_linsel") return config->adc_linsel ? "1" : "0";
@@ -3107,6 +3109,25 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
                                              static_cast<int>(close_db),
                                              static_cast<uint16_t>(attack_ms),
                                              static_cast<uint16_t>(hang_ms), false);
+        }
+    }
+    if (ok && (s_server.hasArg("sql1_active_level") ||
+               s_server.hasArg("sql2_active_level"))) {
+        const ExternalRadioConfig *current = EXTERNAL_RADIO_GetConfig();
+        unsigned long sql1_level = current != nullptr ? current->sql1_active_level : 0UL;
+        unsigned long sql2_level = current != nullptr ? current->sql2_active_level : 0UL;
+        unsigned long value = 0UL;
+        if (ok && s_server.hasArg("sql1_active_level")) {
+            ok = parseUIntArg(s_server.arg("sql1_active_level"), &value) && value <= 1UL;
+            sql1_level = value;
+        }
+        if (ok && s_server.hasArg("sql2_active_level")) {
+            ok = parseUIntArg(s_server.arg("sql2_active_level"), &value) && value <= 1UL;
+            sql2_level = value;
+        }
+        if (ok) {
+            ok = EXTERNAL_RADIO_SetSqlActiveLevels(static_cast<uint8_t>(sql1_level),
+                                                   static_cast<uint8_t>(sql2_level), false);
         }
     }
     if (ok && (s_server.hasArg("adc_eq_bypass_present") ||
