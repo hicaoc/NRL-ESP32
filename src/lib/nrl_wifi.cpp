@@ -1,15 +1,15 @@
 #include "nrl_wifi.h"
 
 #include "nrl_bt_hfp.h"
+#include "nrl_hostname.h"
+#include "nrl_mdns.h"
 #include "nrl_net_compat.h"
 
 #include "../app/driver/external_radio.h"
 
-#include <esp_efuse.h>
 #include <esp_event.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
-#include <esp_mac.h>
 #include <esp_netif.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
@@ -20,7 +20,6 @@
 #include <lwip/sockets.h>
 #include <nvs_flash.h>
 
-#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -259,51 +258,10 @@ namespace
 
     static void makeHostname(char *buf, size_t buf_size)
     {
-        if (buf == nullptr || buf_size == 0u)
-        {
-            return;
-        }
-        uint8_t mac[6] = {};
-        esp_efuse_mac_get_default(mac);
-        const uint32_t tail = (static_cast<uint32_t>(mac[3]) << 16) |
-                              (static_cast<uint32_t>(mac[4]) << 8) |
-                              mac[5];
-
         const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
-        if (config != nullptr && config->callsign[0] != '\0')
-        {
-            // Lowercase + alnum-only token from the callsign, joined with '-'.
-            char call_token[12] = {};
-            size_t pos = 0;
-            bool last_was_dash = false;
-            for (size_t i = 0; config->callsign[i] != '\0' && pos < sizeof(call_token) - 1; ++i)
-            {
-                const unsigned char ch = static_cast<unsigned char>(config->callsign[i]);
-                if (isalnum(ch))
-                {
-                    call_token[pos++] = static_cast<char>(tolower(ch));
-                    last_was_dash = false;
-                }
-                else if (!last_was_dash && pos > 0)
-                {
-                    call_token[pos++] = '-';
-                    last_was_dash = true;
-                }
-            }
-            while (pos > 0 && call_token[pos - 1] == '-')
-            {
-                call_token[--pos] = '\0';
-            }
-            if (pos > 0)
-            {
-                snprintf(buf, buf_size, "nrl-%s-%u-%06lX",
-                         call_token,
-                         static_cast<unsigned>(config->callsign_ssid),
-                         static_cast<unsigned long>(tail));
-                return;
-            }
-        }
-        snprintf(buf, buf_size, "esp32s3-%06lX", static_cast<unsigned long>(tail));
+        NrlMakeHostname(config != nullptr ? config->callsign : nullptr,
+                        config != nullptr ? config->callsign_ssid : 0u,
+                        buf, buf_size);
     }
 
 } // namespace
@@ -376,6 +334,7 @@ bool nrlWifiInit()
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_LOST_IP, &wifiEventHandler, nullptr);
 
     s_inited = true;
+    nrlMdnsRefresh();
     ESP_LOGI(TAG, "WiFi stack initialized");
     return true;
 }
@@ -431,6 +390,7 @@ WifiConnResult wifiEnsureConnected(const char *ssid, const char *pass, uint32_t 
     char hostname[40] = {};
     makeHostname(hostname, sizeof(hostname));
     esp_netif_set_hostname(s_sta_netif, hostname);
+    nrlMdnsRefresh();
 
     // Static IP or DHCP.
     const ExternalRadioConfig *net_config = EXTERNAL_RADIO_GetConfig();
@@ -549,6 +509,11 @@ bool nrlWifiApStart(const char *ssid, uint8_t channel, uint8_t max_conn,
         return false;
     }
 
+    char hostname[40] = {};
+    makeHostname(hostname, sizeof(hostname));
+    esp_netif_set_hostname(s_ap_netif, hostname);
+    nrlMdnsRefresh();
+
     // DHCP server must be stopped before changing the IP info.
     esp_netif_dhcps_stop(s_ap_netif);
     esp_netif_ip_info_t info = {};
@@ -607,6 +572,7 @@ bool nrlWifiStopRadio()
     s_sta_active = false;
     s_ap_active = false;
     const bool ok = refreshMode();
+    nrlMdnsStop();
     ESP_LOGI(TAG, "Wi-Fi radio stopped (STA+AP down, RAM freed)");
     return ok;
 }

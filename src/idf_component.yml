@@ -80,6 +80,8 @@ dependencies:
     version: "^1.7.19"
   espressif/libsodium:
     version: "^1.0.22"
+  espressif/mdns:
+    version: "==1.8.2"
   espressif/mqtt:
     version: "^1.0.0"
   # Small power-loss-safe server-list cache in the final 256 KiB of NOR flash.

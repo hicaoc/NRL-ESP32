@@ -103,6 +103,8 @@ python scripts/publish_ota_mcp.py --version 0.8.59 --verify-only
 - WiFi and server configuration portal
   - The device starts a configuration AP and web page.
   - Default portal IP: `192.168.4.1`.
+  - All boards advertise mDNS and use a unified DHCP hostname: `<callsign>-<ssid>` in lowercase. The default is `nocall-0`, reachable at `http://nocall-0.local/`. Devices on the same LAN must have distinct callsigns or SSIDs to avoid name conflicts.
+  - Publishes `_http._tcp` and `_nrl._tcp` on port 80, with callsign, SSID, firmware version, and path in TXT records for mDNS/Bonjour discovery tools.
   - Supports WiFi scanning and configuration of WiFi SSID/password, server host, server port, channel, callsign, audio volume, and ES8311 output mode.
   - Supports WiFi OTA firmware upload from the `/update` page.
   - Holding the BOOT button for 5 seconds resets network-related settings.

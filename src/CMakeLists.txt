@@ -101,6 +101,7 @@ set(app_sources
     lib/sstv_rx.cpp
     lib/nrl_usb_console.cpp
     lib/nrl_wifi.cpp
+    lib/nrl_mdns.cpp
     lib/wifi_config_portal.cpp
     lib/wifi_config_portal_view.cpp
 )
@@ -172,6 +173,7 @@ set(app_priv_requires
     esp_http_server
     espressif__cjson
     espressif__libsodium
+    espressif__mdns
     espressif__mqtt
     joltwallet__littlefs
     mbedtls
@@ -255,6 +257,16 @@ idf_component_register(
     # explicitly or the link fails with "undefined reference to app_main".
     WHOLE_ARCHIVE
 )
+
+# mDNS runs infrequent discovery traffic; optimize only this component for size.
+if(TARGET __idf_espressif__mdns)
+    target_compile_options(__idf_espressif__mdns PRIVATE -Os)
+endif()
+# Korvo's 7 MiB app slot is nearly full. LVGL is not on the voice real-time
+# path, so size-optimize it only on this board instead of changing OTA layouts.
+if(NRL_BOARD_ID STREQUAL "NRL_BOARD_S31_KORVO" AND TARGET __idf_lvgl)
+    target_compile_options(__idf_lvgl PRIVATE -Os)
+endif()
 
 # Vendored APRS sources retain upstream warning patterns.
 set_source_files_properties(

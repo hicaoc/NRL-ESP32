@@ -116,6 +116,8 @@ python scripts/publish_ota_mcp.py --version 0.8.59 --verify-only
 - WiFi 和服务器配置门户
   - 设备启动后提供配置 AP 和 Web 页面。
   - 默认配置入口 IP 为 `192.168.4.1`。
+  - 所有板卡启用 mDNS 与统一 DHCP 主机名：`<呼号>-<SSID>`（小写）；未配置时为 `nocall-0`，可通过 `http://nocall-0.local/` 访问。多台设备须使用不同的呼号或 SSID，避免名称冲突。
+  - 在端口 80 发布 `_http._tcp` 和 `_nrl._tcp` 服务，TXT 记录包含呼号、SSID、固件版本和路径；可使用支持 mDNS/Bonjour 的工具发现设备。
   - 支持扫描附近 WiFi、配置 WiFi SSID/密码、服务器地址、端口、频道、呼号、音量等参数。
   - 支持在 `/update` 页面通过 WiFi 上传 `firmware.bin` 进行 OTA 刷机。
   - 长按 BOOT 键 5 秒可重置网络相关配置。
