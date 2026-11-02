@@ -807,7 +807,10 @@ extern "C" bool FMO_STATION_BCAST_Init(void)
     if (s_task != nullptr) return true;
     ensureConfigLoaded();
     ensureBeaconConfigLoaded();
-    if (xTaskCreate(broadcastTask, "fmo_bcast", 8192, nullptr, 3,
+    // 16 KB: the manual/periodic send path (broadcastOnce -> cert rebuild +
+    // ed25519 signing + 1 KiB APRS line) measures ~11 KB worst case; the old
+    // 8 KB stack overflowed and reset the chip when the super gates passed.
+    if (xTaskCreate(broadcastTask, "fmo_bcast", 16384, nullptr, 3,
                     &s_task) != pdPASS) {
         ESP_LOGE(TAG, "broadcast task creation failed");
         return false;
