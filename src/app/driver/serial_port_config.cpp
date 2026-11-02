@@ -118,7 +118,7 @@ extern "C" bool SERIAL_PORT_CONFIG_IsAllowedPin(const int gpio)
     }
 #elif NRL_BOARD == NRL_BOARD_BH4TDV_2900W
     switch (gpio) {
-        // Free GPIOs only: LEDs 4-6, BAT 7, YAESU/MOTO 38, PTT/SQL 39-41,
+        // Free GPIOs only: LEDs 4-6, BAT 7, PTT2 38, PTT/SQL 39-41,
         // I2S 9-13, I2C 14/21, BOOT 0 and the LOOP button 1 are reserved.
         case 2: case 3: case 8: case 17: case 18:
         case 42: case 43: case 44: case 48:

@@ -6,6 +6,12 @@
 <form class="item-form" method="post" action="/save_nrl"><label data-i18n="aecLabel">Acoustic Echo Cancellation</label><input type="hidden" name="aec_present" value="1"><label class="hint"><input type="checkbox" name="aec_enabled" value="1" onchange="submitSwitch(this)" {{AEC_CHECKED}}><span data-i18n="aecText">Enable esp-sr echo cancellation on mic uplink</span></label></form><form class="item-form" method="post" action="/save_nrl"><label data-i18n="aecReferenceSource">AEC Reference Source</label><select name="aec_reference_source" onchange="submitSwitch(this)"><option value="0"{{AEC_REF_NETWORK_SELECTED}} data-i18n="aecRefNetwork">Network playback</option><option value="1"{{AEC_REF_MIC_SELECTED}} data-i18n="aecRefMic">Second microphone</option></select></form>
 <!-- @endtemplate -->
 
+<!-- @template PTT2_SECTION -->
+      <div class="group-label span-2" data-i18n="pttOutputs">电台 PTT 输出</div>
+      <form class="item-form" method="post" action="/save_nrl"><label data-i18n="ptt2Polarity">PTT2 (IO38) 触发电平</label><select name="ptt2_active_level" onchange="submitSwitch(this)"><option value="0"{{PTT2_LOW_SELECTED}} data-i18n="sqlTrigLow">低电平触发</option><option value="1"{{PTT2_HIGH_SELECTED}} data-i18n="sqlTrigHigh">高电平触发</option></select></form>
+      <div class="item-form span-2"><span class="hint" data-i18n="ptt2PolarityText">IO38 与 IO39 同步输出 PTT；IO39 固定高电平触发，IO38 默认高电平触发。</span></div>
+<!-- @endtemplate -->
+
 <!-- @template AUDIO_SECTIONS -->
 <section class="panel">
   <div class="section-head">
@@ -28,6 +34,7 @@
       <form class="item-form" method="post" action="/save_nrl"><label data-i18n="sql1Polarity">SQL1 触发电平</label><select name="sql1_active_level" onchange="submitSwitch(this)"><option value="0"{{SQL1_LOW_SELECTED}} data-i18n="sqlTrigLow">低电平触发</option><option value="1"{{SQL1_HIGH_SELECTED}} data-i18n="sqlTrigHigh">高电平触发</option></select></form>
       <form class="item-form" method="post" action="/save_nrl"><label data-i18n="sql2Polarity">SQL2 触发电平</label><select name="sql2_active_level" onchange="submitSwitch(this)"><option value="0"{{SQL2_LOW_SELECTED}} data-i18n="sqlTrigLow">低电平触发</option><option value="1"{{SQL2_HIGH_SELECTED}} data-i18n="sqlTrigHigh">高电平触发</option></select></form>
       <div class="item-form span-2"><span class="hint" data-i18n="sqlPolarityText">任意一路触发即向网络发送语音;未接线的输入悬空时不会误触发。</span></div>
+      {{PTT2_SECTION}}
     </div></div>
     {{ES8311_ADC_SECTION}}
     {{ES8311_DAC_SECTION}}

@@ -3130,6 +3130,13 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
                                                    static_cast<uint8_t>(sql2_level), false);
         }
     }
+    if (ok && s_server.hasArg("ptt2_active_level")) {
+        unsigned long value = 0UL;
+        ok = parseUIntArg(s_server.arg("ptt2_active_level"), &value) && value <= 1UL;
+        if (ok) {
+            ok = EXTERNAL_RADIO_SetPtt2ActiveLevel(static_cast<uint8_t>(value), false);
+        }
+    }
     if (ok && (s_server.hasArg("adc_eq_bypass_present") ||
                s_server.hasArg("adc_hpf_present") ||
                s_server.hasArg("adc_hpfs1") ||
@@ -4043,7 +4050,6 @@ static esp_err_t handleRadioStatus(httpd_req_t *req)
     cJSON_AddBoolToObject(root, "bclo", config->busy_lockout);
     cJSON_AddBoolToObject(root, "nb", config->narrowband);
     cJSON_AddBoolToObject(root, "lp", config->low_power);
-    cJSON_AddNumberToObject(root, "rt", config->radio_type);
     char *body = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (body == nullptr) {
@@ -4124,13 +4130,6 @@ static esp_err_t handleSaveRadio(httpd_req_t *req)
     if (ok && s_server.hasArg("lp")) {
         config.low_power = s_server.arg("lp") == "1";
     }
-    if (ok && s_server.hasArg("rt")) {
-        unsigned long value = 0u;
-        ok = parseUIntArg(s_server.arg("rt"), &value) && value <= 1u;
-        if (ok) config.radio_type = static_cast<uint8_t>(value);
-        else bad_field = "rt";
-    }
-
     if (!ok || !RADIO_CONFIG_Set(&config, true)) {
         if (bad_field[0] == '\0') bad_field = "config";
         char detail[64] = {};
@@ -4151,14 +4150,7 @@ static esp_err_t handleRadioPage(httpd_req_t *req)
     static const char page[] = R"HTML(<!doctype html><html lang="zh-CN"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>BH4TDV-RF 射频模块</title><link rel="stylesheet" href="/portal.css"></head><body><main class="shell">
-<p class="back-home"><a href="/">&larr; 返回首页</a></p><section class="panel">
-<div class="section-head"><h2>电台类型</h2></div>
-<form id="rig"><div class="grid">
-<label class="fmo-row"><input type="radio" name="rt" value="0" id="rt0">其它电台</label>
-<label class="fmo-row"><input type="radio" name="rt" value="1" id="rt1">YAESU/MOTO</label>
-</div>
-<button type="submit">保存</button></form>
-<p class="hint" id="rig-msg"></p></section>
+<p class="back-home"><a href="/">&larr; 返回首页</a></p>
 <p class="hint" id="mod-tip" hidden>未连接 SR-110V 或 SR-110U 段模块</p>
 <section class="panel" id="mod-sec">
 <div class="section-head"><h2>SR-110 射频模块</h2><span class="hint mono" id="state">--</span></div>
@@ -4213,7 +4205,7 @@ else{$('mod-sec').hidden=false;$('mod-tip').hidden=true;}
 if(loaded)return;loaded=true;
 $('en').checked=s.en;$('rxf').value=s.rxf;$('txf').value=s.txf;$('rxct').value=s.rxct;$('txct').value=s.txct;
 $('sql').value=s.sql;$('mic').value=s.mic;$('tot').value=s.tot;$('scram').value=s.scram;
-$('vol').value=s.vol;$('vox').value=s.vox;$('nb').value=s.nb?'1':'0';$('lp').value=s.lp?'1':'0';$(s.rt?'rt1':'rt0').checked=true;
+$('vol').value=s.vol;$('vox').value=s.vox;$('nb').value=s.nb?'1':'0';$('lp').value=s.lp?'1':'0';
 $('comp').checked=s.comp;$('sav').checked=s.sav;$('bclo').checked=s.bclo;}catch(e){$('state').textContent='读取失败';}}
 const CTCSS=['67.0','69.3','71.9','74.4','77.0','79.7','82.5','85.4','88.5','91.5','94.8','97.4','100.0','103.5','107.2','110.9','114.8','118.8','123.0','127.3','131.8','136.5','141.3','146.2','151.4','156.7','159.8','162.2','167.9','173.8','179.9','183.5','186.2','189.9','192.8','196.6','199.5','203.5','206.5','210.7','218.1','225.7','229.1','233.6','241.8','250.3','254.1'];
 const CDCSS=['023','025','026','031','032','036','043','047','051','053','054','065','071','072','073','074','114','115','116','122','125','131','132','134','143','145','152','155','156','162','165','172','174','205','212','223','225','226','243','244','245','246','251','252','255','261','263','265','266','271','274','306','311','315','325','331','332','343','346','351','356','364','365','371','411','412','413','423','431','432','445','446','452','454','455','462','464','465','466','503','506','516','523','526','532','546','565','606','612','624','627','631','632','654','662','664','703','712','723','731','732','734','743','754'];
@@ -4223,9 +4215,6 @@ if(!chkFreq($('rxf'))||!chkFreq($('txf'))){$('msg').textContent='频率超出范
 const body=new URLSearchParams(new FormData(e.target));
 try{const r=await fetch('/save_radio',{method:'POST',body});const t=await r.text();
 $('msg').textContent=r.ok?'已保存：'+t:'保存失败：'+t;if(r.ok)loaded=false;}catch(err){$('msg').textContent='保存失败：'+err;}refresh();};
-$('rig').onsubmit=async e=>{e.preventDefault();const body=new URLSearchParams(new FormData(e.target));
-try{const r=await fetch('/save_radio',{method:'POST',body});const t=await r.text();
-$('rig-msg').textContent=r.ok?'已保存：'+t:'保存失败：'+t;}catch(err){$('rig-msg').textContent='保存失败：'+err;}};
 refresh();setInterval(refresh,3000);
 ['rxf','txf'].forEach(id=>$(id).addEventListener('input',e=>chkFreq(e.target)));
 </script></main></body></html>)HTML";

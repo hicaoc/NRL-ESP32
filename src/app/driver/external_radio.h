@@ -136,6 +136,9 @@ struct ExternalRadioConfig {
     // web portal). Only boards with GPIO squelch inputs use these.
     uint8_t sql1_active_level;
     uint8_t sql2_active_level;
+    // Second PTT output trigger polarity: 0 = active LOW, 1 = active HIGH.
+    // Only used by boards with NRL_PIN_PTT2_OUT; defaults to active HIGH.
+    uint8_t ptt2_active_level;
     SciSerialConfig sci;
     // Saved Wi-Fi networks in connection-priority order. Entry 0 mirrors the
     // legacy wifi_ssid/wifi_password fields so existing AT/BLE/LCD callers
@@ -213,6 +216,8 @@ bool EXTERNAL_RADIO_SetVoicePayloadBytes(uint16_t value, bool persist);
 bool EXTERNAL_RADIO_SetTailSuppressMs(uint16_t value, bool persist);
 // Squelch trigger polarity: 0 = trigger on LOW, 1 = trigger on HIGH.
 bool EXTERNAL_RADIO_SetSqlActiveLevels(uint8_t sql1_active_level, uint8_t sql2_active_level, bool persist);
+// Second PTT output trigger polarity: 0 = trigger on LOW, 1 = trigger on HIGH.
+bool EXTERNAL_RADIO_SetPtt2ActiveLevel(uint8_t active_level, bool persist);
 // Software VOX (voice-operated transmit) on the mic uplink. open_db accepts
 // -80..-10, close_db -90..-15 and must be <= open_db - 2, attack_ms 0..500,
 // hang_ms 100..3000. Takes effect immediately on the running capture task.

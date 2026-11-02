@@ -25,11 +25,11 @@ FEATURES = [
         "active": True,
     },
     {
-        "key": "yaesu_moto_select",
-        "label_zh": "YAESU/MOTO 电台类型选择",
-        "label_en": "YAESU/MOTO radio-type select",
-        "description_zh": "电台类型选择输出,高电平适配 YAESU/MOTO 电台,低电平适配其它电台。",
-        "description_en": "Radio-type select output: high for YAESU/MOTO radios, low for other radios.",
+        "key": "dual_ptt_output",
+        "label_zh": "双路电台 PTT 输出",
+        "label_en": "Dual radio PTT outputs",
+        "description_zh": "IO38 与 IO39 同步键控电台,IO38 可通过 Web 配置高或低电平触发,默认高电平。",
+        "description_en": "IO38 and IO39 key the radios together; IO38 supports Web-configurable active-high or active-low triggering and defaults to high.",
         "group": "hardware",
         "display_order": 47,
         "active": True,
@@ -43,15 +43,15 @@ BOARD = {
     "tagline_zh": "ESP32-S3 无屏电台接口,带电池检测与音频环路自检",
     "tagline_en": "ESP32-S3 headless radio interface with battery sense and audio loopback self-test",
     "description_zh": (
-        "基于 ESP32-S3 的无屏电台网络桥接板:ES8311 全双工音频,PTT 输出与双路 SQL 静噪输入,"
+        "基于 ESP32-S3 的无屏电台网络桥接板:ES8311 全双工音频,双路 PTT 输出与双路 SQL 静噪输入,"
         "静噪开启时才向网络发送语音;红/绿/蓝三状态灯分别指示 PTT、SQL 与网络连接;"
-        "板载电池电压检测、语音环路测试按钮和 YAESU/MOTO 电台类型选择。"
+        "板载电池电压检测和语音环路测试按钮。"
     ),
     "description_en": (
-        "ESP32-S3 headless network bridge for radios: ES8311 full-duplex audio, PTT output "
+        "ESP32-S3 headless network bridge for radios: ES8311 full-duplex audio, dual PTT outputs "
         "and dual squelch inputs (voice is sent to the network only while squelch is open); "
         "red/green/blue status LEDs for PTT, SQL, and network link; on-board battery voltage "
-        "sense, voice loopback test button, and YAESU/MOTO radio-type select."
+        "sense and voice loopback test button."
     ),
     "chip_label": "ESP32-S3",
     "web_flash_chip_family": "ESP32-S3",
@@ -59,17 +59,17 @@ BOARD = {
     "display_order": 21,
     "status": "draft",
     "highlights_zh": [
-        "ES8311 全双工音频,适配 YAESU/MOTO 等电台",
-        "PTT 输出 + 双路 SQL 静噪输入,静噪开启才发送网络语音",
+        "ES8311 全双工音频,适配两部电台",
+        "双路 PTT 输出 + 双路 SQL 静噪输入,静噪开启才发送网络语音",
         "红/绿/蓝三状态灯:PTT、SQL、网络连接",
-        "电池电压检测、语音环路测试按钮、YAESU/MOTO 类型选择",
+        "电池电压检测、语音环路测试按钮、IO38 PTT 电平可配置",
         "BLE 配网、Wi-Fi 配置门户、远程 AT 与 OTA",
     ],
     "highlights_en": [
-        "ES8311 full-duplex audio for YAESU/MOTO and compatible radios",
-        "PTT output + dual squelch inputs; uplink only while squelch is open",
+        "ES8311 full-duplex audio for two radios",
+        "Dual PTT outputs + dual squelch inputs; uplink only while squelch is open",
         "Red/green/blue status LEDs: PTT, SQL, network link",
-        "Battery voltage sense, voice loopback test button, YAESU/MOTO select",
+        "Battery sense, loopback test, configurable IO38 PTT polarity",
         "BLE provisioning, Wi-Fi portal, remote AT, and OTA",
     ],
     "features": {},
@@ -107,7 +107,7 @@ ASSIGNMENTS = {
     "espnow": "yes",
     "music_radio": "yes",
     "loopback_test": "yes",
-    "yaesu_moto_select": "yes",
+    "dual_ptt_output": "yes",
 }
 
 FEATURE_NOTES = {

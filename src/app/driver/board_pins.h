@@ -60,6 +60,9 @@
 #ifndef NRL_SQL2_ACTIVE_LEVEL
 #define NRL_SQL2_ACTIVE_LEVEL   0
 #endif
+#ifndef NRL_PTT2_ACTIVE_LEVEL
+#define NRL_PTT2_ACTIVE_LEVEL   1
+#endif
 
 // CTCSS/CW/MDC1200/DTMF signaling is only built on display-equipped boards.
 // Board pin headers define NRL_HAS_SIGNALING 0 to compile the service out;

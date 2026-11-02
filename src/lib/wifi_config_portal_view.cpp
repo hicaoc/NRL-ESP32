@@ -460,6 +460,16 @@ std::string WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *c
     replaceToken(html, "{{SQL1_HIGH_SELECTED}}", config->sql1_active_level != 0u ? " selected" : "");
     replaceToken(html, "{{SQL2_LOW_SELECTED}}", config->sql2_active_level == 0u ? " selected" : "");
     replaceToken(html, "{{SQL2_HIGH_SELECTED}}", config->sql2_active_level != 0u ? " selected" : "");
+#if NRL_BOARD == NRL_BOARD_BH4TDV_2900W
+    std::string ptt2_section = std::string(kWifiConfigPortalPtt2SectionTemplate);
+    replaceToken(ptt2_section, "{{PTT2_LOW_SELECTED}}",
+                 config->ptt2_active_level == 0u ? " selected" : "");
+    replaceToken(ptt2_section, "{{PTT2_HIGH_SELECTED}}",
+                 config->ptt2_active_level != 0u ? " selected" : "");
+    replaceToken(html, "{{PTT2_SECTION}}", ptt2_section);
+#else
+    replaceToken(html, "{{PTT2_SECTION}}", std::string(""));
+#endif
     const std::string vox_open_db = fromI32(config->vox_open_db);
     replaceToken(html, "{{VOX_OPEN_DB_INPUT}}",
                  buildAutoSubmitNumber("vox_open_db", "VOX Open Threshold (-80..-10 dBFS)",

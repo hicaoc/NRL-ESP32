@@ -27,9 +27,10 @@
 // the ES8311 ADC is played straight back through the ES8311 DAC.
 #define NRL_PIN_LOOP_TEST_BUTTON 1
 
-// Radio-type select output (same role as the BH4TDV-RF PCA9555 P1.4 line):
-// high = YAESU/MOTO, low = other radios.
-#define NRL_PIN_YAESU_MOTO      38
+// Second radio PTT output. It follows IO39, with an independently
+// configurable active level (high by default).
+#define NRL_PIN_PTT2_OUT        38
+#define NRL_PTT2_ACTIVE_LEVEL   1
 
 // Battery voltage sense -- ADC1 channel 6 (GPIO7).
 #define NRL_PIN_BATTERY_ADC     7
@@ -37,7 +38,7 @@
 #define NRL_HAS_BATTERY_ADC     1
 
 // No channel-select GPIOs on this board (the 3188's 40/39/38 are SQL_2,
-// PTT_OUT and YAESU/MOTO here).
+// PTT_OUT and PTT2_OUT here).
 #define NRL_PIN_CHANNEL_BIT0    -1
 #define NRL_PIN_CHANNEL_BIT1    -1
 #define NRL_PIN_CHANNEL_BIT2    -1

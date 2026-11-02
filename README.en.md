@@ -17,7 +17,7 @@ The complete build matrix is `gezipai`, `gezipai_4g`, `bi4umd`, `bh4tdv`, `bh4td
 | `bh4tdv_rf` | BH4TDV-RF (BI4UMD main board + NRL companion expansion), ESP32-S3 | ILI9341 touch display, ES8311, GPS, TF card, PCA9555 physical keys, and SR-110U radio | Network-radio terminal with local UHF TX/RX and physical controls |
 | `gezipai` | Gezipai, ESP32-S3 | ES7210 microphone ADC + ES8311 DAC, 240×240 ST7789 colour display, battery-voltage sensing, volume up/down/PTT buttons, three status LEDs, SCI serial | Portable network-voice terminal with a small display and physical PTT |
 | `bh4tdv` | BH4TDV NRL-3188 / Moto3188 controller, ESP32-S3 | ES8311 full-duplex audio, PTT/SQL/three status LEDs, three-bit channel select (0–7), SCI serial; no on-board display | Network bridge and channel controller for a 3188 radio |
-| `bh4tdv_2900w` | BH4TDV 2900W controller, ESP32-S3 | ES8311 full-duplex audio, PTT/SQL, red/green/blue status LEDs, battery-voltage sensing, voice loopback test button, YAESU/MOTO radio-type select; no on-board display, no SCI serial | Network bridge for YAESU/MOTO and compatible radios |
+| `bh4tdv_2900w` | BH4TDV 2900W controller, ESP32-S3 | ES8311 full-duplex audio, dual PTT outputs/SQL inputs, red/green/blue status LEDs, battery-voltage sensing, voice loopback test button; no on-board display, no SCI serial | Network bridge for two radios |
 | `s31_korvo` | ESP32-S31-Korvo-1, ESP32-S31 | ES8389 audio, 800×480 RGB touch display, ADC buttons (volume, mode, PTT), TF card, USB-OTG host, on-board RGB status LED | Touch-based multimedia and network-voice terminal; UART1/SCI and UART2/GPS default to off and can be enabled through Web/AT |
 | `s31_function_coreboard` | ESP32-S31-Function-CoreBoard-1, ESP32-S31 | ES8311 audio, YT8531 Gigabit Ethernet, USB-A host, WS2812 RGB status LED, SCI serial; no display or physical volume/PTT buttons | Function-core design requiring wired networking or USB storage |
 
@@ -218,14 +218,14 @@ Channel outputs use 3-bit binary encoding. For example, channel `0` outputs `000
 
 | Function | GPIO |
 | --- | --- |
-| PTT output | `39` |
+| PTT1 output | `39` (fixed active-high) |
+| PTT2 output | `38` (synchronized with PTT1; Web-configurable active-high/low, default high) |
 | SQL1 input | `41` |
 | SQL2 input | `40` |
 | Network/heartbeat LED (blue) | `6` |
 | SQL LED (green) | `5` |
 | PTT red LED | `4` |
 | Voice loopback test button | `1` (while held, mic audio loops ES8311 ADC → ESP32 → ES8311 DAC) |
-| YAESU/MOTO select | `38` (high = YAESU/MOTO, low = other radios) |
 | Battery voltage ADC | `7` (ADC1 channel 6) |
 | I2C SCL | `14` |
 | I2C SDA | `21` |

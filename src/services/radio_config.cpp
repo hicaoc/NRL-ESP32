@@ -20,10 +20,6 @@
 #include <freertos/task.h>
 #endif
 
-#if defined(NRL_PIN_YAESU_MOTO) && NRL_PIN_YAESU_MOTO >= 0
-#include <driver/gpio.h>
-#endif
-
 namespace {
 
 constexpr const char *kNvsNamespace = "radio";
@@ -510,19 +506,6 @@ bool RADIO_CONFIG_ApplyToModule(void)
     }
     if (!ok) ESP_LOGE(TAG, "module rejected (part of) the configuration");
     return ok;
-#elif defined(NRL_PIN_YAESU_MOTO) && NRL_PIN_YAESU_MOTO >= 0
-    const RadioModuleConfig *config = RADIO_CONFIG_Get();
-
-    // Direct-GPIO radio-type select (BH4TDV 2900W): a plain DC level like the
-    // RF board's PCA9555 line, so it can follow the config unconditionally.
-    static bool s_yaesu_moto_ready = false;
-    if (!s_yaesu_moto_ready) {
-        gpio_reset_pin((gpio_num_t)NRL_PIN_YAESU_MOTO);
-        gpio_set_direction((gpio_num_t)NRL_PIN_YAESU_MOTO, GPIO_MODE_OUTPUT);
-        s_yaesu_moto_ready = true;
-    }
-    gpio_set_level((gpio_num_t)NRL_PIN_YAESU_MOTO, config->radio_type == 1u ? 1 : 0);
-    return true;
 #else
     return true;
 #endif

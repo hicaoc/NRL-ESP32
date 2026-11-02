@@ -18,7 +18,7 @@ HTML 阅读版：[中文](README.html) / [English](README.en.html)
 | --- | --- | --- | --- |
 | `gezipai` | 格子派，ESP32-S3 | ES7210 麦克风 ADC + ES8311 DAC、240×240 ST7789 彩屏、电池电压检测、音量+/音量-/PTT 三按键、三色状态灯、SCI 串口 | 带小屏幕和实体 PTT 的便携式网络语音终端 |
 | `bh4tdv` | BH4TDV NRL-3188 / Moto3188 控制板，ESP32-S3 | ES8311 全双工音频、PTT/SQL/三色状态灯、三位频道选择（0–7）、SCI 串口；无板载屏幕 | 连接 3188 电台的网络桥接与频道控制 |
-| `bh4tdv_2900w` | BH4TDV 2900W 控制板，ESP32-S3 | ES8311 全双工音频、PTT/SQL、红/绿/蓝三状态灯、电池电压检测、语音环路测试按钮、YAESU/MOTO 电台类型选择；无板载屏幕、无 SCI 串口 | 连接 YAESU/MOTO 等电台的网络桥接 |
+| `bh4tdv_2900w` | BH4TDV 2900W 控制板，ESP32-S3 | ES8311 全双工音频、双路 PTT/SQL、红/绿/蓝三状态灯、电池电压检测、语音环路测试按钮；无板载屏幕、无 SCI 串口 | 连接两部电台的网络桥接 |
 | `bh4tdv_rf` | BH4TDV-RF（BI4UMD 主板 + NRL 伴侣扩展板），ESP32-S3 | ILI9341 触摸屏、ES8311、GPS、TF 卡、PCA9555 实体键、SR-110U 射频模块 | 带本机 UHF 收发与实体键交互的网络电台终端 |
 | `s31_korvo` | ESP32-S31-Korvo-1，ESP32-S31 | ES8389 音频、800×480 RGB 触摸屏、ADC 按键（音量、模式、PTT）、TF 卡、USB-OTG 主机、板载 RGB 状态灯 | 带触控界面的多媒体/网络语音终端；UART1/SCI 与 UART2/GPS 默认关闭，可通过 Web/AT 启用 |
 | `s31_function_coreboard` | ESP32-S31-Function-CoreBoard-1，ESP32-S31 | ES8311 音频、YT8531 千兆以太网、USB-A 主机、WS2812 RGB 状态灯、SCI 串口；无屏幕、无实体音量/PTT 键 | 需要有线网络或 USB 存储的功能核心板方案 |
@@ -249,14 +249,14 @@ REBOOT
 
 | 功能 | GPIO |
 | --- | --- |
-| PTT 输出 | `39` |
+| PTT1 输出 | `39`（固定高电平触发） |
+| PTT2 输出 | `38`（与 PTT1 同步，Web 可配置高/低电平触发，默认高电平） |
 | SQL1 输入 | `41` |
 | SQL2 输入 | `40` |
 | 网络/心跳状态灯（蓝） | `6` |
 | SQL 状态灯（绿） | `5` |
 | PTT 红灯 | `4` |
 | 语音环路测试按钮 | `1`（按下时麦克风声音经 ES8311 ADC → ESP32 → ES8311 DAC 本地环回） |
-| YAESU/MOTO 选择 | `38`（高 = YAESU/MOTO，低 = 其它电台） |
 | 电池电压 ADC | `7`（ADC1 通道 6） |
 | I2C SCL | `14` |
 | I2C SDA | `21` |

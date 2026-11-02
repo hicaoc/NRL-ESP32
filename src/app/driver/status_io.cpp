@@ -2,6 +2,7 @@
 
 #include "board_pins.h"
 #include "external_radio.h"
+#include "ptt_output.h"
 #include "vox.h"
 
 #if NRL_BOARD == NRL_BOARD_BH4TDV_RF
@@ -100,6 +101,20 @@ static void writeLed(const int pin, const bool on)
     if (pin < 0) return;
     gpio_reset_pin((gpio_num_t)pin);
     gpio_set_direction((gpio_num_t)pin, GPIO_MODE_OUTPUT);
+}
+
+static void writeRadioPtt(const bool active)
+{
+#if defined(NRL_PIN_PTT_OUT) && NRL_PIN_PTT_OUT >= 0
+    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, NrlPttOutputLevel(active, 1u));
+#endif
+#if defined(NRL_PIN_PTT2_OUT) && NRL_PIN_PTT2_OUT >= 0
+    const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
+    const uint8_t active_level = config != nullptr ? config->ptt2_active_level
+                                                   : NRL_PTT2_ACTIVE_LEVEL;
+    gpio_set_level((gpio_num_t)NRL_PIN_PTT2_OUT,
+                   NrlPttOutputLevel(active, active_level));
+#endif
 }
 
 static bool blinkPhase(const unsigned long now_ms, const unsigned long period_ms)
@@ -794,6 +809,11 @@ extern "C" bool STATUS_IO_IsPttActive(void)
     return s_net_audio_active;
 }
 
+extern "C" void STATUS_IO_RefreshPttOutput(void)
+{
+    writeRadioPtt(s_net_audio_active);
+}
+
 extern "C" void STATUS_IO_Init(void)
 {
     if (s_poll_mutex == nullptr) {
@@ -825,10 +845,12 @@ extern "C" void STATUS_IO_Init(void)
 #endif
 
 #if defined(NRL_PIN_PTT_OUT) && NRL_PIN_PTT_OUT >= 0
-    // External-radio PTT keying output (active high); idle low at boot.
     initOutputPin(NRL_PIN_PTT_OUT);
-    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, 0);
 #endif
+#if defined(NRL_PIN_PTT2_OUT) && NRL_PIN_PTT2_OUT >= 0
+    initOutputPin(NRL_PIN_PTT2_OUT);
+#endif
+    writeRadioPtt(false);
 
 #if NRL_BOARD == NRL_BOARD_S31_KORVO
     // The S31 has a single addressable WS2812 on GPIO37 instead of the three
@@ -897,7 +919,7 @@ extern "C" void STATUS_IO_SetPttActive(const bool active)
     (void)BH4TDV_RF_IO_SetRadioPtt(s_net_audio_active);
 #endif
 #if defined(NRL_PIN_PTT_OUT) && NRL_PIN_PTT_OUT >= 0
-    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, s_net_audio_active ? 1 : 0);
+    writeRadioPtt(s_net_audio_active);
 #endif
     if (!ledSelftestActive(nrl_millis_now())) {
         writeLed(NRL_PIN_LED_AUDIO, s_net_audio_active);
@@ -912,7 +934,7 @@ extern "C" void STATUS_IO_SetFmoPttActive(const bool active)
     (void)BH4TDV_RF_IO_SetRadioPtt(s_net_audio_active);
 #endif
 #if defined(NRL_PIN_PTT_OUT) && NRL_PIN_PTT_OUT >= 0
-    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, s_net_audio_active ? 1 : 0);
+    writeRadioPtt(s_net_audio_active);
 #endif
     if (!ledSelftestActive(nrl_millis_now())) {
         writeLed(NRL_PIN_LED_AUDIO, s_net_audio_active);
@@ -1184,7 +1206,7 @@ static void pollLoopTestButton(const unsigned long now)
         ESP_LOGI(TAG, "ptt_out=%u (loop=%u)", combined ? 1u : 0u, pressed ? 1u : 0u);
     }
     s_ptt_active = combined;
-    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, combined ? 1 : 0);
+    writeRadioPtt(combined);
     if (!ledSelftestActive(nrl_millis_now())) {
         writeLed(NRL_PIN_STATUS_PTT_LED, combined);
     }
@@ -1206,10 +1228,19 @@ extern "C" bool STATUS_IO_IsPttActive(void)
     return s_ptt_active;
 }
 
+extern "C" void STATUS_IO_RefreshPttOutput(void)
+{
+    writeRadioPtt(s_ptt_active);
+}
+
 extern "C" void STATUS_IO_Init(void)
 {
     gpio_reset_pin((gpio_num_t)NRL_PIN_PTT_OUT);
     gpio_set_direction((gpio_num_t)NRL_PIN_PTT_OUT, GPIO_MODE_OUTPUT);
+#if defined(NRL_PIN_PTT2_OUT) && NRL_PIN_PTT2_OUT >= 0
+    gpio_reset_pin((gpio_num_t)NRL_PIN_PTT2_OUT);
+    gpio_set_direction((gpio_num_t)NRL_PIN_PTT2_OUT, GPIO_MODE_OUTPUT);
+#endif
     gpio_reset_pin((gpio_num_t)NRL_PIN_STATUS_PTT_LED);
     gpio_set_direction((gpio_num_t)NRL_PIN_STATUS_PTT_LED, GPIO_MODE_OUTPUT);
     gpio_reset_pin((gpio_num_t)NRL_PIN_STATUS_IO1);
@@ -1229,7 +1260,7 @@ extern "C" void STATUS_IO_Init(void)
     initInputPullupPin(NRL_PIN_LOOP_TEST_BUTTON);
 #endif
 
-    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, 0);
+    writeRadioPtt(false);
     writeLed(NRL_PIN_STATUS_PTT_LED, false);
     writeLed(NRL_PIN_STATUS_IO1, false);
     writeLed(NRL_PIN_STATUS_IO2, false);
@@ -1250,7 +1281,7 @@ extern "C" void STATUS_IO_SetPttActive(const bool active)
         ESP_LOGI(TAG, "ptt_out=%u", combined ? 1u : 0u);
     }
     s_ptt_active = combined;
-    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, combined ? 1 : 0);
+    writeRadioPtt(combined);
     if (!ledSelftestActive(nrl_millis_now())) {
         writeLed(NRL_PIN_STATUS_PTT_LED, combined);
     }
@@ -1265,7 +1296,7 @@ extern "C" void STATUS_IO_SetFmoPttActive(const bool active)
                  active ? 1u : 0u);
     }
     s_ptt_active = combined;
-    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, combined ? 1 : 0);
+    writeRadioPtt(combined);
     if (!ledSelftestActive(nrl_millis_now())) {
         writeLed(NRL_PIN_STATUS_PTT_LED, combined);
     }
@@ -1280,7 +1311,7 @@ extern "C" void STATUS_IO_SetSoftPtt(const bool held)
                  held ? 1u : 0u);
     }
     s_ptt_active = combined;
-    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, combined ? 1 : 0);
+    writeRadioPtt(combined);
     if (!ledSelftestActive(nrl_millis_now())) {
         writeLed(NRL_PIN_STATUS_PTT_LED, combined);
     }
@@ -1338,7 +1369,7 @@ extern "C" void STATUS_IO_Poll(void)
     // Keep these two outputs refreshed even if callers only update the latch state.
     // The radio PTT output must never be held by the boot LED self-check; only
     // the indicator LEDs are.
-    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, s_ptt_active ? 1 : 0);
+    writeRadioPtt(s_ptt_active);
     if (ledSelftestActive(now)) {
         return;
     }
