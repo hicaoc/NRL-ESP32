@@ -125,6 +125,7 @@ python scripts/publish_ota_mcp.py --version 0.8.59 --verify-only
 - On-board audio codecs and voice processing
   - ESP32-S3 / Function CoreBoard targets use ES8311, Korvo uses ES8389, and Gezipai additionally has an ES7210 microphone ADC.
   - Supports microphone gain, line-out volume, HP Drive output mode, and a downlink playback queue in receive mode.
+  - BH4TDV 3188 and 2900W defaults: mic volume 220, line-out volume 190, ADC PGA gain 8, ADC gain scale 0. Existing saved user settings are preserved across firmware upgrades.
 
 - SCI serial passthrough
   - Forwards SCI serial data through NRL packets.
@@ -196,6 +197,7 @@ Pins are centralized in `src/app/driver/board_pins.h`; each board's pin map live
 | --- | --- |
 | PTT output | `8` |
 | SQL1 input | `17` |
+| SQL2 input | `18` |
 | Network/heartbeat LED | `1` |
 | SQL LED | `2` |
 | PTT red LED | `42` |
@@ -238,7 +240,7 @@ Channel outputs use 3-bit binary encoding. For example, channel `0` outputs `000
 | I2S DIN | `11` |
 | BOOT button | `0` |
 
-SQL1/SQL2 trigger polarity is configurable (LOW or HIGH trigger) via `AT+SQL1_POL=LOW|HI`, `AT+SQL2_POL=LOW|HI`, or the web portal's "SQL trigger polarity" section. Either input opens the network uplink; an unconnected input idles safely and never false-triggers.
+SQL1/SQL2 trigger polarity is configurable (LOW or HIGH trigger) via `AT+SQL1_POL=LOW|HI`, `AT+SQL2_POL=LOW|HI`, or the web portal's "SQL trigger polarity" section. Either input opens the network uplink; an unconnected input idles safely and never false-triggers. LOW trigger uses an internal pull-up, and HIGH trigger uses an internal pull-down.
 
 ## Startup Flow
 

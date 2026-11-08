@@ -50,16 +50,23 @@ constexpr uint8_t kMaxChannel = 7U;
 // ALC boost quiet talkers up to the target floor (-16.1 dBFS) without running
 // out of boost headroom. The MAXLEVEL target (-7.8 dBFS) prevents the ALC from
 // ever pushing loud input to digital full-scale.
+#if NRL_BOARD == NRL_BOARD_BH4TDV || NRL_BOARD == NRL_BOARD_BH4TDV_2900W
+constexpr uint8_t kDefaultMicVolume = 220U;
+constexpr uint8_t kDefaultLineOutVolume = 190U;
+constexpr uint8_t kDefaultAdcPgaGain = 8U;
+constexpr uint8_t kDefaultAdcScale = 0U;
+#else
 constexpr uint8_t kDefaultMicVolume = 0xFFU;
+// REG32 DAC volume: 0xBF == 0 dB (unity digital gain). The FM8002E BTL power
+// amp then adds ~6 dB (typical Rf/Ri = 20k/20k in the BI4UMD / BH4TDV-RF
+// schematic) for a loud-but-headroomed speaker level.
+constexpr uint8_t kDefaultLineOutVolume = 0xBFU;
+constexpr uint8_t kDefaultAdcPgaGain = 10U;
+constexpr uint8_t kDefaultAdcScale = 7U;
+#endif
 constexpr uint16_t kDefaultMicPcmGainMilli = 1000U;
 constexpr uint16_t kMinMicPcmGainMilli = 100U;
 constexpr uint16_t kMaxMicPcmGainMilli = 5000U;
-// REG32 DAC volume: 0xBF == 0 dB (unity digital gain). The FM8002E BTL power
-// amp then adds ~6 dB (typical Rf/Ri = 20k/20k in the BI4UMD / BH4TDV-RF
-// schematic) for a loud-but-headroomed speaker level. Older defaults used 180
-// (0xB4 = -5.5 dB) which made the speaker 5.5 dB quieter than needed out of
-// the box.
-constexpr uint8_t kDefaultLineOutVolume = 0xBFU;
 constexpr uint8_t kPersistedHpDriveOff = 1U;
 constexpr uint8_t kPersistedHpDriveOn = 2U;
 constexpr uint8_t kPersistedFlagOff = 1U;
@@ -417,19 +424,14 @@ static void applyDefaultAdcConfig(void)
 {
     s_config.adc_dmic_enabled = false;
     s_config.adc_linsel = true;
-    // PGA 30 dB with ALC enabled as the safety net: the ALC compresses loud
-    // input toward the -7.8 dBFS target, so the higher analog gain buys mic
-    // sensitivity without the unprotected clipping seen when ALC was off.
-    s_config.adc_pga_gain = 10U;
+    // ALC remains enabled to boost quiet input and limit loud input.
+    s_config.adc_pga_gain = kDefaultAdcPgaGain;
     s_config.adc_ramprate = 4U;
     s_config.adc_dmic_sense = false;
     s_config.adc_sync = true;
     s_config.adc_inv = false;
     s_config.adc_ramclr = false;
-    // ADC_SCALE 42 dB. The digital scale sits before the ALC in the ES8311
-    // datapath, but with ALC enabled loud input is compressed before it can
-    // rail; bench tests with this value show no saturation or distortion.
-    s_config.adc_scale = 7U;
+    s_config.adc_scale = kDefaultAdcScale;
     // ALC on: boosts quiet talkers and limits loud input so the mic is neither
     // too quiet nor clipping.
     s_config.alc_enabled = true;

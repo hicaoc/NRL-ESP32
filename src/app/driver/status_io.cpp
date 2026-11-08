@@ -1334,9 +1334,7 @@ extern "C" void STATUS_IO_Poll(void)
 #if defined(NRL_PIN_LOOP_TEST_BUTTON) && NRL_PIN_LOOP_TEST_BUTTON >= 0
     pollLoopTestButton(now);
 #endif
-    // Polarity is runtime-configurable; re-apply the pull modes when the
-    // config changes so a freshly flipped input does not sit at the active
-    // level on its own pull.
+    // Polarity is runtime-configurable; keep the opposing pull in sync.
     static int s_sql_pull_signature = -1;
     const int sql1_active_level = sql1ActiveLevel();
     const int sql2_active_level = sql2ActiveLevel();
