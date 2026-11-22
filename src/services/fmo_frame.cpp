@@ -35,12 +35,23 @@ static void writeLe32(uint8_t *data, const uint32_t value)
 
 } // namespace
 
+// Inner-block 5-byte sync marker. V4 devices zero this field (observed on
+// live captures: frames whose only difference is marker 00 00 00 00 00, all
+// other structure identical), so both the legacy CONST5 and all-zero markers
+// are accepted; anything else is still rejected as garbage.
+static bool markerValid(const uint8_t *p)
+{
+    static const uint8_t marker[5] = {0x3d, 0x14, 0x00, 0xe0, 0x3d};
+    static const uint8_t zeros[5] = {};
+    return memcmp(p, marker, sizeof(marker)) == 0 ||
+           memcmp(p, zeros, sizeof(zeros)) == 0;
+}
+
 extern "C" bool FMO_FRAME_Parse(const uint8_t *frame, const size_t frame_size,
                                  FmoFrameInfo *info,
                                  const FmoFrameBlockHandler handler,
                                  void *context)
 {
-    static const uint8_t marker[5] = {0x3d, 0x14, 0x00, 0xe0, 0x3d};
     if (frame == nullptr || info == nullptr || frame_size < 64u ||
         frame[0] != 1u || readLe32(frame + 30u) != frame_size ||
         esp_rom_crc32_le(0, frame + 64u, frame_size - 64u) !=
@@ -67,7 +78,7 @@ extern "C" bool FMO_FRAME_Parse(const uint8_t *frame, const size_t frame_size,
         const size_t inner_size = block_size - 8u;
         const size_t declared = readLe16(inner + 1u);
         if (declared != inner_size || inner_size < 8u ||
-            memcmp(inner + 3u, marker, sizeof(marker)) != 0) {
+            !markerValid(inner + 3u)) {
             return false;
         }
 
