@@ -710,8 +710,17 @@ static void mqttEvent(void *, esp_event_base_t, const int32_t event_id,
                      esp_err_to_name(property_error));
         }
         (void)esp_mqtt_client_subscribe(event->client, "FMO/RAW", 0);
-        // Online-count source: every device heartbeats here ~once a minute.
-        (void)esp_mqtt_client_subscribe(event->client, "FMO/LATE/UID_V1/#", 0);
+        // 心跳订阅：服务器已禁止 FMO/LATE/UID_V1/# 通配，只能订本机证书 uid
+        // 的专属 topic（FMO/LATE/UID_V1/<uid>）。
+        const uint32_t own_uid = ownUid();
+        if (own_uid != 0u) {
+            char late_topic[40];
+            snprintf(late_topic, sizeof(late_topic), "FMO/LATE/UID_V1/%lu",
+                     static_cast<unsigned long>(own_uid));
+            (void)esp_mqtt_client_subscribe(event->client, late_topic, 0);
+        } else {
+            ESP_LOGW(TAG, "certificate uid not ready, skip FMO/LATE subscribe");
+        }
         // FMO/QSO/UID/# 通配订阅：成员 JSON（谁在讲话 + 网格，含桥转发的跨服务器
         // 网格）进花名册供说话人位置显示；记录 JSON 仅当 topic uid==本机 uid 时落日志。
         // 流量极小（实网抓包 20 分钟语音仅 8 条 QSO 消息），对 ESP32 无压力。
@@ -727,8 +736,8 @@ static void mqttEvent(void *, esp_event_base_t, const int32_t event_id,
         s_recreate_client = false;
         s_role_tried = 0u; // drop rotation state; next reconnect re-derives the initial role
         portEXIT_CRITICAL(&s_lock);
-        ESP_LOGI(TAG, "connected and subscribed to FMO/RAW + FMO/LATE/UID_V1/# (No Local=%u)",
-                 no_local ? 1u : 0u);
+        ESP_LOGI(TAG, "connected and subscribed to FMO/RAW + FMO/LATE/UID_V1/%lu (No Local=%u)",
+                 static_cast<unsigned long>(own_uid), no_local ? 1u : 0u);
     } else if (event_id == MQTT_EVENT_DISCONNECTED) {
         FMO_STATION_BCAST_RosterReset(); // drop the online roster (peak kept)
         portENTER_CRITICAL(&s_lock);
