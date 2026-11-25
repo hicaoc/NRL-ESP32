@@ -1079,13 +1079,18 @@ static bool endsWith(const std::string &s, const char *suffix)
     return s.size() >= n && s.compare(s.size() - n, n, suffix) == 0;
 }
 
-static void sendSavedFieldsJson(const bool ok)
+static void sendSavedFieldsJson(const bool ok, const char *error = nullptr)
 {
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
     std::string body;
     body.reserve(1024);
     body += "{\"ok\":";
     body += ok ? "true" : "false";
+    if (!ok && error != nullptr && error[0] != '\0') {
+        body += ",\"error\":\"";
+        body += jsonEscape(error);
+        body += "\"";
+    }
     body += ",\"fields\":{";
     bool first = true;
     auto appendField = [&](const std::string &name) {
@@ -2746,6 +2751,9 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
         return ESP_OK;
     }
     bool ok = true;
+    // First validation failure reason (bilingual), echoed as "error" in the
+    // JSON reply so the page can show WHY the save was rejected.
+    char save_error[128] = {};
 
     ExternalRadioConfig before_snapshot = {};
     bool have_snapshot = false;
@@ -2781,6 +2789,17 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
     }
     if (ok && s_server.hasArg("callsign")) {
         ok = EXTERNAL_RADIO_SetCallsign(s_server.arg("callsign").c_str(), false);
+        if (!ok) {
+            // Surface the exact validation reason to the page (e.g. 7-char
+            // callsigns like BII1LUI are rejected instead of truncated).
+            char reason[128] = {};
+            if (EXTERNAL_RADIO_ValidateCallsign(s_server.arg("callsign").c_str(),
+                                                reason, sizeof(reason))) {
+                snprintf(save_error, sizeof(save_error), "%s", "callsign save failed");
+            } else {
+                snprintf(save_error, sizeof(save_error), "%s", reason);
+            }
+        }
     }
     if (ok && s_server.hasArg("callsign_ssid")) {
         unsigned long value = 0UL;
@@ -3268,10 +3287,11 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
             NRLAudioBridge_ApplyConfig(false, true);
         }
     } else if (!ok) {
-        ESP_LOGE(TAG, "NRL config save via web failed (invalid params or EEPROM write error)");
+        ESP_LOGE(TAG, "NRL config save via web failed (invalid params or EEPROM write error): %s",
+                 save_error[0] != '\0' ? save_error : "unspecified");
     }
 
-    sendSavedFieldsJson(ok);
+    sendSavedFieldsJson(ok, save_error);
     return ESP_OK;
 }
 

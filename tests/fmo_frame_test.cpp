@@ -1,8 +1,10 @@
 // Host unit test for FMO/RAW frame build/parse (src/services/fmo_frame.cpp):
 // - V4 header uid roundtrip (offset 6..9 little-endian u32);
-// - inner 5-byte sync marker: legacy CONST5 and the all-zero marker emitted
-//   by V4 devices (live captures: identical frames except zeroed marker)
-//   must both parse; any other marker value is still rejected.
+// - inner 5-byte sync marker: legacy CONST5, the all-zero marker emitted by
+//   V4 Opus blocks, and V4 ADPCM blocks whose first marker byte is the block
+//   sequence number with the remaining four zeroed (live captures:
+//   01 00 00 00 00 on burst-first blocks) must all parse; markers whose low
+//   4 bytes are non-zero are still rejected as garbage.
 //
 // Build & run (from the repo root, MSYS2/MinGW g++ works):
 //   g++ -std=c++17 -Wall -Wextra -I src -I tests/shims
@@ -90,12 +92,24 @@ void testLegacyMarkerParses()
     assert(zero_capture.calls == 2);
     assert(zero_capture.payload_bytes == capture.payload_bytes);
 
-    // Garbage markers are still rejected.
+    // V4 ADPCM variant: first marker byte is the block sequence number, the
+    // remaining four are zero (live captures: 01 00 00 00 00 on burst-first
+    // blocks). Any seq byte must parse.
+    const uint8_t seq_prefixed[5] = {0x01u, 0x00u, 0x00u, 0x00u, 0x00u};
+    setMarkers(frame, frame_size, seq_prefixed);
+    Capture seq_capture;
+    assert(FMO_FRAME_Parse(frame, frame_size, &info, onBlock, &seq_capture));
+    assert(seq_capture.calls == 2);
+    const uint8_t seq_max[5] = {0xffu, 0x00u, 0x00u, 0x00u, 0x00u};
+    setMarkers(frame, frame_size, seq_max);
+    assert(FMO_FRAME_Parse(frame, frame_size, &info, nullptr, nullptr));
+
+    // Garbage markers (non-zero low 4 bytes) are still rejected.
     const uint8_t garbage[5] = {0xdeu, 0xadu, 0xbeu, 0xefu, 0x01u};
     setMarkers(frame, frame_size, garbage);
     assert(!FMO_FRAME_Parse(frame, frame_size, &info, onBlock, nullptr));
 
-    printf("ok: legacy CONST5 + all-zero V4 markers parse, garbage rejected\n");
+    printf("ok: CONST5 + all-zero + seq-prefixed markers parse, garbage rejected\n");
 }
 
 } // namespace

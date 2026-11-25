@@ -35,16 +35,17 @@ static void writeLe32(uint8_t *data, const uint32_t value)
 
 } // namespace
 
-// Inner-block 5-byte sync marker. V4 devices zero this field (observed on
-// live captures: frames whose only difference is marker 00 00 00 00 00, all
-// other structure identical), so both the legacy CONST5 and all-zero markers
-// are accepted; anything else is still rejected as garbage.
+// Inner-block 5-byte sync marker. V4 devices do not emit the legacy CONST5:
+// Opus blocks zero all 5 bytes, while ADPCM blocks reuse the first byte as
+// the block sequence number and zero the remaining four (live captures:
+// burst-first blocks carry marker 01 00 00 00 00). Accept CONST5 or any
+// marker whose low 4 bytes are zero (first byte arbitrary); anything else
+// is still rejected as garbage.
 static bool markerValid(const uint8_t *p)
 {
     static const uint8_t marker[5] = {0x3d, 0x14, 0x00, 0xe0, 0x3d};
-    static const uint8_t zeros[5] = {};
     return memcmp(p, marker, sizeof(marker)) == 0 ||
-           memcmp(p, zeros, sizeof(zeros)) == 0;
+           (p[1] == 0u && p[2] == 0u && p[3] == 0u && p[4] == 0u);
 }
 
 extern "C" bool FMO_FRAME_Parse(const uint8_t *frame, const size_t frame_size,

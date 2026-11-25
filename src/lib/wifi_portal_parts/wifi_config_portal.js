@@ -66,6 +66,7 @@ const translations = {
         radio: 'Radio',
         channel: 'Channel (0-7)',
         callsign: 'Callsign',
+        callsignHint: '4-6 letters/digits with at least one digit; optional -N SSID suffix. Lowercase is auto-uppercased. Invalid values are rejected, not truncated.',
         callsignSsid: 'Callsign SSID',
         pttTimeout: 'PTT Timeout (seconds, 5-3600)',
         voicePayloadBytes: 'Voice Packet Size (bytes, 160-500)',
@@ -414,6 +415,7 @@ const translations = {
         radio: '电台',
         channel: '信道 (0-7)',
         callsign: '呼号',
+        callsignHint: '4-6 位字母/数字且至少含一位数字；可带 -N 数字 SSID 后缀；小写自动转大写。非法呼号会被拒绝而不是截断。',
         callsignSsid: '呼号SSID',
         pttTimeout: 'PTT 超时 (秒, 5-3600)',
         voicePayloadBytes: '语音包大小 (字节, 160-500)',
@@ -1117,6 +1119,9 @@ Object.assign(translations.zh, {sensorStatus: '传感器', radioConfig: '射频�
       if (button) button.disabled = true;
       postAndApply(form).then((reply) => {
         flashButtonFeedback(button, reply && reply.ok);
+        // Server-side validation failures (e.g. an illegal callsign) carry a
+        // bilingual reason -- show it instead of only flashing "Save failed".
+        if (reply && !reply.ok && reply.error) alert(reply.error);
         if (reply && reply.ok && form.dataset.reloadOnSave === '1') {
           setTimeout(() => window.location.reload(), 300);
         }

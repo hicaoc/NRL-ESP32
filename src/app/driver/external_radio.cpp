@@ -297,6 +297,71 @@ static void sanitizeCallsign(char *callsign)
     }
 }
 
+// Validates a raw callsign input BEFORE any normalization (trim / uppercase /
+// truncation). Rules: base 4-6 letters or digits (lowercase is accepted and
+// auto-uppercased on store), at least one digit, optional numeric "-N" SSID
+// suffix. Anything else (e.g. the 7-char "BII1LUI") is rejected at save time
+// instead of being silently truncated. `why` receives a static bilingual
+// reason string on failure.
+static bool validateCallsign(const char *raw, const char **why)
+{
+    *why = nullptr;
+    if (raw == nullptr) {
+        *why = "呼号不能为空 / callsign required";
+        return false;
+    }
+
+    char text[24] = {};
+    copyBounded(text, sizeof(text), raw);
+    trimTrailingWhitespace(text);
+    size_t start = 0U;
+    while (text[start] == ' ' || text[start] == '\t') {
+        ++start;
+    }
+    if (start > 0U) {
+        memmove(text, text + start, strlen(text + start) + 1U);
+    }
+
+    // Optional numeric SSID suffix "-N" (the suffix itself is stored via
+    // EXTERNAL_RADIO_SetCallsignSsid; here it only needs to be well-formed).
+    size_t base_len = strlen(text);
+    const char *dash = strchr(text, '-');
+    if (dash != nullptr) {
+        base_len = static_cast<size_t>(dash - text);
+        const size_t suffix_len = strlen(dash + 1);
+        if (suffix_len == 0U || suffix_len > 2U) {
+            *why = "SSID 后缀须为 1-2 位数字 / SSID suffix must be 1-2 digits";
+            return false;
+        }
+        for (size_t i = 0U; i < suffix_len; ++i) {
+            if (!isdigit(static_cast<unsigned char>(dash[1U + i]))) {
+                *why = "SSID 后缀须为 1-2 位数字 / SSID suffix must be 1-2 digits";
+                return false;
+            }
+        }
+    }
+    if (base_len < 4U || base_len > 6U) {
+        *why = "呼号须为 4-6 位 / callsign must be 4-6 characters";
+        return false;
+    }
+    bool has_digit = false;
+    for (size_t i = 0U; i < base_len; ++i) {
+        const unsigned char ch = static_cast<unsigned char>(text[i]);
+        if (!isalnum(ch)) {
+            *why = "呼号只能包含字母和数字 / only letters and digits allowed";
+            return false;
+        }
+        if (isdigit(ch)) {
+            has_digit = true;
+        }
+    }
+    if (!has_digit) {
+        *why = "呼号至少包含一位数字 / callsign needs at least one digit";
+        return false;
+    }
+    return true;
+}
+
 static uint8_t clampChannel(const uint8_t channel)
 {
     if (channel < kMinChannel) {
@@ -1418,16 +1483,44 @@ bool EXTERNAL_RADIO_SetLocalPort(const uint16_t value, const bool persist)
 bool EXTERNAL_RADIO_SetCallsign(const char *value, const bool persist)
 {
     EXTERNAL_RADIO_Init();
-    if (value == nullptr) {
+    const char *why = nullptr;
+    if (!validateCallsign(value, &why)) {
+        ESP_LOGW(TAG, "callsign rejected: \"%s\" (%s)",
+                 value != nullptr ? value : "(null)", why);
         return false;
     }
 
-    copyBounded(s_config.callsign, sizeof(s_config.callsign), value);
+    // Store only the base; a "-N" suffix belongs to callsign_ssid and is set
+    // through EXTERNAL_RADIO_SetCallsignSsid().
+    char base[24] = {};
+    copyBounded(base, sizeof(base), value);
+    trimTrailingWhitespace(base);
+    char *dash = strchr(base, '-');
+    if (dash != nullptr) {
+        *dash = '\0';
+    }
+    size_t start = 0U;
+    while (base[start] == ' ' || base[start] == '\t') {
+        ++start;
+    }
+    copyBounded(s_config.callsign, sizeof(s_config.callsign), base + start);
     sanitizeCallsign(s_config.callsign);
     if (persist) {
         return savePersistedConfig();
     }
     return true;
+}
+
+bool EXTERNAL_RADIO_ValidateCallsign(const char *raw, char *reason, const size_t reason_size)
+{
+    const char *why = nullptr;
+    if (validateCallsign(raw, &why)) {
+        return true;
+    }
+    if (reason != nullptr && reason_size > 0U) {
+        copyBounded(reason, reason_size, why);
+    }
+    return false;
 }
 
 bool EXTERNAL_RADIO_SetCallsignSsid(const uint8_t value, const bool persist)

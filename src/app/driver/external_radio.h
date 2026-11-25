@@ -166,6 +166,12 @@ bool EXTERNAL_RADIO_SetServerHost(const char *value, bool persist);
 bool EXTERNAL_RADIO_SetServerPort(uint16_t value, bool persist);
 bool EXTERNAL_RADIO_SetLocalPort(uint16_t value, bool persist);
 bool EXTERNAL_RADIO_SetCallsign(const char *value, bool persist);
+// Validates a raw callsign input BEFORE any normalization (trim / uppercase /
+// truncation). Rules: base 4-6 letters or digits (lowercase is accepted and
+// auto-uppercased on store), at least one digit, optional numeric "-N" SSID
+// suffix. On failure returns false and, when reason/reason_size are given,
+// writes a short bilingual explanation for UI display.
+bool EXTERNAL_RADIO_ValidateCallsign(const char *raw, char *reason, size_t reason_size);
 bool EXTERNAL_RADIO_SetCallsignSsid(uint8_t value, bool persist);
 bool EXTERNAL_RADIO_SetMicVolume(uint8_t value, bool persist);
 bool EXTERNAL_RADIO_SetMicPcmGain(uint16_t gain_milli, bool persist);
