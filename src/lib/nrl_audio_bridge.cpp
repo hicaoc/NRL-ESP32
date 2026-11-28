@@ -121,8 +121,9 @@ char s_voice_callsign[7] = {};
 uint8_t s_voice_ssid = 0u;
 uint32_t s_voice_dmr_id = 0u;
 size_t s_last_voice_payload_size = 0u;
-uint32_t s_next_wifi_retry_ms = 0u;
-uint8_t s_wifi_connect_failures = 0u;
+volatile uint32_t s_next_wifi_retry_ms = 0u;
+volatile uint8_t s_wifi_connect_failures = 0u;
+volatile bool s_force_wifi_connect = false;
 NRL_PSRAM_BSS uint8_t s_rx_packet_buffer[kNrlMaxPacketSize];
 NRL_PSRAM_BSS uint8_t s_at_reply_packet[kNrlMaxPacketSize];
 uint8_t s_sci_tx_packet[kNrlHeaderSize + kSciPayloadMaxBytes];
@@ -689,7 +690,9 @@ static WifiConnResult connectSavedWifi(const ExternalRadioConfig *config)
         return wifiEnsureConnected(NRL_AUDIO_WIFI_SSID, NRL_AUDIO_WIFI_PASSWORD, 10000u);
     }
 
-    const size_t count = EXTERNAL_RADIO_GetWifiProfileCount();
+    ExternalWifiProfile profiles[EXTERNAL_RADIO_MAX_WIFI_PROFILES] = {};
+    const size_t count = EXTERNAL_RADIO_GetWifiProfilesSnapshot(
+        profiles, EXTERNAL_RADIO_MAX_WIFI_PROFILES);
     if (count == 0U) return WIFI_CONN_FAILED;
 
     // Scan once so unavailable profiles do not each consume a full connection
@@ -704,7 +707,7 @@ static WifiConnResult connectSavedWifi(const ExternalRadioConfig *config)
     for (size_t i = 0; i < count; ++i) {
         bool visible = !scan_ok;
         for (size_t j = 0; j < scanned_count; ++j) {
-            if (strcmp(config->wifi_profiles[i].ssid, scanned[j].ssid) == 0) {
+            if (strcmp(profiles[i].ssid, scanned[j].ssid) == 0) {
                 visible = true;
                 break;
             }
@@ -713,18 +716,18 @@ static WifiConnResult connectSavedWifi(const ExternalRadioConfig *config)
         attempted[i] = true;
         ESP_LOGI(TAG, "trying saved Wi-Fi %u/%u: \"%s\"",
                  static_cast<unsigned>(i + 1U), static_cast<unsigned>(count),
-                 config->wifi_profiles[i].ssid);
-        last = wifiEnsureConnected(config->wifi_profiles[i].ssid,
-                                   config->wifi_profiles[i].password, 10000u);
+                 profiles[i].ssid);
+        last = wifiEnsureConnected(profiles[i].ssid,
+                                   profiles[i].password, 10000u);
         if (last == WIFI_CONN_OK || last == WIFI_ALREADY_ON_SSID) return last;
     }
     for (size_t i = 0; i < count; ++i) {
         if (attempted[i]) continue;
         ESP_LOGI(TAG, "trying hidden/unseen saved Wi-Fi %u/%u: \"%s\"",
                  static_cast<unsigned>(i + 1U), static_cast<unsigned>(count),
-                 config->wifi_profiles[i].ssid);
-        last = wifiEnsureConnected(config->wifi_profiles[i].ssid,
-                                   config->wifi_profiles[i].password, 10000u);
+                 profiles[i].ssid);
+        last = wifiEnsureConnected(profiles[i].ssid,
+                                   profiles[i].password, 10000u);
         if (last == WIFI_CONN_OK || last == WIFI_ALREADY_ON_SSID) return last;
     }
     return last;
@@ -763,16 +766,34 @@ static bool ensureNetworkAndUdp(void)
     const uint16_t server_port = (config != nullptr) ? config->server_port : static_cast<uint16_t>(NRL_AUDIO_SERVER_PORT);
     const uint16_t local_port = (config != nullptr) ? config->local_port : server_port;
 
-    // Ethernet is preferred. If its physical link is already up, allow DHCP to
-    // finish instead of immediately bringing up Wi-Fi and stealing the route.
-    if (!nrlNetworkConnected() && nrlEthernetLinkUp()) {
-        return false;
+    // Ethernet is preferred. If its physical link is already up, allow DHCP up
+    // to 15s to finish instead of immediately bringing up Wi-Fi and stealing
+    // the route, while still falling back to Wi-Fi if DHCP never completes.
+    static uint32_t s_eth_link_wait_start_ms = 0u;
+    constexpr uint32_t kEthDhcpGraceMs = 15000u;
+    if (!nrlNetworkConnected() && nrlEthernetLinkUp() && !nrlEthernetHasIp()) {
+        if (s_eth_link_wait_start_ms == 0u) {
+            s_eth_link_wait_start_ms = now;
+        }
+        if ((now - s_eth_link_wait_start_ms) < kEthDhcpGraceMs) {
+            return false;
+        }
+    } else {
+        s_eth_link_wait_start_ms = 0u;
     }
     if (!nrlNetworkConnected()) {
+        // When a user is actively connected to the fallback config AP, defer
+        // background active scans/reconnects (which hop channels and kick AP
+        // clients) unless fresh credentials were just submitted.
+        if (nrlWifiApIsActive() && nrlWifiApGetStationCount() > 0u && !s_force_wifi_connect) {
+            s_next_wifi_retry_ms = now + 15000u;
+            return false;
+        }
+        s_force_wifi_connect = false;
         const WifiConnResult result = connectSavedWifi(config);
         if (result != WIFI_CONN_OK && result != WIFI_ALREADY_ON_SSID) {
             if (s_wifi_connect_failures < 0xFFu) {
-                ++s_wifi_connect_failures;
+                s_wifi_connect_failures = static_cast<uint8_t>(s_wifi_connect_failures + 1u);
             }
             s_next_wifi_retry_ms = (uint32_t)(esp_timer_get_time() / 1000ULL) + kWifiRetryBackoffMs;
             if (s_wifi_connect_failures >= kWifiFallbackFailureThreshold) {
@@ -1155,20 +1176,26 @@ static void sendHeartbeat(void)
 static void restartTransport(const bool restart_wifi, const bool restart_udp)
 {
     if (restart_udp) {
+        const bool locked = (s_udp_mutex != nullptr &&
+                             xSemaphoreTake(s_udp_mutex, pdMS_TO_TICKS(100)) == pdTRUE);
         if (s_udp_fd >= 0) {
             close(s_udp_fd);
             s_udp_fd = -1;
         }
         s_udp_started = false;
         s_server_ip = 0u;
+        if (locked) {
+            xSemaphoreGive(s_udp_mutex);
+        }
     }
     if (restart_wifi) {
-        esp_wifi_disconnect();
+        nrlWifiDisconnect();
         // Clear the retry backoff and failure counter so the bridge task
         // tries the new credentials on its next loop iteration instead of
         // waiting out the 30s backoff from the previous bad SSID. Without
         // this, submitting a new SSID via the config portal silently waits
         // up to 30s before the device leaves AP fallback for STA.
+        s_force_wifi_connect = true;
         s_next_wifi_retry_ms = 0u;
         s_wifi_connect_failures = 0u;
     }

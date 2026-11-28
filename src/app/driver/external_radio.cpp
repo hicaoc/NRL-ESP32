@@ -22,6 +22,8 @@
 #include <esp_log.h>
 #include <esp_rom_crc.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/portmacro.h>
 #include <nvs.h>
 
 #include <ctype.h>
@@ -33,10 +35,12 @@ static const char *TAG = "IO";
 
 namespace {
 
+portMUX_TYPE s_wifi_profile_lock = portMUX_INITIALIZER_UNLOCKED;
+
 constexpr const char *kConfigNvsNamespace = "device_config";
 constexpr const char *kConfigNvsKey = "config";
 constexpr uint32_t kConfigMagic = 0x58455655U;
-constexpr uint8_t kConfigVersion = 8U;
+constexpr uint8_t kConfigVersion = 9U;
 constexpr uint8_t kLegacyConfigVersion1 = 1U;
 constexpr uint8_t kLegacyConfigVersion2 = 2U;
 constexpr uint8_t kLegacyConfigVersion3 = 3U;
@@ -44,25 +48,49 @@ constexpr uint8_t kLegacyConfigVersion4 = 4U;
 constexpr uint8_t kLegacyConfigVersion5 = 5U;
 constexpr uint8_t kLegacyConfigVersion6 = 6U;
 constexpr uint8_t kLegacyConfigVersion7 = 7U;
+constexpr uint8_t kLegacyConfigVersion8 = 8U;
 constexpr uint8_t kMinChannel = 0U;
 constexpr uint8_t kMaxChannel = 7U;
-// REG17 = ALC MAXGAIN when ALC is enabled (the new default). +32 dB lets the
-// ALC boost quiet talkers up to the target floor (-16.1 dBFS) without running
-// out of boost headroom. The MAXLEVEL target (-7.8 dBFS) prevents the ALC from
-// ever pushing loud input to digital full-scale.
-#if NRL_BOARD == NRL_BOARD_BH4TDV || NRL_BOARD == NRL_BOARD_BH4TDV_2900W
-constexpr uint8_t kDefaultMicVolume = 220U;
-constexpr uint8_t kDefaultLineOutVolume = 190U;
-constexpr uint8_t kDefaultAdcPgaGain = 8U;
-constexpr uint8_t kDefaultAdcScale = 0U;
+// ES8311 REG17 values >= 0xBB (187) enter an unstable digital-gain zone where
+// the ADC intermittently outputs all zeros (both with ALC off and when ALC
+// ramps internal gain up to MAXGAIN during silence or quiet input). Clamp
+// mic_volume to 0xBA (-2.5 dB) on boards whose mic ADC is the ES8311, while
+// keeping the full 0..255 range on ES7210 and ES8389 boards.
+//
+// ES8311 REG16 ADC_SCALE: at ADC_OSR=0x10 (our 16 kHz clock table), the
+// datasheet (Rev 16.0 p.22) recommends ADC_SCALE=4 (+24 dB, REG16=0x24) as
+// unity-gain compensation for the CIC decimator.
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311 && !NRL_HAS_ES7210
+#define NRL_ES8311_MIC_ADC 1
+constexpr uint8_t kMaxMicVolume = 0xBAU;
 #else
-constexpr uint8_t kDefaultMicVolume = 0xFFU;
+#define NRL_ES8311_MIC_ADC 0
+constexpr uint8_t kMaxMicVolume = 255U;
+#endif
+#if NRL_BOARD == NRL_BOARD_BH4TDV || NRL_BOARD == NRL_BOARD_BH4TDV_2900W
+constexpr uint8_t kDefaultMicVolume = kMaxMicVolume;
+constexpr uint8_t kDefaultLineOutVolume = 190U;
+// Radio line-level input (typically hundreds of mVpp): +12 dB PGA keeps full
+// scale near ~707 mVpp (vs ~178 mVpp at +24 dB) while ADC_SCALE=4 gives unity
+// CIC compensation (REG16=0x24).
+constexpr uint8_t kDefaultAdcPgaGain = 4U;
+constexpr uint8_t kDefaultAdcScale = 4U;
+#elif NRL_ES8311_MIC_ADC
+constexpr uint8_t kDefaultMicVolume = kMaxMicVolume;
 // REG32 DAC volume: 0xBF == 0 dB (unity digital gain). The FM8002E BTL power
 // amp then adds ~6 dB (typical Rf/Ri = 20k/20k in the BI4UMD / BH4TDV-RF
 // schematic) for a loud-but-headroomed speaker level.
 constexpr uint8_t kDefaultLineOutVolume = 0xBFU;
-constexpr uint8_t kDefaultAdcPgaGain = 10U;
-constexpr uint8_t kDefaultAdcScale = 7U;
+// Onboard analog MEMS/electret mic: +24 dB PGA + ADC_SCALE=4 (unity for
+// ADC_OSR=0x10) gives strong sensitivity without the +48 dB pre-ALC digital
+// clipping seen with PGA=10/SCALE=7.
+constexpr uint8_t kDefaultAdcPgaGain = 8U;
+constexpr uint8_t kDefaultAdcScale = 4U;
+#else
+constexpr uint8_t kDefaultMicVolume = 0xFFU;
+constexpr uint8_t kDefaultLineOutVolume = 0xBFU;
+constexpr uint8_t kDefaultAdcPgaGain = 4U;
+constexpr uint8_t kDefaultAdcScale = 4U;
 #endif
 constexpr uint16_t kDefaultMicPcmGainMilli = 1000U;
 constexpr uint16_t kMinMicPcmGainMilli = 100U;
@@ -753,6 +781,9 @@ static void normalizeConfig(void)
     s_config.daceq_b0 &= kDacEqCoefficientMask;
     s_config.daceq_b1 &= kDacEqCoefficientMask;
     s_config.daceq_a1 &= kDacEqCoefficientMask;
+    if (s_config.mic_volume > kMaxMicVolume) {
+        s_config.mic_volume = kMaxMicVolume;
+    }
     if (s_config.adc_pga_gain > 10U) {
         s_config.adc_pga_gain = 10U;
     }
@@ -868,6 +899,7 @@ static bool loadPersistedConfig(void)
                       kPersistedSqlExtensionBytes - kPersistedVoxExtensionBytes) ||
         persisted.magic != kConfigMagic ||
         (persisted.version != kConfigVersion &&
+         persisted.version != kLegacyConfigVersion8 &&
          persisted.version != kLegacyConfigVersion7 &&
          persisted.version != kLegacyConfigVersion6 &&
          persisted.version != kLegacyConfigVersion5 &&
@@ -903,12 +935,16 @@ static bool loadPersistedConfig(void)
     // Legacy configs carried suboptimal speaker/mic defaults:
     //   v1..v7: line_out_volume = 180 (0xB4 = -5.5 dB, speaker too quiet)
     //   v1..v7: dac_ramprate = 0 (zipper/pop on AT+VOLUME / unmute)
-    //   v1..v6: mic gain chain was the old 30 dB PGA + 24 dB scale path
-    // Force the tuned v8 mic/line defaults so BH4TDV-RF / BI4UMD boards pick
-    // up the fix without a manual EXTERNAL_RADIO_ResetAudioConfig().
-    if (persisted.version != kConfigVersion) {
+    //   v1..v8 (ES8311 mic boards): REG17 > 0xBA (ADC zero-output erratum) and
+    //     ADC_SCALE mismatched with ADC_OSR=0x10 (0 or 7 instead of 4).
+    // Preserve v8 speaker volume/DRC while migrating ES8311 ADC defaults.
+    if (persisted.version < kLegacyConfigVersion8) {
         s_config.mic_volume = kDefaultMicVolume;
         s_config.line_out_volume = kDefaultLineOutVolume;
+    } else if (persisted.version != kConfigVersion) {
+#if NRL_ES8311_MIC_ADC
+        s_config.mic_volume = kDefaultMicVolume;
+#endif
     }
     s_config.hp_drive_enabled = persisted.reserved[0] == kPersistedHpDriveOn;
     s_config.sci.data_bits = persisted.reserved[1];
@@ -934,9 +970,9 @@ static bool loadPersistedConfig(void)
     }
     copyBounded(s_config.server_host, sizeof(s_config.server_host), persisted.server_host);
     copyBounded(s_config.callsign, sizeof(s_config.callsign), persisted.callsign);
-    // Only the current (v8) config carries DRC/dac_ramprate values worth
-    // restoring. Legacy layouts stored dac_ramprate=0 and all-zero DRC levels.
-    if (persisted.version == kConfigVersion) {
+    // Only v8+ configs carry DRC/dac_ramprate values worth restoring.
+    // Earlier layouts stored dac_ramprate=0 and all-zero DRC levels.
+    if (persisted.version >= kLegacyConfigVersion8) {
         s_config.drc_enabled = persisted.drc_enabled == kPersistedFlagOn;
         s_config.drc_winsize = persisted.drc_winsize;
         s_config.drc_maxlevel = persisted.drc_maxlevel;
@@ -1283,12 +1319,14 @@ const ExternalRadioConfig *EXTERNAL_RADIO_GetConfig(void)
 bool EXTERNAL_RADIO_SetWifiSsid(const char *value, const bool persist)
 {
     EXTERNAL_RADIO_Init();
-    if (!updateStringField(s_config.wifi_ssid, sizeof(s_config.wifi_ssid), value, false) ||
-        s_config.wifi_ssid[0] == '\0') {
+    char clean[sizeof(s_config.wifi_ssid)] = {};
+    if (!updateStringField(clean, sizeof(clean), value, false) || clean[0] == '\0') {
         return false;
     }
-    copyBounded(s_config.wifi_profiles[0].ssid, sizeof(s_config.wifi_profiles[0].ssid),
-                s_config.wifi_ssid);
+    portENTER_CRITICAL(&s_wifi_profile_lock);
+    copyBounded(s_config.wifi_ssid, sizeof(s_config.wifi_ssid), clean);
+    copyBounded(s_config.wifi_profiles[0].ssid, sizeof(s_config.wifi_profiles[0].ssid), clean);
+    portEXIT_CRITICAL(&s_wifi_profile_lock);
     if (persist) {
         return savePersistedConfig();
     }
@@ -1298,22 +1336,46 @@ bool EXTERNAL_RADIO_SetWifiSsid(const char *value, const bool persist)
 bool EXTERNAL_RADIO_SetWifiPassword(const char *value, const bool persist)
 {
     EXTERNAL_RADIO_Init();
-    if (!updateStringField(s_config.wifi_password, sizeof(s_config.wifi_password), value, false)) {
+    char clean[sizeof(s_config.wifi_password)] = {};
+    if (!updateStringField(clean, sizeof(clean), value, false)) {
         return false;
     }
+    portENTER_CRITICAL(&s_wifi_profile_lock);
+    copyBounded(s_config.wifi_password, sizeof(s_config.wifi_password), clean);
     copyBounded(s_config.wifi_profiles[0].password,
-                sizeof(s_config.wifi_profiles[0].password), s_config.wifi_password);
+                sizeof(s_config.wifi_profiles[0].password), clean);
+    portEXIT_CRITICAL(&s_wifi_profile_lock);
     return !persist || savePersistedConfig();
 }
 
 size_t EXTERNAL_RADIO_GetWifiProfileCount(void)
 {
     EXTERNAL_RADIO_Init();
+    portENTER_CRITICAL(&s_wifi_profile_lock);
     size_t count = 0U;
     while (count < EXTERNAL_RADIO_MAX_WIFI_PROFILES &&
            s_config.wifi_profiles[count].ssid[0] != '\0') {
         ++count;
     }
+    portEXIT_CRITICAL(&s_wifi_profile_lock);
+    return count;
+}
+
+size_t EXTERNAL_RADIO_GetWifiProfilesSnapshot(ExternalWifiProfile *out, const size_t max_count)
+{
+    EXTERNAL_RADIO_Init();
+    if (out == nullptr || max_count == 0U) {
+        return 0U;
+    }
+    portENTER_CRITICAL(&s_wifi_profile_lock);
+    size_t count = 0U;
+    while (count < EXTERNAL_RADIO_MAX_WIFI_PROFILES &&
+           count < max_count &&
+           s_config.wifi_profiles[count].ssid[0] != '\0') {
+        out[count] = s_config.wifi_profiles[count];
+        ++count;
+    }
+    portEXIT_CRITICAL(&s_wifi_profile_lock);
     return count;
 }
 
@@ -1332,6 +1394,7 @@ bool EXTERNAL_RADIO_AddWifiProfile(const char *ssid, const char *password, const
     sanitizeString(clean_password);
     if (clean_ssid[0] == '\0') return false;
 
+    portENTER_CRITICAL(&s_wifi_profile_lock);
     size_t index = EXTERNAL_RADIO_MAX_WIFI_PROFILES;
     for (size_t i = 0; i < EXTERNAL_RADIO_MAX_WIFI_PROFILES; ++i) {
         if (strcmp(s_config.wifi_profiles[i].ssid, clean_ssid) == 0) {
@@ -1343,7 +1406,10 @@ bool EXTERNAL_RADIO_AddWifiProfile(const char *ssid, const char *password, const
             index = i;
         }
     }
-    if (index >= EXTERNAL_RADIO_MAX_WIFI_PROFILES) return false;
+    if (index >= EXTERNAL_RADIO_MAX_WIFI_PROFILES) {
+        portEXIT_CRITICAL(&s_wifi_profile_lock);
+        return false;
+    }
     copyBounded(s_config.wifi_profiles[index].ssid,
                 sizeof(s_config.wifi_profiles[index].ssid), clean_ssid);
     copyBounded(s_config.wifi_profiles[index].password,
@@ -1352,14 +1418,23 @@ bool EXTERNAL_RADIO_AddWifiProfile(const char *ssid, const char *password, const
         copyBounded(s_config.wifi_ssid, sizeof(s_config.wifi_ssid), clean_ssid);
         copyBounded(s_config.wifi_password, sizeof(s_config.wifi_password), clean_password);
     }
+    portEXIT_CRITICAL(&s_wifi_profile_lock);
     return !persist || savePersistedConfig();
 }
 
 bool EXTERNAL_RADIO_RemoveWifiProfile(const size_t index, const bool persist)
 {
     EXTERNAL_RADIO_Init();
-    const size_t count = EXTERNAL_RADIO_GetWifiProfileCount();
-    if (index >= count) return false;
+    portENTER_CRITICAL(&s_wifi_profile_lock);
+    size_t count = 0U;
+    while (count < EXTERNAL_RADIO_MAX_WIFI_PROFILES &&
+           s_config.wifi_profiles[count].ssid[0] != '\0') {
+        ++count;
+    }
+    if (index >= count) {
+        portEXIT_CRITICAL(&s_wifi_profile_lock);
+        return false;
+    }
     for (size_t i = index; i + 1U < EXTERNAL_RADIO_MAX_WIFI_PROFILES; ++i) {
         s_config.wifi_profiles[i] = s_config.wifi_profiles[i + 1U];
     }
@@ -1369,15 +1444,24 @@ bool EXTERNAL_RADIO_RemoveWifiProfile(const size_t index, const bool persist)
                 s_config.wifi_profiles[0].ssid);
     copyBounded(s_config.wifi_password, sizeof(s_config.wifi_password),
                 s_config.wifi_profiles[0].password);
+    portEXIT_CRITICAL(&s_wifi_profile_lock);
     return !persist || savePersistedConfig();
 }
 
 bool EXTERNAL_RADIO_MoveWifiProfile(const size_t index, const int direction, const bool persist)
 {
     EXTERNAL_RADIO_Init();
-    const size_t count = EXTERNAL_RADIO_GetWifiProfileCount();
-    if (index >= count || (direction != -1 && direction != 1)) return false;
-    if ((direction < 0 && index == 0U) || (direction > 0 && index + 1U >= count)) {
+    if (direction != -1 && direction != 1) return false;
+    portENTER_CRITICAL(&s_wifi_profile_lock);
+    size_t count = 0U;
+    while (count < EXTERNAL_RADIO_MAX_WIFI_PROFILES &&
+           s_config.wifi_profiles[count].ssid[0] != '\0') {
+        ++count;
+    }
+    if (index >= count ||
+        (direction < 0 && index == 0U) ||
+        (direction > 0 && index + 1U >= count)) {
+        portEXIT_CRITICAL(&s_wifi_profile_lock);
         return false;
     }
     const size_t other = direction < 0 ? index - 1U : index + 1U;
@@ -1388,6 +1472,7 @@ bool EXTERNAL_RADIO_MoveWifiProfile(const size_t index, const int direction, con
                 s_config.wifi_profiles[0].ssid);
     copyBounded(s_config.wifi_password, sizeof(s_config.wifi_password),
                 s_config.wifi_profiles[0].password);
+    portEXIT_CRITICAL(&s_wifi_profile_lock);
     return !persist || savePersistedConfig();
 }
 
@@ -1536,7 +1621,7 @@ bool EXTERNAL_RADIO_SetCallsignSsid(const uint8_t value, const bool persist)
 bool EXTERNAL_RADIO_SetMicVolume(const uint8_t value, const bool persist)
 {
     EXTERNAL_RADIO_Init();
-    s_config.mic_volume = value;
+    s_config.mic_volume = value > kMaxMicVolume ? kMaxMicVolume : value;
     applyAudioConfigToCodec();
     if (persist) {
         return savePersistedConfig();

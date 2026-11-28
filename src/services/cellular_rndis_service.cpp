@@ -30,6 +30,19 @@ volatile bool s_started = false;
 volatile bool s_link_up = false;
 volatile bool s_has_ip = false;
 
+static void restoreFallbackDefaultNetif()
+{
+    if (esp_netif_t *eth = esp_netif_get_handle_from_ifkey("ETH_DEF");
+        eth != nullptr && esp_netif_is_netif_up(eth)) {
+        (void)esp_netif_set_default_netif(eth);
+        return;
+    }
+    if (esp_netif_t *wifi = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        wifi != nullptr && esp_netif_is_netif_up(wifi)) {
+        (void)esp_netif_set_default_netif(wifi);
+    }
+}
+
 static void rndisEvent(void *, esp_event_base_t, int32_t event_id, void *)
 {
     switch (event_id) {
@@ -45,12 +58,14 @@ static void rndisEvent(void *, esp_event_base_t, int32_t event_id, void *)
         s_link_up = false;
         s_has_ip = false;
         ESP_LOGW(TAG, "ML307R RNDIS link down");
+        restoreFallbackDefaultNetif();
         break;
     case IOT_ETH_EVENT_STOP:
         s_started = false;
         s_link_up = false;
         s_has_ip = false;
         ESP_LOGI(TAG, "RNDIS driver stopped");
+        restoreFallbackDefaultNetif();
         break;
     default:
         break;
@@ -60,6 +75,9 @@ static void rndisEvent(void *, esp_event_base_t, int32_t event_id, void *)
 static void rndisGotIp(void *, esp_event_base_t, int32_t, void *event_data)
 {
     const auto *event = static_cast<ip_event_got_ip_t *>(event_data);
+    if (event == nullptr || event->esp_netif != s_netif) {
+        return;
+    }
     s_has_ip = true;
     if (s_netif != nullptr) {
         (void)esp_netif_set_default_netif(s_netif);

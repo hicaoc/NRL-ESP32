@@ -90,10 +90,13 @@ enum : uint8_t {
 
 constexpr uint8_t kEs8311ClockEnableAll = 0x3F;
 constexpr uint8_t kDefaultAdcRamprate = 0x04;
-// REG17 acts as ALC MAXGAIN when ALC is enabled (default below). +32 dB gives
-// the ALC plenty of boost room for quiet talkers without saturating the ADC
-// (the analog PGA + ADC full-scale ceiling is what limits loud input).
-constexpr uint8_t kEs8311AdcVolumeDefault = 0xFFU;
+// Field-verified ES8311 erratum: REG17 values >= 0xBB (187) enter an unstable
+// digital-gain zone where the ADC intermittently outputs all zeros (both with
+// ALC off and when ALC ramps internal gain up to MAXGAIN during silence or
+// quiet input). Clamping REG17 at 0xBA (-2.5 dB) keeps the ADC out of that
+// cliff while leaving full analog PGA + ADC_SCALE + software PCM gain headroom.
+constexpr uint8_t kEs8311AdcVolumeMax = 0xBAU;
+constexpr uint8_t kEs8311AdcVolumeDefault = kEs8311AdcVolumeMax;
 // REG32 DAC volume: 0xBF == 0 dB (unity digital gain). Previous default of
 // 180 (0xB4 == -5.5 dB) made the speaker quieter than necessary with the
 // FM8002E BTL power amp (gain ~6 dB in the typical BI4UMD / BH4TDV-RF schematic).
@@ -106,6 +109,7 @@ constexpr uint8_t kEs8311DacVolumeDefault = 0xBFU;
 // NOTE: PDN_VREF (bit 2) has REVERSE polarity vs other PDN bits!
 //   0 = disable internal reference (BAD), 1 = enable reference
 // VMIDSEL: 0=down, 1=startup normal charge, 2=normal operation, 3=startup fast.
+constexpr uint8_t kEs8311PowerUpAnalogFastCharge = 0x07;
 constexpr uint8_t kEs8311PowerUpAnalog = 0x06;
 constexpr uint8_t kEs8311PowerUpPgaAdc = 0x02;
 constexpr uint8_t kEs8311PowerUpDac = 0x00;
@@ -184,10 +188,9 @@ static bool s_adc_dmic_sense = false;
 static bool s_adc_sync = true;
 static bool s_adc_inv = false;
 static bool s_adc_ramclr = false;
-// ADC_SCALE = 0 dB (was 24 dB). The 24 dB digital scale sat *before* the ALC
-// in the data path, so loud input clipped at the digital stage before ALC
-// could react. With ALC enabled there is no need for an extra digital scale.
-static uint8_t s_adc_scale = 0U;
+// ADC_SCALE = 4 (+24 dB): ES8311 datasheet Rev 16.0 recommended unity-gain
+// compensation for ADC_OSR = 0x10 (REG03 = 0x10), matching ESP-ADF REG16=0x24.
+static uint8_t s_adc_scale = 4U;
 // ALC enabled by default: boosts quiet talkers up to MINLEVEL and compresses
 // loud input down to MAXLEVEL, so the mic is neither too quiet nor clipping.
 static bool s_alc_enabled = true;
@@ -472,24 +475,33 @@ static uint8_t es8311_adc_reg16(void) {
                                 (s_adc_scale & 0x07u));
 }
 
+static uint8_t es8311_adc_reg17(void) {
+    return s_mic_volume > kEs8311AdcVolumeMax ? kEs8311AdcVolumeMax : s_mic_volume;
+}
+
 static uint8_t es8311_adc_reg18(void) {
-    return static_cast<uint8_t>((s_alc_enabled ? 0x80u : 0x00u) |
-                                (s_adc_automute_enabled ? 0x40u : 0x00u) |
-                                (s_alc_winsize & 0x0Fu));
+    // Mirror es8311_drc_reg34(): clear ALC_WINSIZE when ALC is disabled so no
+    // stale nonzero winsize lingers in the DSP when the user turns ALC off.
+    return static_cast<uint8_t>((s_alc_enabled ? (0x80u | (s_alc_winsize & 0x0Fu)) : 0x00u) |
+                                (s_adc_automute_enabled ? 0x40u : 0x00u));
 }
 
 static uint8_t es8311_adc_reg19(void) {
-    return static_cast<uint8_t>(((s_alc_maxlevel & 0x0Fu) << 4) |
-                                (s_alc_minlevel & 0x0Fu));
+    return s_alc_enabled ? static_cast<uint8_t>(((s_alc_maxlevel & 0x0Fu) << 4) |
+                                                (s_alc_minlevel & 0x0Fu))
+                         : 0x00u;
 }
 
 static uint8_t es8311_adc_reg1a(void) {
-    return static_cast<uint8_t>(((s_adc_automute_winsize & 0x0Fu) << 4) |
-                                (s_adc_automute_noise_gate & 0x0Fu));
+    return s_adc_automute_enabled
+               ? static_cast<uint8_t>(((s_adc_automute_winsize & 0x0Fu) << 4) |
+                                      (s_adc_automute_noise_gate & 0x0Fu))
+               : 0x00u;
 }
 
 static uint8_t es8311_adc_reg1b(void) {
-    return static_cast<uint8_t>(((s_adc_automute_volume & 0x07u) << 5) |
+    const uint8_t am_vol = s_adc_automute_enabled ? (s_adc_automute_volume & 0x07u) : 0x00u;
+    return static_cast<uint8_t>((am_vol << 5) |
                                 (s_adc_hpfs1 & 0x1Fu));
 }
 
@@ -674,10 +686,6 @@ static bool es8311_configure_codec(void) {
         return false;
     }
 
-    if (!es8311_write_reg(ES8311_REG17_ADC, s_mic_volume)) {
-        ESP_LOGI(TAG, "REG17 ADC volume failed");
-        return false;
-    }
     if (!es8311_write_reg(ES8311_REG0E_SYSTEM, kEs8311PowerUpPgaAdc)) {
         ESP_LOGI(TAG, "REG0E power-up PGA/ADC failed");
         return false;
@@ -690,14 +698,25 @@ static bool es8311_configure_codec(void) {
         ESP_LOGI(TAG, "REG14 analog mic PGA failed");
         return false;
     }
+    // Fast-charge VMID (VMIDSEL=3, PDN_VREF=1) before switching to normal
+    // high-impedance VMID operation (VMIDSEL=2).
+    if (!es8311_write_reg(ES8311_REG0D_SYSTEM, kEs8311PowerUpAnalogFastCharge)) {
+        ESP_LOGI(TAG, "REG0D fast-charge analog failed");
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(40));
     if (!es8311_write_reg(ES8311_REG0D_SYSTEM, kEs8311PowerUpAnalog)) {
         ESP_LOGI(TAG, "REG0D power-up analog failed");
         return false;
     }
-    // VMID needs ~tens of ms to charge up after enabling the analog block.
-    vTaskDelay(pdMS_TO_TICKS(40));
+    // Program REG14..REG1C (including ALC_EN in REG18) BEFORE REG17 so the
+    // ADC never runs a boot window with an unconfigured ALC state and REG17.
     if (!es8311_apply_adc_config()) {
         ESP_LOGI(TAG, "REG15 ADC ramp rate failed");
+        return false;
+    }
+    if (!es8311_write_reg(ES8311_REG17_ADC, es8311_adc_reg17())) {
+        ESP_LOGI(TAG, "REG17 ADC volume failed");
         return false;
     }
     if (!es8311_apply_drc_config() || !es8311_apply_daceq_coefficients()) {
@@ -1040,14 +1059,14 @@ extern "C" bool ES8311_ApplyAudioConfig(const uint8_t mic_volume,
     }
 
     const bool ok =
-        es8311_write_reg(ES8311_REG17_ADC, s_mic_volume) &&
         es8311_config_dac_output_path(kEs8311PowerUpDac,
                                       es8311_output_drive_reg(),
                                       kEs8311DacUnmute,
                                       s_line_out_volume) &&
         es8311_apply_drc_config() &&
         es8311_apply_daceq_coefficients() &&
-        es8311_apply_adc_config();
+        es8311_apply_adc_config() &&
+        es8311_write_reg(ES8311_REG17_ADC, es8311_adc_reg17());
     if (!ok) {
         ESP_LOGI(TAG, "audio config apply failed");
     }

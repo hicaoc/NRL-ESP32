@@ -154,6 +154,7 @@ const ExternalRadioConfig *EXTERNAL_RADIO_GetConfig(void);
 bool EXTERNAL_RADIO_SetWifiSsid(const char *value, bool persist);
 bool EXTERNAL_RADIO_SetWifiPassword(const char *value, bool persist);
 size_t EXTERNAL_RADIO_GetWifiProfileCount(void);
+size_t EXTERNAL_RADIO_GetWifiProfilesSnapshot(ExternalWifiProfile *out, size_t max_count);
 bool EXTERNAL_RADIO_AddWifiProfile(const char *ssid, const char *password, bool persist);
 bool EXTERNAL_RADIO_RemoveWifiProfile(size_t index, bool persist);
 bool EXTERNAL_RADIO_MoveWifiProfile(size_t index, int direction, bool persist);

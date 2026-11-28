@@ -56,6 +56,7 @@
     hpDriveText: '启用耳机输出驱动 (REG13 HPSW)',
     audio: '音频',
     micVolume: '麦克风音量 (0-255)',
+    micVolumeEs8311: '麦克风音量 (0-186)',
     micPcmGain: '麦克风 PCM 增益 (0.1-5.0 倍)',
     lineOutVolume: '线路输出音量 (0-255)',
     volume: '音量',

@@ -2,6 +2,8 @@
 
 #include <esp_log.h>
 #include <fcntl.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <lwip/sockets.h>
 #include <string.h>
 #include <unistd.h>
@@ -12,6 +14,7 @@ namespace {
 
 constexpr uint16_t kDnsPort = 53;
 constexpr size_t kDnsBufferSize = 512;
+constexpr int kMaxPacketsPerPoll = 16;
 constexpr uint16_t kFlagResponse = 0x8000;
 constexpr uint16_t kFlagAuthoritative = 0x0400;
 constexpr uint16_t kFlagRD = 0x0100;
@@ -20,8 +23,23 @@ constexpr uint16_t kQTypeA = 1;
 constexpr uint16_t kQClassIN = 1;
 constexpr uint32_t kAnswerTtlSeconds = 60;
 
+portMUX_TYPE s_dns_init_spin = portMUX_INITIALIZER_UNLOCKED;
+StaticSemaphore_t s_dns_mutex_buf;
+SemaphoreHandle_t s_dns_mutex = nullptr;
 int s_socket = -1;
 uint32_t s_ap_ip_net = 0u;
+
+static SemaphoreHandle_t getDnsMutex(void)
+{
+    if (s_dns_mutex == nullptr) {
+        portENTER_CRITICAL(&s_dns_init_spin);
+        if (s_dns_mutex == nullptr) {
+            s_dns_mutex = xSemaphoreCreateMutexStatic(&s_dns_mutex_buf);
+        }
+        portEXIT_CRITICAL(&s_dns_init_spin);
+    }
+    return s_dns_mutex;
+}
 
 static uint16_t readBe16(const uint8_t *p)
 {
@@ -67,7 +85,7 @@ static size_t skipName(const uint8_t *buf, size_t off, size_t len)
 // Returns the response size, or 0 on malformed/unsupported input.
 static size_t buildReply(const uint8_t *query, size_t qlen, uint8_t *out, size_t out_capacity)
 {
-    if (qlen < 12 || out_capacity < qlen + 16) {
+    if (qlen < 12) {
         return 0u;
     }
 
@@ -85,6 +103,9 @@ static size_t buildReply(const uint8_t *query, size_t qlen, uint8_t *out, size_t
     const uint16_t qtype = readBe16(query + name_end);
     const uint16_t qclass = readBe16(query + name_end + 2u);
     const size_t question_end = name_end + 4u;
+    if (question_end > out_capacity) {
+        return 0u;
+    }
 
     // Copy the request verbatim (header + question), patch the flags + counts,
     // and append the answer.
@@ -127,14 +148,25 @@ static size_t buildReply(const uint8_t *query, size_t qlen, uint8_t *out, size_t
 
 extern "C" bool NRL_CaptiveDNS_Start(uint32_t ap_ip)
 {
+    SemaphoreHandle_t mtx = getDnsMutex();
+    if (mtx != nullptr) {
+        xSemaphoreTake(mtx, portMAX_DELAY);
+    }
+
     if (s_socket >= 0) {
         s_ap_ip_net = ap_ip;
+        if (mtx != nullptr) {
+            xSemaphoreGive(mtx);
+        }
         return true;
     }
 
     s_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s_socket < 0) {
         ESP_LOGE(TAG, "socket() failed");
+        if (mtx != nullptr) {
+            xSemaphoreGive(mtx);
+        }
         return false;
     }
 
@@ -146,6 +178,9 @@ extern "C" bool NRL_CaptiveDNS_Start(uint32_t ap_ip)
         ESP_LOGE(TAG, "bind(53) failed");
         close(s_socket);
         s_socket = -1;
+        if (mtx != nullptr) {
+            xSemaphoreGive(mtx);
+        }
         return false;
     }
 
@@ -154,17 +189,30 @@ extern "C" bool NRL_CaptiveDNS_Start(uint32_t ap_ip)
         ESP_LOGE(TAG, "set O_NONBLOCK failed");
         close(s_socket);
         s_socket = -1;
+        if (mtx != nullptr) {
+            xSemaphoreGive(mtx);
+        }
         return false;
     }
 
     s_ap_ip_net = ap_ip;
+    if (mtx != nullptr) {
+        xSemaphoreGive(mtx);
+    }
     ESP_LOGI(TAG, "captive DNS listening on UDP/53");
     return true;
 }
 
 extern "C" int NRL_CaptiveDNS_Poll(void)
 {
+    SemaphoreHandle_t mtx = getDnsMutex();
+    if (mtx != nullptr && xSemaphoreTake(mtx, 0) != pdTRUE) {
+        return 0;
+    }
     if (s_socket < 0) {
+        if (mtx != nullptr) {
+            xSemaphoreGive(mtx);
+        }
         return 0;
     }
 
@@ -172,7 +220,7 @@ extern "C" int NRL_CaptiveDNS_Poll(void)
     uint8_t rx[kDnsBufferSize];
     uint8_t tx[kDnsBufferSize];
 
-    while (true) {
+    for (int handled = 0; handled < kMaxPacketsPerPoll; ++handled) {
         struct sockaddr_in from = {};
         socklen_t from_len = sizeof(from);
         const ssize_t got = recvfrom(s_socket,
@@ -199,19 +247,37 @@ extern "C" int NRL_CaptiveDNS_Poll(void)
             ++replies;
         }
     }
+    if (mtx != nullptr) {
+        xSemaphoreGive(mtx);
+    }
     return replies;
 }
 
 extern "C" void NRL_CaptiveDNS_Stop(void)
 {
+    SemaphoreHandle_t mtx = getDnsMutex();
+    if (mtx != nullptr) {
+        xSemaphoreTake(mtx, portMAX_DELAY);
+    }
     if (s_socket >= 0) {
         close(s_socket);
         s_socket = -1;
         ESP_LOGI(TAG, "captive DNS stopped");
     }
+    if (mtx != nullptr) {
+        xSemaphoreGive(mtx);
+    }
 }
 
 extern "C" bool NRL_CaptiveDNS_IsRunning(void)
 {
-    return s_socket >= 0;
+    SemaphoreHandle_t mtx = getDnsMutex();
+    if (mtx != nullptr) {
+        xSemaphoreTake(mtx, portMAX_DELAY);
+    }
+    const bool running = (s_socket >= 0);
+    if (mtx != nullptr) {
+        xSemaphoreGive(mtx);
+    }
+    return running;
 }

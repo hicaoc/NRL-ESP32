@@ -1,5 +1,6 @@
 #include "nrl_wifi.h"
 
+#include "ble_config.h"
 #include "nrl_bt_hfp.h"
 #include "nrl_hostname.h"
 #include "nrl_mdns.h"
@@ -20,6 +21,7 @@
 #include <lwip/sockets.h>
 #include <nvs_flash.h>
 
+#include <atomic>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -32,28 +34,115 @@ namespace
 {
 
     constexpr size_t kScanCacheMax = 24u;
+    constexpr uint16_t kScanFetchMax = 32u;
+
+    portMUX_TYPE s_mutex_init_spin = portMUX_INITIALIZER_UNLOCKED;
+    StaticSemaphore_t s_wifi_mutex_buf;
+    SemaphoreHandle_t s_wifi_mutex = nullptr;
+    StaticSemaphore_t s_scan_done_buf;
+    SemaphoreHandle_t s_scan_done = nullptr;
+    StaticSemaphore_t s_scan_mutex_buf;
+    SemaphoreHandle_t s_scan_mutex = nullptr;
 
     bool s_inited = false;
     bool s_started = false;
     esp_netif_t *s_sta_netif = nullptr;
     esp_netif_t *s_ap_netif = nullptr;
 
-    bool s_sta_active = false; // STA mode requested
-    bool s_ap_active = false;  // AP mode requested
+    volatile bool s_sta_active = false; // STA mode requested
+    volatile bool s_ap_active = false;  // AP mode requested
 
     volatile bool s_sta_associated = false;
     volatile bool s_sta_has_ip = false;
     volatile uint8_t s_last_disconnect_reason = 0u;
+    std::atomic<uint32_t> s_disconnect_count{0u};
+    std::atomic<uint32_t> s_connect_abort_gen{0u};
+
+    // Last successfully applied STA connection parameters, used to ensure
+    // WIFI_ALREADY_ON_SSID is not returned when password or IP config changed.
+    bool s_last_sta_valid = false;
+    char s_last_sta_ssid[33] = {};
+    char s_last_sta_pass[65] = {};
+    bool s_last_sta_dhcp = true;
+    uint32_t s_last_sta_ip = 0u;
+    uint32_t s_last_sta_mask = 0u;
+    uint32_t s_last_sta_gw = 0u;
+    uint32_t s_last_sta_dns = 0u;
 
     NrlWifiScanResult s_scan_cache[kScanCacheMax];
     size_t s_scan_count = 0u;
-    SemaphoreHandle_t s_scan_done = nullptr;
-    SemaphoreHandle_t s_scan_mutex = nullptr;
-    volatile bool s_scan_in_progress = false;
+
+    static void ensureSyncObjects()
+    {
+        if (s_wifi_mutex != nullptr && s_scan_done != nullptr && s_scan_mutex != nullptr)
+        {
+            return;
+        }
+        portENTER_CRITICAL(&s_mutex_init_spin);
+        if (s_wifi_mutex == nullptr)
+        {
+            s_wifi_mutex = xSemaphoreCreateRecursiveMutexStatic(&s_wifi_mutex_buf);
+        }
+        if (s_scan_done == nullptr)
+        {
+            s_scan_done = xSemaphoreCreateBinaryStatic(&s_scan_done_buf);
+        }
+        if (s_scan_mutex == nullptr)
+        {
+            s_scan_mutex = xSemaphoreCreateMutexStatic(&s_scan_mutex_buf);
+        }
+        portEXIT_CRITICAL(&s_mutex_init_spin);
+    }
+
+    class WifiLockGuard
+    {
+    public:
+        explicit WifiLockGuard(TickType_t timeout = portMAX_DELAY)
+        {
+            ensureSyncObjects();
+            if (s_wifi_mutex != nullptr)
+            {
+                m_locked = (xSemaphoreTakeRecursive(s_wifi_mutex, timeout) == pdTRUE);
+            }
+        }
+        ~WifiLockGuard()
+        {
+            if (m_locked && s_wifi_mutex != nullptr)
+            {
+                xSemaphoreGiveRecursive(s_wifi_mutex);
+            }
+        }
+        bool locked() const { return m_locked; }
+
+    private:
+        bool m_locked = false;
+    };
 
     static inline uint32_t nowMs()
     {
         return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+    }
+
+    static void invalidateLastStaConfig()
+    {
+        s_last_sta_valid = false;
+        s_last_sta_ssid[0] = '\0';
+        s_last_sta_pass[0] = '\0';
+    }
+
+    static bool isTerminalConnectReason(uint8_t reason)
+    {
+        switch (reason)
+        {
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:
+        case WIFI_REASON_AUTH_FAIL:
+        case WIFI_REASON_MIC_FAILURE:
+        case WIFI_REASON_NO_AP_FOUND:
+            return true;
+        default:
+            return false;
+        }
     }
 
     static const char *disconnectReasonText(uint8_t reason)
@@ -64,6 +153,8 @@ namespace
             return "AUTH_EXPIRE";
         case WIFI_REASON_AUTH_LEAVE:
             return "AUTH_LEAVE";
+        case WIFI_REASON_AUTH_FAIL:
+            return "AUTH_FAIL";
         case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
             return "4WAY_HANDSHAKE_TIMEOUT(wrong pass?)";
         case WIFI_REASON_NO_AP_FOUND:
@@ -76,6 +167,8 @@ namespace
 #endif
         case WIFI_REASON_HANDSHAKE_TIMEOUT:
             return "HANDSHAKE_TIMEOUT";
+        case WIFI_REASON_MIC_FAILURE:
+            return "MIC_FAILURE";
         default:
             return "OTHER";
         }
@@ -111,13 +204,13 @@ namespace
                 s_sta_associated = false;
                 s_sta_has_ip = false;
                 s_last_disconnect_reason = e->reason;
-                int rssi = 0;
-                (void)esp_wifi_sta_get_rssi(&rssi);
+                s_disconnect_count.fetch_add(1u, std::memory_order_relaxed);
                 // Heap snapshot pins "driver starved of internal RAM"
                 // vs RF/software causes when the link drops mid-traffic.
                 ESP_LOGW(TAG, "evt STA_DISCONNECTED reason=%u (%s) rssi=%d dram free=%u largest=%u min=%u",
                          static_cast<unsigned>(e->reason),
-                         disconnectReasonText(e->reason), rssi,
+                         disconnectReasonText(e->reason),
+                         static_cast<int>(e->rssi),
                          static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
                          static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
                          static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)));
@@ -144,14 +237,10 @@ namespace
                 break;
             }
             case WIFI_EVENT_SCAN_DONE:
+                // Default event loop runs in task context (sys_evt), not an ISR.
                 if (s_scan_done != nullptr)
                 {
-                    BaseType_t hp_woken = pdFALSE;
-                    xSemaphoreGiveFromISR(s_scan_done, &hp_woken);
-                    if (hp_woken == pdTRUE)
-                    {
-                        portYIELD_FROM_ISR();
-                    }
+                    xSemaphoreGive(s_scan_done);
                 }
                 break;
             default:
@@ -176,6 +265,40 @@ namespace
         }
     }
 
+    static void applyStaRadioPolicy(wifi_mode_t mode)
+    {
+        if (!s_started || (mode != WIFI_MODE_STA && mode != WIFI_MODE_APSTA))
+        {
+            return;
+        }
+        // Disable WiFi modem sleep for low-latency 20 ms G.711 voice unless BT
+        // or BLE shares the single 2.4 GHz radio:
+        // - Classic BT HFP SCO requires WIFI_PS_MAX_MODEM to avoid coex timeouts.
+        // - BLE provisioning requires at least WIFI_PS_MIN_MODEM per ESP-IDF coex.
+        wifi_ps_type_t ps = WIFI_PS_NONE;
+        if (NRL_BtHfp_IsEnabled())
+        {
+            ps = WIFI_PS_MAX_MODEM;
+        }
+        else if (BLEConfig_IsReady())
+        {
+            ps = WIFI_PS_MIN_MODEM;
+        }
+        const esp_err_t ps_err = esp_wifi_set_ps(ps);
+        if (ps_err != ESP_OK)
+        {
+            ESP_LOGW(TAG, "esp_wifi_set_ps(%d) failed: %s",
+                     static_cast<int>(ps), esp_err_to_name(ps_err));
+        }
+
+        // Must be called after esp_wifi_start() and only when STA is active.
+        const esp_err_t ret = esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW20);
+        if (ret != ESP_OK)
+        {
+            ESP_LOGW(TAG, "Failed to set HT20: %s", esp_err_to_name(ret));
+        }
+    }
+
     static bool refreshMode()
     {
         wifi_mode_t target = WIFI_MODE_NULL;
@@ -193,66 +316,63 @@ namespace
         }
 
         wifi_mode_t current = WIFI_MODE_NULL;
-        esp_wifi_get_mode(&current);
-        if (target == current)
+        if (esp_wifi_get_mode(&current) != ESP_OK)
         {
-            return true;
+            current = WIFI_MODE_NULL;
         }
 
         if (target == WIFI_MODE_NULL)
         {
             if (s_started)
             {
-                esp_wifi_stop();
+                const esp_err_t stop_err = esp_wifi_stop();
+                if (stop_err != ESP_OK && stop_err != ESP_ERR_WIFI_NOT_INIT)
+                {
+                    ESP_LOGW(TAG, "esp_wifi_stop failed: %s", esp_err_to_name(stop_err));
+                }
                 s_started = false;
             }
+            // Clear driver mode to WIFI_MODE_NULL so a later restart into the
+            // same mode does not see target == current while s_started == false.
+            if (current != WIFI_MODE_NULL)
+            {
+                (void)esp_wifi_set_mode(WIFI_MODE_NULL);
+            }
+            s_sta_associated = false;
+            s_sta_has_ip = false;
+            invalidateLastStaConfig();
             return true;
         }
 
-        const esp_err_t err = esp_wifi_set_mode(target);
-        if (err != ESP_OK)
+        if (target == current && s_started)
         {
-            ESP_LOGE(TAG, "esp_wifi_set_mode(%d) failed: %d", static_cast<int>(target), err);
-            return false;
+            applyStaRadioPolicy(target);
+            return true;
         }
+
+        if (target != current)
+        {
+            const esp_err_t err = esp_wifi_set_mode(target);
+            if (err != ESP_OK)
+            {
+                ESP_LOGE(TAG, "esp_wifi_set_mode(%d) failed: %s",
+                         static_cast<int>(target), esp_err_to_name(err));
+                return false;
+            }
+        }
+
         if (!s_started)
         {
             const esp_err_t err2 = esp_wifi_start();
             if (err2 != ESP_OK)
             {
-                ESP_LOGE(TAG, "esp_wifi_start failed: %d", err2);
+                ESP_LOGE(TAG, "esp_wifi_start failed: %s", esp_err_to_name(err2));
                 return false;
             }
             s_started = true;
         }
-        // Disable WiFi modem sleep. The IDF default (WIFI_PS_MIN_MODEM) lets the
-        // radio sleep between DTIM intervals, which makes the MAC batch UDP voice
-        // packets into 30-70 ms bursts on both TX and RX -- audible as jitter on
-        // the 20 ms G.711 stream. Voice latency wins over the modest power saving.
-        //
-        // EXCEPTION: when the Bluetooth headset (HFP) is enabled, WIFI_PS_NONE
-        // makes WiFi hog the single radio and starves the BT controller's coex
-        // scheduler, dropping the SCO link on a 16 s supervision timeout. BT then
-        // needs WiFi to yield slots (MIN_MODEM). This is a hard single-radio
-        // tradeoff: with BT on, WiFi voice may gain some jitter.
-        // MAX_MODEM: WiFi sleeps between beacons so the radio is free for the
-        // isochronous SCO slots most of the time (MIN_MODEM still let WiFi grab
-        // the radio mid-SCO-slot -> warble). Downlink UDP batches at the AP and
-        // is absorbed by the 100 ms playback buffer.
-        const wifi_ps_type_t ps = NRL_BtHfp_IsEnabled() ? WIFI_PS_MAX_MODEM : WIFI_PS_NONE;
-        const esp_err_t ps_err = esp_wifi_set_ps(ps);
-        if (ps_err != ESP_OK)
-        {
-            ESP_LOGW(TAG, "esp_wifi_set_ps failed: %d", ps_err);
-        }
 
-        // ⚠️ 必须在 esp_wifi_start() 成功调用之后执行
-        const esp_err_t ret = esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW20);
-        if (ret != ESP_OK)
-        {
-            ESP_LOGW(TAG, "Failed to set HT20: %s", esp_err_to_name(ret));
-        }
-
+        applyStaRadioPolicy(target);
         return true;
     }
 
@@ -268,6 +388,11 @@ namespace
 
 bool nrlWifiInit()
 {
+    WifiLockGuard lock;
+    if (!lock.locked())
+    {
+        return false;
+    }
     if (s_inited)
     {
         return true;
@@ -307,6 +432,11 @@ bool nrlWifiInit()
     {
         s_ap_netif = esp_netif_create_default_wifi_ap();
     }
+    if (s_sta_netif == nullptr || s_ap_netif == nullptr)
+    {
+        ESP_LOGE(TAG, "esp_netif_create_default_wifi failed");
+        return false;
+    }
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     err = esp_wifi_init(&cfg);
@@ -319,15 +449,6 @@ bool nrlWifiInit()
     }
 
     esp_wifi_set_storage(WIFI_STORAGE_RAM);
-
-    if (s_scan_done == nullptr)
-    {
-        s_scan_done = xSemaphoreCreateBinary();
-    }
-    if (s_scan_mutex == nullptr)
-    {
-        s_scan_mutex = xSemaphoreCreateMutex();
-    }
 
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifiEventHandler, nullptr);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifiEventHandler, nullptr);
@@ -344,6 +465,40 @@ bool wifiIsConnected()
     return s_sta_has_ip;
 }
 
+void nrlWifiRefreshPowerSave()
+{
+    WifiLockGuard lock(pdMS_TO_TICKS(500));
+    if (!lock.locked() || !s_inited || !s_started)
+    {
+        return;
+    }
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    if (esp_wifi_get_mode(&mode) == ESP_OK)
+    {
+        applyStaRadioPolicy(mode);
+    }
+}
+
+void nrlWifiDisconnect()
+{
+    // Bump abort generation before taking the mutex so any in-flight
+    // wifiEnsureConnected() polling loop exits promptly.
+    s_connect_abort_gen.fetch_add(1u, std::memory_order_relaxed);
+
+    WifiLockGuard lock;
+    if (!lock.locked())
+    {
+        return;
+    }
+    invalidateLastStaConfig();
+    if (s_inited && s_started && s_sta_active)
+    {
+        (void)esp_wifi_disconnect();
+    }
+    s_sta_associated = false;
+    s_sta_has_ip = false;
+}
+
 WifiConnResult wifiEnsureConnected(const char *ssid, const char *pass, uint32_t timeout_ms)
 {
     if (ssid == nullptr || *ssid == '\0')
@@ -351,18 +506,45 @@ WifiConnResult wifiEnsureConnected(const char *ssid, const char *pass, uint32_t 
         ESP_LOGE(TAG, "connect failed: empty SSID");
         return WIFI_CONN_FAILED;
     }
+
+    WifiLockGuard lock;
+    if (!lock.locked())
+    {
+        return WIFI_CONN_FAILED;
+    }
     if (!nrlWifiInit())
     {
         return WIFI_CONN_FAILED;
     }
 
+    const uint32_t my_abort_gen = s_connect_abort_gen;
+    const char *pass_str = (pass != nullptr) ? pass : "";
+    const size_t pass_len = strlen(pass_str);
+
+    // Snapshot IP settings once so static-vs-DHCP decision is consistent.
+    const ExternalRadioConfig *net_config = EXTERNAL_RADIO_GetConfig();
+    const bool use_static = (net_config != nullptr && !net_config->wifi_dhcp_enabled &&
+                             net_config->wifi_ip != 0u && net_config->wifi_netmask != 0u &&
+                             net_config->wifi_gateway != 0u);
+    const uint32_t cfg_ip = use_static ? net_config->wifi_ip : 0u;
+    const uint32_t cfg_mask = use_static ? net_config->wifi_netmask : 0u;
+    const uint32_t cfg_gw = use_static ? net_config->wifi_gateway : 0u;
+    const uint32_t cfg_dns = use_static
+                                 ? ((net_config->wifi_dns != 0u) ? net_config->wifi_dns : net_config->wifi_gateway)
+                                 : 0u;
+
     ESP_LOGI(TAG, "connecting: SSID=\"%s\" passLen=%u timeout=%lums",
              ssid,
-             static_cast<unsigned>(pass != nullptr ? strlen(pass) : 0),
+             static_cast<unsigned>(pass_len),
              static_cast<unsigned long>(timeout_ms));
 
-    // Already on the target SSID with an IP?
-    if (s_sta_has_ip)
+    // Already on the target SSID with an IP AND unchanged credentials/IP settings?
+    if (s_sta_has_ip && s_last_sta_valid &&
+        strcmp(s_last_sta_ssid, ssid) == 0 &&
+        strcmp(s_last_sta_pass, pass_str) == 0 &&
+        s_last_sta_dhcp == !use_static &&
+        (!use_static || (s_last_sta_ip == cfg_ip && s_last_sta_mask == cfg_mask &&
+                         s_last_sta_gw == cfg_gw && s_last_sta_dns == cfg_dns)))
     {
         wifi_ap_record_t info = {};
         if (esp_wifi_sta_get_ap_info(&info) == ESP_OK &&
@@ -374,39 +556,64 @@ WifiConnResult wifiEnsureConnected(const char *ssid, const char *pass, uint32_t 
                      ip_buf, static_cast<int>(info.rssi));
             return WIFI_ALREADY_ON_SSID;
         }
-        ESP_LOGI(TAG, "connected to a different SSID, will disconnect first");
-        esp_wifi_disconnect();
-        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    // If previously associated or holding an IP, disconnect cleanly and wait
+    // briefly for STA_DISCONNECTED so the netif drops before reconfiguring IP.
+    if (s_started && s_sta_active && (s_sta_associated || s_sta_has_ip))
+    {
+        ESP_LOGI(TAG, "disconnecting current STA session before reconnecting");
+        (void)esp_wifi_disconnect();
+        const uint32_t disc_t0 = nowMs();
+        while ((s_sta_associated || s_sta_has_ip) && (nowMs() - disc_t0) < 400u)
+        {
+            vTaskDelay(pdMS_TO_TICKS(25));
+        }
     }
 
     // Activate STA mode (preserve AP if already up).
+    const bool prev_sta_active = s_sta_active;
     s_sta_active = true;
     if (!refreshMode())
     {
+        s_sta_active = prev_sta_active;
         return WIFI_CONN_FAILED;
     }
-    vTaskDelay(pdMS_TO_TICKS(100)); // let the STA interface settle
+    vTaskDelay(pdMS_TO_TICKS(50)); // let the STA interface settle
 
     char hostname[40] = {};
     makeHostname(hostname, sizeof(hostname));
     esp_netif_set_hostname(s_sta_netif, hostname);
     nrlMdnsRefresh();
 
+    // Reset state flags before configuring IP/DHCP so we never clobber a newly
+    // posted IP_EVENT_STA_GOT_IP.
+    s_sta_associated = false;
+    s_sta_has_ip = false;
+    s_last_disconnect_reason = 0u;
+    const uint32_t start_disconnects = s_disconnect_count;
+
     // Static IP or DHCP.
-    const ExternalRadioConfig *net_config = EXTERNAL_RADIO_GetConfig();
-    if (net_config != nullptr && !net_config->wifi_dhcp_enabled &&
-        net_config->wifi_ip != 0u && net_config->wifi_netmask != 0u && net_config->wifi_gateway != 0u)
+    if (use_static)
     {
-        esp_netif_dhcpc_stop(s_sta_netif);
+        const esp_err_t stop_err = esp_netif_dhcpc_stop(s_sta_netif);
+        if (stop_err != ESP_OK && stop_err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED)
+        {
+            ESP_LOGW(TAG, "esp_netif_dhcpc_stop failed: %s", esp_err_to_name(stop_err));
+        }
         esp_netif_ip_info_t info = {};
-        info.ip.addr = net_config->wifi_ip;
-        info.netmask.addr = net_config->wifi_netmask;
-        info.gw.addr = net_config->wifi_gateway;
-        esp_netif_set_ip_info(s_sta_netif, &info);
+        info.ip.addr = cfg_ip;
+        info.netmask.addr = cfg_mask;
+        info.gw.addr = cfg_gw;
+        const esp_err_t ip_err = esp_netif_set_ip_info(s_sta_netif, &info);
+        if (ip_err != ESP_OK)
+        {
+            ESP_LOGW(TAG, "esp_netif_set_ip_info failed: %s", esp_err_to_name(ip_err));
+        }
         esp_netif_dns_info_t dns = {};
-        dns.ip.u_addr.ip4.addr = (net_config->wifi_dns != 0u) ? net_config->wifi_dns : net_config->wifi_gateway;
+        dns.ip.u_addr.ip4.addr = cfg_dns;
         dns.ip.type = ESP_IPADDR_TYPE_V4;
-        esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_MAIN, &dns);
+        (void)esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_MAIN, &dns);
         char ip_buf[16] = {}, mask_buf[16] = {}, gw_buf[16] = {}, dns_buf[16] = {};
         nrlIpToString(info.ip.addr, ip_buf, sizeof(ip_buf));
         nrlIpToString(info.netmask.addr, mask_buf, sizeof(mask_buf));
@@ -417,34 +624,60 @@ WifiConnResult wifiEnsureConnected(const char *ssid, const char *pass, uint32_t 
     }
     else
     {
-        esp_netif_dhcpc_start(s_sta_netif);
+        if (!s_last_sta_dhcp)
+        {
+            // Clear leftover static IP before starting DHCP so stale IP does not
+            // make nrlWifiStaConnected() report connected prematurely.
+            (void)esp_netif_dhcpc_stop(s_sta_netif);
+            esp_netif_ip_info_t zero = {};
+            (void)esp_netif_set_ip_info(s_sta_netif, &zero);
+        }
+        const esp_err_t dhcp_err = esp_netif_dhcpc_start(s_sta_netif);
+        if (dhcp_err != ESP_OK && dhcp_err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED)
+        {
+            ESP_LOGW(TAG, "esp_netif_dhcpc_start failed: %s", esp_err_to_name(dhcp_err));
+        }
     }
 
-    // Build STA config.
+    // Build STA config. Accept WPA-PSK and above when a password is set so
+    // WPA/WPA2 mixed routers remain reachable without permitting open downgrade.
     wifi_config_t cfg = {};
     strncpy(reinterpret_cast<char *>(cfg.sta.ssid), ssid, sizeof(cfg.sta.ssid) - 1);
-    if (pass != nullptr)
+    if (pass_len > 0u)
     {
-        strncpy(reinterpret_cast<char *>(cfg.sta.password), pass, sizeof(cfg.sta.password) - 1);
+        strncpy(reinterpret_cast<char *>(cfg.sta.password), pass_str, sizeof(cfg.sta.password) - 1);
     }
-    cfg.sta.threshold.authmode = (pass != nullptr && *pass != '\0') ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+    cfg.sta.threshold.authmode = (pass_len > 0u) ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;
     cfg.sta.pmf_cfg.capable = true;
 
-    s_sta_associated = false;
-    s_sta_has_ip = false;
-    s_last_disconnect_reason = 0;
-    if (esp_wifi_set_config(WIFI_IF_STA, &cfg) != ESP_OK)
+    const esp_err_t cfg_err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    if (cfg_err != ESP_OK)
     {
-        ESP_LOGE(TAG, "esp_wifi_set_config(STA) failed");
+        ESP_LOGE(TAG, "esp_wifi_set_config(STA) failed: %s", esp_err_to_name(cfg_err));
         return WIFI_CONN_FAILED;
     }
-    esp_wifi_connect();
+
+    const esp_err_t conn_err = esp_wifi_connect();
+    if (conn_err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "esp_wifi_connect failed: %s", esp_err_to_name(conn_err));
+        invalidateLastStaConfig();
+        return WIFI_CONN_FAILED;
+    }
 
     const uint32_t t0 = nowMs();
     uint32_t last_log = 0u;
     uint32_t last_reconnect = 0u;
     while (!s_sta_has_ip && (nowMs() - t0) < timeout_ms)
     {
+        if (s_connect_abort_gen != my_abort_gen)
+        {
+            ESP_LOGI(TAG, "connect aborted by newer request");
+            (void)esp_wifi_disconnect();
+            invalidateLastStaConfig();
+            return WIFI_CONN_FAILED;
+        }
+
         const uint32_t elapsed = nowMs() - t0;
         if (elapsed - last_log >= 2000u)
         {
@@ -455,21 +688,49 @@ WifiConnResult wifiEnsureConnected(const char *ssid, const char *pass, uint32_t 
                      static_cast<unsigned>(s_last_disconnect_reason));
             last_log = elapsed;
         }
+
+        // Stop wasting the full timeout if we already failed twice with a
+        // definitive auth/missing-AP reason.
+        const uint32_t disconnects = s_disconnect_count - start_disconnects;
+        if (!s_sta_associated && disconnects >= 2u &&
+            isTerminalConnectReason(s_last_disconnect_reason))
+        {
+            ESP_LOGW(TAG, "aborting connect early after %lu terminal failures: reason=%u (%s)",
+                     static_cast<unsigned long>(disconnects),
+                     static_cast<unsigned>(s_last_disconnect_reason),
+                     disconnectReasonText(s_last_disconnect_reason));
+            break;
+        }
+
         // If we haven't even associated after 5s, kick connect again. Don't
         // retry if we're past L2 association — that means DHCP is in progress.
         if (!s_sta_associated && elapsed >= 5000u && (elapsed - last_reconnect) >= 5000u)
         {
             ESP_LOGI(TAG, "still not associating, retrying connect");
-            esp_wifi_disconnect();
+            (void)esp_wifi_disconnect();
             vTaskDelay(pdMS_TO_TICKS(50));
-            esp_wifi_connect();
+            const esp_err_t retry_err = esp_wifi_connect();
+            if (retry_err != ESP_OK)
+            {
+                ESP_LOGW(TAG, "retry esp_wifi_connect failed: %s", esp_err_to_name(retry_err));
+                break;
+            }
             last_reconnect = elapsed;
         }
-        vTaskDelay(pdMS_TO_TICKS(250));
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
 
     if (s_sta_has_ip)
     {
+        snprintf(s_last_sta_ssid, sizeof(s_last_sta_ssid), "%s", ssid);
+        snprintf(s_last_sta_pass, sizeof(s_last_sta_pass), "%s", pass_str);
+        s_last_sta_dhcp = !use_static;
+        s_last_sta_ip = cfg_ip;
+        s_last_sta_mask = cfg_mask;
+        s_last_sta_gw = cfg_gw;
+        s_last_sta_dns = cfg_dns;
+        s_last_sta_valid = true;
+
         char ip_buf[16] = {};
         nrlIpToString(nrlWifiStaIp(), ip_buf, sizeof(ip_buf));
         wifi_ap_record_t ap_info = {};
@@ -482,6 +743,11 @@ WifiConnResult wifiEnsureConnected(const char *ssid, const char *pass, uint32_t 
                  hostname);
         return WIFI_CONN_OK;
     }
+
+    // Explicitly stop the failed STA connection attempt so the driver does not
+    // keep channel-hopping in the background and drop SoftAP clients.
+    (void)esp_wifi_disconnect();
+    invalidateLastStaConfig();
 
     ESP_LOGW(TAG, "connect timeout: elapsed=%lums assoc=%d last_reason=%u (%s)",
              static_cast<unsigned long>(nowMs() - t0),
@@ -498,15 +764,37 @@ bool nrlWifiApStart(const char *ssid, uint8_t channel, uint8_t max_conn,
     {
         return false;
     }
+
+    WifiLockGuard lock;
+    if (!lock.locked())
+    {
+        return false;
+    }
     if (!nrlWifiInit())
     {
         return false;
     }
 
-    s_ap_active = true;
-    if (!refreshMode())
+    const bool prev_ap_active = s_ap_active;
+    const wifi_mode_t target = s_sta_active ? WIFI_MODE_APSTA : WIFI_MODE_AP;
+
+    wifi_mode_t prev_mode = WIFI_MODE_NULL;
+    if (esp_wifi_get_mode(&prev_mode) != ESP_OK)
     {
-        return false;
+        prev_mode = WIFI_MODE_NULL;
+    }
+
+    // Set mode and configure AP parameters BEFORE esp_wifi_start() when the
+    // radio is stopped, so we never briefly beacon a stale/default SSID.
+    if (prev_mode != target)
+    {
+        const esp_err_t mode_err = esp_wifi_set_mode(target);
+        if (mode_err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "esp_wifi_set_mode(%d) for AP failed: %s",
+                     static_cast<int>(target), esp_err_to_name(mode_err));
+            return false;
+        }
     }
 
     char hostname[40] = {};
@@ -515,13 +803,21 @@ bool nrlWifiApStart(const char *ssid, uint8_t channel, uint8_t max_conn,
     nrlMdnsRefresh();
 
     // DHCP server must be stopped before changing the IP info.
-    esp_netif_dhcps_stop(s_ap_netif);
+    (void)esp_netif_dhcps_stop(s_ap_netif);
     esp_netif_ip_info_t info = {};
     info.ip.addr = ap_ip;
     info.gw.addr = gw;
     info.netmask.addr = mask;
-    esp_netif_set_ip_info(s_ap_netif, &info);
-    esp_netif_dhcps_start(s_ap_netif);
+    const esp_err_t ip_err = esp_netif_set_ip_info(s_ap_netif, &info);
+    if (ip_err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "AP esp_netif_set_ip_info failed: %s", esp_err_to_name(ip_err));
+    }
+    const esp_err_t dhcps_err = esp_netif_dhcps_start(s_ap_netif);
+    if (dhcps_err != ESP_OK && dhcps_err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED)
+    {
+        ESP_LOGW(TAG, "AP esp_netif_dhcps_start failed: %s", esp_err_to_name(dhcps_err));
+    }
 
     wifi_config_t cfg = {};
     const size_t ssid_len = strnlen(ssid, sizeof(cfg.ap.ssid));
@@ -533,11 +829,34 @@ bool nrlWifiApStart(const char *ssid, uint8_t channel, uint8_t max_conn,
     cfg.ap.ssid_hidden = 0;
     cfg.ap.pmf_cfg.required = false;
 
-    if (esp_wifi_set_config(WIFI_IF_AP, &cfg) != ESP_OK)
+    const esp_err_t cfg_err = esp_wifi_set_config(WIFI_IF_AP, &cfg);
+    if (cfg_err != ESP_OK)
     {
-        ESP_LOGE(TAG, "esp_wifi_set_config(AP) failed");
+        ESP_LOGE(TAG, "esp_wifi_set_config(AP) failed: %s", esp_err_to_name(cfg_err));
+        if (!prev_ap_active && prev_mode != target)
+        {
+            (void)esp_wifi_set_mode(prev_mode);
+        }
         return false;
     }
+
+    if (!s_started)
+    {
+        const esp_err_t start_err = esp_wifi_start();
+        if (start_err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "esp_wifi_start (AP) failed: %s", esp_err_to_name(start_err));
+            if (!prev_ap_active)
+            {
+                (void)esp_wifi_set_mode(prev_mode);
+            }
+            return false;
+        }
+        s_started = true;
+    }
+
+    s_ap_active = true;
+    applyStaRadioPolicy(target);
 
     char ip_buf[16] = {};
     nrlIpToString(ap_ip, ip_buf, sizeof(ip_buf));
@@ -548,14 +867,19 @@ bool nrlWifiApStart(const char *ssid, uint8_t channel, uint8_t max_conn,
 
 bool nrlWifiApStop()
 {
+    WifiLockGuard lock;
+    if (!lock.locked())
+    {
+        return false;
+    }
     if (!s_ap_active)
     {
         return true;
     }
     s_ap_active = false;
-    refreshMode();
+    const bool ok = refreshMode();
     ESP_LOGI(TAG, "AP stopped");
-    return true;
+    return ok;
 }
 
 bool nrlWifiApIsActive()
@@ -569,6 +893,13 @@ bool nrlWifiApIsActive()
 // (esp_wifi_start + reconnect) when the Wi-Fi master switch is turned on again.
 bool nrlWifiStopRadio()
 {
+    s_connect_abort_gen.fetch_add(1u, std::memory_order_relaxed);
+
+    WifiLockGuard lock;
+    if (!lock.locked())
+    {
+        return false;
+    }
     s_sta_active = false;
     s_ap_active = false;
     const bool ok = refreshMode();
@@ -579,6 +910,10 @@ bool nrlWifiStopRadio()
 
 size_t nrlWifiApGetStationCount()
 {
+    if (!s_ap_active || !s_started)
+    {
+        return 0u;
+    }
     wifi_sta_list_t list = {};
     if (esp_wifi_ap_get_sta_list(&list) != ESP_OK)
     {
@@ -589,16 +924,27 @@ size_t nrlWifiApGetStationCount()
 
 bool nrlWifiScanStartBlocking(uint32_t timeout_ms)
 {
+    const uint32_t t_entry = nowMs();
+    const uint32_t lock_wait_ms = (timeout_ms > 0u) ? timeout_ms : 1000u;
+    WifiLockGuard lock(pdMS_TO_TICKS(lock_wait_ms));
+    if (!lock.locked())
+    {
+        ESP_LOGW(TAG, "scan skipped: WiFi busy");
+        return false;
+    }
     if (!nrlWifiInit())
     {
         return false;
     }
-    if (!s_started)
+
+    const bool prev_sta_active = s_sta_active;
+    if (!s_started || !s_sta_active)
     {
-        // Need at least STA capability to scan.
+        // Scanning requires STA capability (WIFI_MODE_STA or WIFI_MODE_APSTA).
         s_sta_active = true;
         if (!refreshMode())
         {
+            s_sta_active = prev_sta_active;
             return false;
         }
     }
@@ -615,91 +961,120 @@ bool nrlWifiScanStartBlocking(uint32_t timeout_ms)
     scan_cfg.scan_time.active.min = 80;
     scan_cfg.scan_time.active.max = 120;
 
-    s_scan_in_progress = true;
+    bool scan_ok = false;
     const esp_err_t err = esp_wifi_scan_start(&scan_cfg, /*block=*/false);
     if (err != ESP_OK)
     {
-        ESP_LOGE(TAG, "esp_wifi_scan_start failed: %d", err);
-        s_scan_in_progress = false;
-        return false;
+        ESP_LOGE(TAG, "esp_wifi_scan_start failed: %s", esp_err_to_name(err));
     }
-
-    if (xSemaphoreTake(s_scan_done, pdMS_TO_TICKS(timeout_ms)) != pdTRUE)
+    else
     {
-        esp_wifi_scan_stop();
-        s_scan_in_progress = false;
-        ESP_LOGW(TAG, "scan timeout after %lums", static_cast<unsigned long>(timeout_ms));
-        return false;
-    }
-    s_scan_in_progress = false;
-
-    uint16_t ap_count = 0;
-    esp_wifi_scan_get_ap_num(&ap_count);
-    if (ap_count == 0u)
-    {
-        if (s_scan_mutex != nullptr)
+        const uint32_t elapsed = nowMs() - t_entry;
+        const uint32_t wait_ms = (timeout_ms > elapsed) ? (timeout_ms - elapsed) : 500u;
+        if (xSemaphoreTake(s_scan_done, pdMS_TO_TICKS(wait_ms)) != pdTRUE)
         {
-            xSemaphoreTake(s_scan_mutex, portMAX_DELAY);
-            s_scan_count = 0;
-            xSemaphoreGive(s_scan_mutex);
+            (void)esp_wifi_scan_stop();
+            ESP_LOGW(TAG, "scan timeout after %lums", static_cast<unsigned long>(timeout_ms));
         }
-        ESP_LOGI(TAG, "scan done: 0 APs");
-        return true;
-    }
-
-    wifi_ap_record_t *records = static_cast<wifi_ap_record_t *>(
-        malloc(sizeof(wifi_ap_record_t) * ap_count));
-    if (records == nullptr)
-    {
-        esp_wifi_clear_ap_list();
-        return false;
-    }
-    uint16_t got = ap_count;
-    esp_wifi_scan_get_ap_records(&got, records);
-
-    if (s_scan_mutex != nullptr)
-    {
-        xSemaphoreTake(s_scan_mutex, portMAX_DELAY);
-    }
-    s_scan_count = 0;
-    for (uint16_t i = 0; i < got && s_scan_count < kScanCacheMax; ++i)
-    {
-        if (records[i].ssid[0] == '\0')
+        else
         {
-            continue;
-        }
-        // Dedupe by SSID (a single SSID can appear on multiple bands/BSSIDs).
-        bool dup = false;
-        for (size_t j = 0; j < s_scan_count; ++j)
-        {
-            if (strncmp(s_scan_cache[j].ssid,
-                        reinterpret_cast<const char *>(records[i].ssid),
-                        sizeof(s_scan_cache[j].ssid)) == 0)
+            uint16_t ap_count = 0;
+            if (esp_wifi_scan_get_ap_num(&ap_count) != ESP_OK)
             {
-                dup = true;
-                break;
+                ap_count = 0;
+            }
+            if (ap_count == 0u)
+            {
+                if (s_scan_mutex != nullptr)
+                {
+                    xSemaphoreTake(s_scan_mutex, portMAX_DELAY);
+                    s_scan_count = 0;
+                    xSemaphoreGive(s_scan_mutex);
+                }
+                ESP_LOGI(TAG, "scan done: 0 APs");
+                scan_ok = true;
+            }
+            else
+            {
+                // Cap allocation size to avoid large contiguous internal-DRAM
+                // allocations in dense RF environments; IDF sorts by RSSI.
+                uint16_t got = (ap_count > kScanFetchMax) ? kScanFetchMax : ap_count;
+                wifi_ap_record_t *records = static_cast<wifi_ap_record_t *>(
+                    malloc(sizeof(wifi_ap_record_t) * got));
+                if (records == nullptr)
+                {
+                    (void)esp_wifi_clear_ap_list();
+                    ESP_LOGW(TAG, "scan OOM allocating %u records", static_cast<unsigned>(got));
+                }
+                else
+                {
+                    const esp_err_t rec_err = esp_wifi_scan_get_ap_records(&got, records);
+                    if (rec_err != ESP_OK)
+                    {
+                        ESP_LOGW(TAG, "esp_wifi_scan_get_ap_records failed: %s",
+                                 esp_err_to_name(rec_err));
+                        (void)esp_wifi_clear_ap_list();
+                    }
+                    else
+                    {
+                        if (s_scan_mutex != nullptr)
+                        {
+                            xSemaphoreTake(s_scan_mutex, portMAX_DELAY);
+                        }
+                        s_scan_count = 0;
+                        for (uint16_t i = 0; i < got && s_scan_count < kScanCacheMax; ++i)
+                        {
+                            if (records[i].ssid[0] == '\0')
+                            {
+                                continue;
+                            }
+                            // Dedupe by SSID (a single SSID can appear on multiple BSSIDs).
+                            bool dup = false;
+                            for (size_t j = 0; j < s_scan_count; ++j)
+                            {
+                                if (strncmp(s_scan_cache[j].ssid,
+                                            reinterpret_cast<const char *>(records[i].ssid),
+                                            sizeof(s_scan_cache[j].ssid)) == 0)
+                                {
+                                    dup = true;
+                                    break;
+                                }
+                            }
+                            if (dup)
+                            {
+                                continue;
+                            }
+                            snprintf(s_scan_cache[s_scan_count].ssid,
+                                     sizeof(s_scan_cache[s_scan_count].ssid),
+                                     "%s", reinterpret_cast<const char *>(records[i].ssid));
+                            s_scan_cache[s_scan_count].rssi = records[i].rssi;
+                            s_scan_cache[s_scan_count].secured = (records[i].authmode != WIFI_AUTH_OPEN);
+                            ++s_scan_count;
+                        }
+                        const size_t cached = s_scan_count;
+                        if (s_scan_mutex != nullptr)
+                        {
+                            xSemaphoreGive(s_scan_mutex);
+                        }
+                        ESP_LOGI(TAG, "scan done: %u unique SSIDs cached (total=%u)",
+                                 static_cast<unsigned>(cached), static_cast<unsigned>(ap_count));
+                        scan_ok = true;
+                    }
+                    free(records);
+                }
             }
         }
-        if (dup)
-        {
-            continue;
-        }
-        snprintf(s_scan_cache[s_scan_count].ssid, sizeof(s_scan_cache[s_scan_count].ssid),
-                 "%s", reinterpret_cast<const char *>(records[i].ssid));
-        s_scan_cache[s_scan_count].rssi = records[i].rssi;
-        s_scan_cache[s_scan_count].secured = (records[i].authmode != WIFI_AUTH_OPEN);
-        ++s_scan_count;
     }
-    const size_t cached = s_scan_count;
-    if (s_scan_mutex != nullptr)
-    {
-        xSemaphoreGive(s_scan_mutex);
-    }
-    free(records);
-    esp_wifi_clear_ap_list();
 
-    ESP_LOGI(TAG, "scan done: %u unique SSIDs cached", static_cast<unsigned>(cached));
-    return true;
+    // Restore STA-inactive state if we only temporarily enabled STA for scanning
+    // (e.g., AP-only mode or pre-scan before AP start).
+    if (!prev_sta_active)
+    {
+        s_sta_active = false;
+        refreshMode();
+    }
+
+    return scan_ok;
 }
 
 size_t nrlWifiScanGetCache(NrlWifiScanResult *out, size_t max_count)
@@ -708,6 +1083,7 @@ size_t nrlWifiScanGetCache(NrlWifiScanResult *out, size_t max_count)
     {
         return 0u;
     }
+    ensureSyncObjects();
     if (s_scan_mutex != nullptr)
     {
         xSemaphoreTake(s_scan_mutex, portMAX_DELAY);
@@ -851,12 +1227,17 @@ namespace
 
         char buf[160];
         size_t buf_used = 0;
-        while ((nowMs() - t0) < timeout_ms)
+        while (true)
         {
+            const uint32_t elapsed = nowMs() - t0;
+            if (elapsed >= timeout_ms)
+            {
+                break;
+            }
+            const uint32_t remaining = timeout_ms - elapsed;
             fd_set rfds;
             FD_ZERO(&rfds);
             FD_SET(fd, &rfds);
-            const uint32_t remaining = timeout_ms - (nowMs() - t0);
             struct timeval tv = {};
             tv.tv_sec = remaining / 1000u;
             tv.tv_usec = static_cast<long>((remaining % 1000u) * 1000u);
@@ -909,12 +1290,15 @@ NetProbeResult internetProbeCN(uint32_t timeout_ms)
         return r;
     }
 
+    const uint32_t t_start = nowMs();
+
     // Step 1: direct TCP to 223.5.5.5:53 (Ali DNS) — DNS-independent.
     {
         struct in_addr ali = {};
         inet_aton("223.5.5.5", &ali);
         uint32_t ms = 0;
-        if (tcpReachableRtt(ali.s_addr, 53, timeout_ms, ms))
+        const uint32_t step1_ms = (timeout_ms >= 2000u) ? (timeout_ms / 2u) : timeout_ms;
+        if (tcpReachableRtt(ali.s_addr, 53, step1_ms, ms))
         {
             r.reachable = true;
             r.rtt_ms = ms;
@@ -924,10 +1308,13 @@ NetProbeResult internetProbeCN(uint32_t timeout_ms)
     }
 
     // Step 2: HTTP GET www.baidu.com — accept 2xx/3xx as reachable.
+    const uint32_t elapsed = nowMs() - t_start;
+    if (elapsed < timeout_ms)
     {
         char status[80] = {};
         uint32_t ms = 0;
-        if (httpStatusLineRtt("www.baidu.com", 80, "/", status, sizeof(status), timeout_ms, ms))
+        if (httpStatusLineRtt("www.baidu.com", 80, "/", status, sizeof(status),
+                              timeout_ms - elapsed, ms))
         {
             if (strncmp(status, "HTTP/1.1 200", 12) == 0 ||
                 strncmp(status, "HTTP/1.0 200", 12) == 0 ||

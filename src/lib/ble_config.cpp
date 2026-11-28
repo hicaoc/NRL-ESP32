@@ -681,6 +681,7 @@ bool BLEConfig_Init(void)
 
     s_initialized = true;
     s_advertising = true;
+    nrlWifiRefreshPowerSave();
     ESP_LOGI(TAG, "advertising as %s", kBleDeviceName);
     return true;
 }
@@ -724,6 +725,7 @@ void BLEConfig_Stop(void)
     s_client_connected = false;
     s_wifi_transaction = false;
     s_wifi_transaction_has_ssid = false;
+    nrlWifiRefreshPowerSave();
     ESP_LOGI(TAG, "BLE stopped (radio freed for WiFi)");
 }
 
@@ -1128,6 +1130,7 @@ bool BLEConfig_Init(void)
     configAdvData();
 
     s_initialized = true;
+    nrlWifiRefreshPowerSave();
     ESP_LOGI(TAG, "BLE provisioning started (Bluedroid dual-mode)");
     return true;
 }
@@ -1183,6 +1186,7 @@ void BLEConfig_Stop(void)
     s_client_connected = false;
     s_wifi_transaction = false;
     s_wifi_transaction_has_ssid = false;
+    nrlWifiRefreshPowerSave();
     ESP_LOGI(TAG, "BLE stopped (Bluedroid + controller released)");
 }
 

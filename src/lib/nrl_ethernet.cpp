@@ -107,6 +107,9 @@ static void ethernetEvent(void *, esp_event_base_t, int32_t event_id, void *even
 static void ethernetGotIp(void *, esp_event_base_t, int32_t, void *event_data)
 {
     const auto *event = static_cast<ip_event_got_ip_t *>(event_data);
+    if (event == nullptr || event->esp_netif != s_eth_netif) {
+        return;
+    }
     s_has_ip = true;
     // ESP_NETIF_DEFAULT_ETH has a lower route priority than Wi-Fi STA. The
     // product policy is wired-first, so promote Ethernet whenever it has IP.

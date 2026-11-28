@@ -508,7 +508,11 @@ std::string WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *c
     replaceToken(html, "{{AUDIO_EXPERT_TOGGLE_HIDDEN}}", std::string(" hidden"));
 #endif
     replaceToken(html, "{{HP_DRIVE_CHECKED}}", checkedAttr(config->hp_drive_enabled));
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311 && !NRL_HAS_ES7210
+    replaceToken(html, "{{MIC_VOLUME_SLIDER}}", buildAutoSubmitSlider("mic_volume", "Mic Volume (0-186)", "micVolumeEs8311", 0u, 186u, config->mic_volume));
+#else
     replaceToken(html, "{{MIC_VOLUME_SLIDER}}", buildAutoSubmitSlider("mic_volume", "Mic Volume (0-255)", "micVolume", 0u, 255u, config->mic_volume));
+#endif
     const std::string mic_pcm_gain = formatMicPcmGain(config->mic_pcm_gain_milli);
     replaceToken(html, "{{MIC_PCM_GAIN_INPUT}}",
                  buildAutoSubmitNumber("mic_pcm_gain", "Mic PCM Gain (0.1-5.0x)",

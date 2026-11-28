@@ -51,6 +51,11 @@ bool nrlWifiApIsActive();
 // Stop the whole Wi-Fi radio (STA+AP -> WIFI_MODE_NULL / esp_wifi_stop), freeing
 // the shared radio and Wi-Fi RAM for Bluetooth A2DP. wifiEnsureConnected() restores.
 bool nrlWifiStopRadio();
+// Abort any in-flight wifiEnsureConnected() attempt and disconnect STA so the
+// next connect starts fresh (e.g. after credential or static-IP changes).
+void nrlWifiDisconnect();
+// Re-apply Wi-Fi power-save mode to match current BT HFP / BLE coexistence state.
+void nrlWifiRefreshPowerSave();
 size_t nrlWifiApGetStationCount();
 
 // Synchronous scan. Fills the internal cache; consumers retrieve via

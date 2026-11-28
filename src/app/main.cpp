@@ -75,6 +75,9 @@ bool s_full_app_started = false;
 bool s_waiting_for_provisioning = false;
 uint32_t s_next_provision_wifi_attempt_ms = 0u;
 uint32_t s_seen_config_generation = 0u;
+volatile bool s_prov_connect_running = false;
+volatile bool s_prov_connect_done = false;
+volatile WifiConnResult s_prov_connect_result = WIFI_CONN_FAILED;
 
 static void recordMainLoopProfile(const uint32_t elapsed_us[MAIN_LOOP_STAGE_COUNT])
 {
@@ -120,7 +123,9 @@ static WifiConnResult connectSavedWifiLight()
         return WIFI_CONN_FAILED;
     }
 
-    const size_t count = EXTERNAL_RADIO_GetWifiProfileCount();
+    ExternalWifiProfile profiles[EXTERNAL_RADIO_MAX_WIFI_PROFILES] = {};
+    const size_t count = EXTERNAL_RADIO_GetWifiProfilesSnapshot(
+        profiles, EXTERNAL_RADIO_MAX_WIFI_PROFILES);
     if (count == 0u) {
         return WIFI_CONN_FAILED;
     }
@@ -130,24 +135,25 @@ static WifiConnResult connectSavedWifiLight()
     // holds the BLE link can monopolize the shared 2.4 GHz radio and make the
     // mini program look disconnected before it receives the result.
     ESP_LOGI(TAG, "provisioning: trying primary WiFi 1/%u: \"%s\"",
-             static_cast<unsigned>(count), config->wifi_profiles[0].ssid);
-    WifiConnResult last = wifiEnsureConnected(config->wifi_profiles[0].ssid,
-                                              config->wifi_profiles[0].password, 10000u);
+             static_cast<unsigned>(count), profiles[0].ssid);
+    WifiConnResult last = wifiEnsureConnected(profiles[0].ssid,
+                                              profiles[0].password, 10000u);
     if (last == WIFI_CONN_OK || last == WIFI_ALREADY_ON_SSID) {
         return last;
     }
     if (count == 1u) return last;
 
-    NrlWifiScanResult scanned[EXTERNAL_RADIO_MAX_WIFI_PROFILES] = {};
+    constexpr size_t kProvScanSlots = 24u;
+    NrlWifiScanResult scanned[kProvScanSlots] = {};
     const bool scan_ok = nrlWifiScanStartBlocking(5000u);
-    const size_t scanned_count = scan_ok ? nrlWifiScanGetCache(scanned, EXTERNAL_RADIO_MAX_WIFI_PROFILES) : 0u;
+    const size_t scanned_count = scan_ok ? nrlWifiScanGetCache(scanned, kProvScanSlots) : 0u;
     bool attempted[EXTERNAL_RADIO_MAX_WIFI_PROFILES] = {};
     attempted[0] = true;
 
     for (size_t i = 1; i < count; ++i) {
         bool visible = !scan_ok;
         for (size_t j = 0; j < scanned_count; ++j) {
-            if (strcmp(config->wifi_profiles[i].ssid, scanned[j].ssid) == 0) {
+            if (strcmp(profiles[i].ssid, scanned[j].ssid) == 0) {
                 visible = true;
                 break;
             }
@@ -159,9 +165,9 @@ static WifiConnResult connectSavedWifiLight()
         ESP_LOGI(TAG, "provisioning: trying saved WiFi %u/%u: \"%s\"",
                  static_cast<unsigned>(i + 1u),
                  static_cast<unsigned>(count),
-                 config->wifi_profiles[i].ssid);
-        last = wifiEnsureConnected(config->wifi_profiles[i].ssid,
-                                   config->wifi_profiles[i].password, 10000u);
+                 profiles[i].ssid);
+        last = wifiEnsureConnected(profiles[i].ssid,
+                                   profiles[i].password, 10000u);
         if (last == WIFI_CONN_OK || last == WIFI_ALREADY_ON_SSID) {
             return last;
         }
@@ -174,15 +180,23 @@ static WifiConnResult connectSavedWifiLight()
         ESP_LOGI(TAG, "provisioning: trying hidden/unseen saved WiFi %u/%u: \"%s\"",
                  static_cast<unsigned>(i + 1u),
                  static_cast<unsigned>(count),
-                 config->wifi_profiles[i].ssid);
-        last = wifiEnsureConnected(config->wifi_profiles[i].ssid,
-                                   config->wifi_profiles[i].password, 10000u);
+                 profiles[i].ssid);
+        last = wifiEnsureConnected(profiles[i].ssid,
+                                   profiles[i].password, 10000u);
         if (last == WIFI_CONN_OK || last == WIFI_ALREADY_ON_SSID) {
             return last;
         }
     }
 
     return last;
+}
+
+static void provWifiConnectTask(void *)
+{
+    s_prov_connect_result = connectSavedWifiLight();
+    s_prov_connect_done = true;
+    s_prov_connect_running = false;
+    vTaskDelete(nullptr);
 }
 
 static void initSystem()
@@ -590,6 +604,33 @@ static void pollProvisioningStart()
         s_next_provision_wifi_attempt_ms = 0u;
     }
 
+    if (s_prov_connect_done) {
+        if (s_prov_connect_running) {
+            return; // wait one tick for worker task to finish exiting
+        }
+        s_prov_connect_done = false;
+        const WifiConnResult result = s_prov_connect_result;
+        if (result == WIFI_CONN_OK || result == WIFI_ALREADY_ON_SSID || nrlWifiStaConnected()) {
+            ESP_LOGI(TAG, "provisioning: WiFi connected, stopping BLE before full app start");
+            BLEConfig_ReportWifiResult(true);
+            // Give the final GOT_IP notification one connection interval to leave
+            // the controller before deinitializing BLE for the full application.
+            vTaskDelay(pdMS_TO_TICKS(300));
+            BLEConfig_Stop();
+            initFullApp();
+            return;
+        }
+        BLEConfig_ReportWifiResult(false);
+        s_next_provision_wifi_attempt_ms = nowMsApp() + 30000u;
+        ESP_LOGW(TAG, "provisioning: WiFi connect failed (%u), retrying later",
+                 static_cast<unsigned>(result));
+        return;
+    }
+
+    if (s_prov_connect_running) {
+        return;
+    }
+
     if (nrlExternalNetworkConnected()) {
         ESP_LOGI(TAG, "provisioning complete: external network online, stopping BLE before full app start");
         BLEConfig_Stop();
@@ -608,22 +649,15 @@ static void pollProvisioningStart()
     }
 
     ESP_LOGI(TAG, "provisioning: saved WiFi found, connecting before full app start");
-    const WifiConnResult result = connectSavedWifiLight();
-    if (result == WIFI_CONN_OK || result == WIFI_ALREADY_ON_SSID || nrlWifiStaConnected()) {
-        ESP_LOGI(TAG, "provisioning: WiFi connected, stopping BLE before full app start");
-        BLEConfig_ReportWifiResult(true);
-        // Give the final GOT_IP notification one connection interval to leave
-        // the controller before deinitializing BLE for the full application.
-        vTaskDelay(pdMS_TO_TICKS(300));
-        BLEConfig_Stop();
-        initFullApp();
-        return;
+    s_prov_connect_running = true;
+    s_prov_connect_done = false;
+    if (xTaskCreatePinnedToCore(provWifiConnectTask, "prov_wifi", 4096, nullptr, 3,
+                                nullptr, 0) != pdPASS) {
+        // Fallback inline if heap cannot spawn the temporary worker.
+        s_prov_connect_result = connectSavedWifiLight();
+        s_prov_connect_running = false;
+        s_prov_connect_done = true;
     }
-
-    BLEConfig_ReportWifiResult(false);
-    s_next_provision_wifi_attempt_ms = nowMsApp() + 30000u;
-    ESP_LOGW(TAG, "provisioning: WiFi connect failed (%u), retrying later",
-             static_cast<unsigned>(result));
 }
 
 static void mainLoopTask(void *)

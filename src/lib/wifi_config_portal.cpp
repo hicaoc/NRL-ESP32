@@ -323,6 +323,7 @@ bool s_server_started = false;
 bool s_dns_started = false;
 bool s_ap_started = false;
 bool s_ap_should_run = true;
+volatile bool s_fallback_requested = false;
 // Backs off AP/WiFi-stack bring-up retries: a failed esp_wifi_init is almost
 // always low internal RAM, and hammering it every poll only floods the log.
 unsigned long s_ap_retry_at_ms = 0UL;
@@ -452,6 +453,19 @@ static void performWifiPrescan()
 
 static void ensureApRunning()
 {
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    if (cfg != nullptr && !cfg->wifi_enabled) {
+        if (s_dns_started) {
+            NRL_CaptiveDNS_Stop();
+            s_dns_started = false;
+        }
+        if (s_ap_started) {
+            nrlWifiApStop();
+            s_ap_started = false;
+        }
+        return;
+    }
+
     // The radio can be stopped externally (WiFi master switch off ->
     // nrlWifiStopRadio) without going through shutdownDnsAndAp(), leaving
     // s_ap_started stale-true so the AP would never restart. Resync our
@@ -526,6 +540,16 @@ static void shutdownDnsAndAp()
 
 static void manageApLifecycle()
 {
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    if (cfg != nullptr && !cfg->wifi_enabled) {
+        s_sta_disconnect_started_ms = 0UL;
+        s_ap_close_scheduled = false;
+        if (s_ap_started || s_dns_started) {
+            shutdownDnsAndAp();
+        }
+        return;
+    }
+
     const bool sta_connected = nrlNetworkConnected();
     const unsigned long now = nowMsCfg();
 
@@ -897,20 +921,23 @@ static void logChangedFields(const ExternalRadioConfig *before,
                                     (c->adc_scale & 0x07u));
     };
     auto reg18 = [](const ExternalRadioConfig *c) -> uint8_t {
-        return static_cast<uint8_t>((c->alc_enabled ? 0x80u : 0u) |
-                                    (c->adc_automute_enabled ? 0x40u : 0u) |
-                                    (c->alc_winsize & 0x0fu));
+        return static_cast<uint8_t>((c->alc_enabled ? (0x80u | (c->alc_winsize & 0x0fu)) : 0u) |
+                                    (c->adc_automute_enabled ? 0x40u : 0u));
     };
     auto reg19 = [](const ExternalRadioConfig *c) -> uint8_t {
-        return static_cast<uint8_t>(((c->alc_maxlevel & 0x0fu) << 4) |
-                                    (c->alc_minlevel & 0x0fu));
+        return c->alc_enabled ? static_cast<uint8_t>(((c->alc_maxlevel & 0x0fu) << 4) |
+                                                     (c->alc_minlevel & 0x0fu))
+                              : 0x00u;
     };
     auto reg1a = [](const ExternalRadioConfig *c) -> uint8_t {
-        return static_cast<uint8_t>(((c->adc_automute_winsize & 0x0fu) << 4) |
-                                    (c->adc_automute_noise_gate & 0x0fu));
+        return c->adc_automute_enabled
+                   ? static_cast<uint8_t>(((c->adc_automute_winsize & 0x0fu) << 4) |
+                                          (c->adc_automute_noise_gate & 0x0fu))
+                   : 0x00u;
     };
     auto reg1b = [](const ExternalRadioConfig *c) -> uint8_t {
-        return static_cast<uint8_t>(((c->adc_automute_volume & 0x07u) << 5) |
+        const uint8_t am_vol = c->adc_automute_enabled ? (c->adc_automute_volume & 0x07u) : 0x00u;
+        return static_cast<uint8_t>((am_vol << 5) |
                                     (c->adc_hpfs1 & 0x1fu));
     };
     auto reg1c = [](const ExternalRadioConfig *c) -> uint8_t {
@@ -919,12 +946,13 @@ static void logChangedFields(const ExternalRadioConfig *before,
                                     (c->adc_hpfs2 & 0x1fu));
     };
     auto reg34 = [](const ExternalRadioConfig *c) -> uint8_t {
-        return static_cast<uint8_t>((c->drc_enabled ? 0x80u : 0u) |
-                                    (c->drc_winsize & 0x0fu));
+        return c->drc_enabled ? static_cast<uint8_t>(0x80u | (c->drc_winsize & 0x0fu))
+                              : 0x00u;
     };
     auto reg35 = [](const ExternalRadioConfig *c) -> uint8_t {
-        return static_cast<uint8_t>(((c->drc_maxlevel & 0x0fu) << 4) |
-                                    (c->drc_minlevel & 0x0fu));
+        return c->drc_enabled ? static_cast<uint8_t>(((c->drc_maxlevel & 0x0fu) << 4) |
+                                                     (c->drc_minlevel & 0x0fu))
+                              : 0x00u;
     };
     auto reg37 = [](const ExternalRadioConfig *c) -> uint8_t {
         return static_cast<uint8_t>(((c->dac_ramprate & 0x0fu) << 4) |
@@ -3239,46 +3267,10 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
     if (ok && config != nullptr && have_snapshot) {
         logChangedFields(&before_snapshot, config);
-#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
-        ES8311_ApplyAudioConfig(config->mic_volume,
-                                config->line_out_volume,
-                                config->hp_drive_enabled,
-                                config->drc_enabled,
-                                config->drc_winsize,
-                                config->drc_maxlevel,
-                                config->drc_minlevel,
-                                config->dac_ramprate,
-                                config->dac_eq_bypass,
-                                config->daceq_b0,
-                                config->daceq_b1,
-                                config->daceq_a1,
-                                config->adc_dmic_enabled,
-                                config->adc_linsel,
-                                config->adc_pga_gain,
-                                config->adc_ramprate,
-                                config->adc_dmic_sense,
-                                config->adc_sync,
-                                config->adc_inv,
-                                config->adc_ramclr,
-                                config->adc_scale,
-                                config->alc_enabled,
-                                config->adc_automute_enabled,
-                                config->alc_winsize,
-                                config->alc_maxlevel,
-                                config->alc_minlevel,
-                                config->adc_automute_winsize,
-                                config->adc_automute_noise_gate,
-                                config->adc_automute_volume,
-                                config->adc_hpfs1,
-                                config->adc_eq_bypass,
-                                config->adc_hpf,
-                                config->adc_hpfs2,
-                                config->adceq_b0,
-                                config->adceq_a1,
-                                config->adceq_a2,
-                                config->adceq_b1,
-                                config->adceq_b2);
-#endif
+        // Every ES8311-backed EXTERNAL_RADIO_Set* / ResetAudioConfig setter
+        // above already pushed its updated state via applyAudioConfigToCodec().
+        // Avoid a redundant full register rewrite right after the NVS flash
+        // commit (and avoid touching the codec on unrelated /save_nrl forms).
         const bool restart_udp = strcmp(before_snapshot.server_host, config->server_host) != 0 ||
                                  before_snapshot.server_port != config->server_port;
         if (restart_udp) {
@@ -4443,6 +4435,23 @@ bool WifiConfigPortal_Init(void)
 
 void WifiConfigPortal_Poll(void)
 {
+    if (s_fallback_requested) {
+        s_fallback_requested = false;
+        const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+        if (cfg == nullptr || cfg->wifi_enabled) {
+            s_ap_should_run = true;
+            s_sta_was_connected = false;
+            s_ap_close_scheduled = false;
+            s_sta_disconnect_started_ms = 0UL;
+            ensureApRunning();
+            ensureDnsRunning();
+            ensureServerRunning();
+            char ip_buf[16] = {};
+            nrlIpToString(nrlWifiApIp(), ip_buf, sizeof(ip_buf));
+            ESP_LOGI(TAG, "Fallback config AP active: ssid=%s ip=%s",
+                     buildApSsid().c_str(), ip_buf);
+        }
+    }
     ensureApRunning();
     ensureDnsRunning();
     ensureServerRunning();
@@ -4461,15 +4470,7 @@ void WifiConfigPortal_Poll(void)
 
 void WifiConfigPortal_EnterFallbackMode(void)
 {
-    s_ap_should_run = true;
-    s_sta_was_connected = false;
-    s_ap_close_scheduled = false;
-    s_sta_disconnect_started_ms = 0UL;
-    ensureApRunning();
-    ensureDnsRunning();
-    ensureServerRunning();
-    char ip_buf[16] = {};
-    nrlIpToString(nrlWifiApIp(), ip_buf, sizeof(ip_buf));
-    ESP_LOGI(TAG, "Fallback config AP active: ssid=%s ip=%s",
-             buildApSsid().c_str(), ip_buf);
+    // Hand off to WifiConfigPortal_Poll() on nrl_main_loop so AP/DNS state is
+    // only mutated from its owning task (avoids cross-task races with bridgeTask).
+    s_fallback_requested = true;
 }
